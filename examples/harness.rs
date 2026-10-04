@@ -51,10 +51,12 @@ enum Verdict {
     BadMesh,
     Crash,
     Timeout,
+    /// Killed at `--memory-gb` (off by default: the harness measures peaks).
+    MemoryCap,
 }
 
 impl Verdict {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Pass,
         Self::Wireframe,
         Self::Degraded,
@@ -63,6 +65,7 @@ impl Verdict {
         Self::BadMesh,
         Self::Crash,
         Self::Timeout,
+        Self::MemoryCap,
     ];
 
     fn name(self) -> &'static str {
@@ -75,6 +78,7 @@ impl Verdict {
             Self::BadMesh => "bad-mesh",
             Self::Crash => "crash",
             Self::Timeout => "timeout",
+            Self::MemoryCap => "memory-cap",
         }
     }
 }
@@ -93,6 +97,7 @@ struct Args {
     timeout: Duration,
     deflection: Deflection,
     cold_start: Option<usize>,
+    memory: Option<u64>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -101,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
         timeout: Duration::from_secs(60),
         deflection: Deflection::PREVIEW,
         cold_start: None,
+        memory: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -118,6 +124,12 @@ fn parse_args() -> Result<Args, String> {
                     "thumbnail" => Deflection::THUMBNAIL,
                     q => return Err(format!("--quality: unknown {q:?}")),
                 }
+            }
+            "--memory-gb" => {
+                let gb: f64 = value("--memory-gb")?
+                    .parse()
+                    .map_err(|e| format!("--memory-gb: {e}"))?;
+                a.memory = Some((gb * f64::from(1u32 << 30)) as u64);
             }
             "--cold-start" => {
                 a.cold_start = Some(
@@ -171,10 +183,15 @@ fn source_of(path: &Path) -> String {
 
 fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Result<Record> {
     let _ = std::fs::remove_file(mesh);
-    let run = occt::run(kernel, path, args.deflection, args.timeout, Some(mesh))?;
+    let limits = occt::Limits {
+        timeout: args.timeout,
+        memory: args.memory,
+    };
+    let run = occt::run(kernel, path, args.deflection, limits, Some(mesh))?;
     let mut note = run.summary.as_ref().and_then(|s| s.error.clone());
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,
+        Outcome::MemoryCap => Verdict::MemoryCap,
         Outcome::Crashed { signal, code } => {
             note = Some(format!("signal {signal:?}, exit {code:?}"));
             Verdict::Crash
@@ -304,10 +321,10 @@ fn report(records: &[Record]) -> String {
     let _ = writeln!(
         out,
         "| Source | Files | Pass | Wireframe | Degraded | Partial | Clean fail | Bad mesh | \
-         Crash | Timeout | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | \
+         Crash | Timeout | Memory cap | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | \
          Max RSS MB |"
     );
-    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(15));
+    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(16));
     let mut row = |name: &str, rs: &[&Record]| {
         let count = |v| rs.iter().filter(|r| r.verdict == v).count();
         let passed: Vec<_> = rs.iter().filter(|r| r.verdict == Verdict::Pass).collect();
@@ -336,7 +353,7 @@ fn report(records: &[Record]) -> String {
         let c = Verdict::ALL.map(count);
         let _ = writeln!(
             out,
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
             rs.len(),
             c[0],
             c[1],
@@ -346,6 +363,7 @@ fn report(records: &[Record]) -> String {
             c[5],
             c[6],
             c[7],
+            c[8],
             pct(c[0] + c[1], rs.len()),
             pct(named, parts),
             pct(colored, parts),

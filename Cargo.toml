@@ -32,7 +32,7 @@ path = "src/main.rs"
 # traps because the standalone WASI build has no filesystem. See plan.md §5
 # "S1 result" before re-adding it.
 
-# The kernel's JSON summary (and, from S2, `--info`).
+# The kernel's JSON summary, `--info`, and glTF's JSON chunk.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -40,7 +40,16 @@ serde_json = "1"
 # cxad uses for its node store, so a future shared cache needs no migration.
 blake3 = "1"
 
+# PNG encoding for `--png` (the rasteriser itself is src/render.rs).
+png = "0.18"
+
+# proc_pid_rusage: the macOS half of the kernel memory cap (src/occt.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+# Validates `--glb` output against the glTF 2.0 schema in tests.
+gltf = "1"
 
 [profile.release]
 # A previewer is latency-bound, not throughput-bound: `lto = "thin"` is the
