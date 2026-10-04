@@ -190,7 +190,12 @@
           # Generated CAD test data (kernel/fixture-gen): byte-for-byte what
           # OCCT writes, so the whitespace fixers must not "correct" it, or
           # every `just test-data` would re-dirty the tree.
-          hooksExcludes = [ "^tests/data/" ];
+          # The licence texts in licenses/ are verbatim upstream copies: a
+          # whitespace "fix" would make them no longer the licence.
+          hooksExcludes = [
+            "^tests/data/"
+            "^licenses/"
+          ];
 
           tools = [
             "nextest"
@@ -231,13 +236,18 @@
                   meta.description = "STEP/IGES/BREP previews and thumbnails: the CLI plus its OCCT kernel";
                 }
                 ''
-                  mkdir -p $out/bin $out/libexec/stepv
-                  cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
-                  cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
-                  # Linux desktop integration (S4): harmless elsewhere.
-                  install -Dm644 ${./packaging/linux/stepv.thumbnailer} $out/share/thumbnailers/stepv.thumbnailer
-                  install -Dm644 ${./packaging/linux/stepv-mime.xml} $out/share/mime/packages/stepv.xml
-                  install -Dm644 ${./packaging/linux/stepv.desktop} $out/share/applications/stepv.desktop
+                    mkdir -p $out/bin $out/libexec/stepv
+                    cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
+                    cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
+                    # Linux desktop integration (S4): harmless elsewhere.
+                    install -Dm644 ${./packaging/linux/stepv.thumbnailer} $out/share/thumbnailers/stepv.thumbnailer
+                    install -Dm644 ${./packaging/linux/stepv-mime.xml} $out/share/mime/packages/stepv.xml
+                    install -Dm644 ${./packaging/linux/stepv.desktop} $out/share/applications/stepv.desktop
+                  # Licence obligations travel with the binary (NOTICE; OCCT's LGPL + exception).
+                  install -Dm644 ${./NOTICE} $out/share/doc/stepv/NOTICE
+                  install -Dm644 ${./LICENSE} $out/share/doc/stepv/LICENSE
+                  install -Dm644 ${./licenses/OCCT-LGPL-2.1.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-2.1.txt
+                  install -Dm644 ${./licenses/OCCT-LGPL-EXCEPTION-1.0.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-EXCEPTION-1.0.txt
                 '';
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

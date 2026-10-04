@@ -67,6 +67,27 @@ jobs:
       - name: CLI contract sweep
         run: nix develop --command just cli-sweep tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
 
+      - name: macOS app (Quick Look extensions) and its headless checks
+        if: runner.os == 'macOS'
+        # The Quick Look round trip (--quicklook) needs a logged-in session to
+        # register extensions; it runs locally via `just macos-test --quicklook`.
+        run: nix develop --command just macos-test
+
+      - name: Linux AppImage (the release artefact) and a smoke test of it
+        if: runner.os == 'Linux'
+        # The whole closure, OCCT included, in one file that runs on any
+        # Linux: what release-extension.yml publishes. Proven here on every PR.
+        # APPIMAGE_EXTRACT_AND_RUN: runners have no FUSE.
+        run: |
+          nix bundle --bundler github:ralismark/nix-appimage/7946addbc0d97e358a6d7aefe5e82310f0fe6b18 \
+            .#default -o stepv.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          ./stepv.AppImage --version
+          ./stepv.AppImage tests/data/assembly.step --png "$RUNNER_TEMP/a.png" --no-cache
+          ./stepv.AppImage tests/data/sketch.step --png "$RUNNER_TEMP/s.png" --no-cache
+          test -s "$RUNNER_TEMP/a.png" && test -s "$RUNNER_TEMP/s.png"
+          ls -la stepv.AppImage
+
       - name: Linux desktop integration
         if: runner.os == 'Linux'
         run: |

@@ -8,6 +8,24 @@ repository = "https://github.com/vig-os/stepv"
 homepage = "https://github.com/vig-os/stepv"
 license = "Apache-2.0"
 keywords = ["cad", "step", "opencascade", "quicklook", "thumbnail"]
+readme = "README.md"
+# What crates.io gets: the CLI and library, the kernel's C++ sources (you build
+# the kernel against your own OCCT: cmake -S kernel -B build), the Linux desktop
+# files for packagers, the committed test corpus, and the licence texts. Not
+# the devkit scaffolding, the macOS app sources, or the C ABI crate.
+include = [
+  "/src",
+  "/kernel",
+  "/packaging/linux",
+  "/tests/cli.rs",
+  "/tests/data",
+  "/examples/harness.rs",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/licenses",
+]
 categories = ["command-line-utilities", "graphics"]
 
 # The library + CLI crate. plan.md §"Crate layout" deferred any split until a

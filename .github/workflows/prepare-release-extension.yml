@@ -31,23 +31,45 @@ permissions:
   contents: read
 
 jobs:
-  extension:
-    name: Prepare Extension Hook (Default No-op)
+  # stepv: put the release version into the crate manifests and the lockfile
+  # on the release branch. devkit's prepare step freezes CHANGELOG.md but does
+  # not know about Cargo.toml; without this every release would ship 0.0.0.
+  bump-version:
+    name: Bump crate versions
     runs-on: ubuntu-26.04
     steps:
-      - name: Default extension summary
+      - name: Generate Commit App Token
+        id: token
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3
+        with:
+          client-id: ${{ secrets.COMMIT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.COMMIT_APP_PRIVATE_KEY }}
+
+      - name: Checkout the release branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.release_branch }}
+          persist-credentials: false
+
+      - name: Set the version
         env:
           VERSION: ${{ inputs.version }}
-          RELEASE_BRANCH: ${{ inputs.release_branch }}
-          BRANCH_SHA: ${{ inputs.branch_sha }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          echo "No prepare-release extension configured."
-          echo "Version: $VERSION"
-          echo "Release branch: $RELEASE_BRANCH"
-          echo "Branch head SHA: $BRANCH_SHA"
-          echo "Dry-run: $DRY_RUN"
-          echo "Replace this file to prepare the release branch before the PR"
-          echo "opens (e.g. rebuild + commit a generated artifact). A real"
-          echo "extension must honor dry-run (no writes) and may push to"
-          echo "$RELEASE_BRANCH via the COMMIT_APP token (secrets: inherit)."
+          python3 scripts/set-version.py "$VERSION"
+          git diff --stat
+
+      - name: Commit the version to the release branch via API
+        if: ${{ !inputs.dry_run }}
+        uses: vig-os/commit-action@7ba7e1ae17547813e708d4cc6a771a09f978f724  # v0.3.3
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_BRANCH: refs/heads/${{ inputs.release_branch }}
+          MAX_ATTEMPTS: "3"
+          COMMIT_MESSAGE: |-
+            chore(release): set crate versions to ${{ inputs.version }}
+
+            stepv's prepare-release extension: Cargo.toml, capi/Cargo.toml and
+            Cargo.lock, which devkit's changelog freeze does not cover.
+          FILE_PATHS: Cargo.toml capi/Cargo.toml Cargo.lock
