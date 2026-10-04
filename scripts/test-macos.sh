@@ -8,10 +8,14 @@
 #      the preview's own camera, and is not blank; the assembly shows its
 #      per-face colours, and the sketch (a circle in z = 0) is seen face-on,
 #      so it renders round, not as an edge-on line (#20).
-#   3. With --quicklook and stepv.app installed in /Applications: Quick Look
+#   3. The app bundle is contained (#18): each extension is App-Sandboxed
+#      with read-only access to the file it is given and nothing else, and
+#      the bundled CLI's kernel runs under its sandbox profile.
+#   4. With --quicklook and stepv.app installed in /Applications: Quick Look
 #      itself produces a thumbnail for every format, through our extension.
 #
-# Needs: target/release/stepv + target/kernel (just macos-app builds both).
+# Needs: target/release/stepv + target/kernel + target/macos/stepv.app
+# (just macos-app builds all three).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
@@ -80,6 +84,18 @@ if sys.argv[2] == "assembly.step":
 PY
   echo "ok: $f — $got"
 done
+
+app="$root/target/macos/stepv.app"
+for x in "$app"/Contents/PlugIns/*.appex; do
+  ents=$(codesign -d --entitlements - --xml "$x" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')
+  [ "$ents" = '{"com.apple.security.app-sandbox": true, "com.apple.security.files.user-selected.read-only": true}' ] \
+    || fail "$(basename "$x"): entitlements must be exactly app-sandbox + read-only files, got $ents"
+done
+report=$("$app/Contents/MacOS/stepv" "$root/tests/data/assembly.step" --png "$tmp/bundled.png" --no-cache)
+sandbox=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["kernel"]["sandbox"])' "$report")
+[ "$sandbox" = macos-profile ] || fail "the bundled kernel ran in sandbox '$sandbox'"
+echo "ok: extensions minimally entitled; the bundled kernel runs sandboxed"
 
 if [ "${1:-}" = "--quicklook" ]; then
   [ -d /Applications/stepv.app ] || fail "--quicklook needs /Applications/stepv.app"

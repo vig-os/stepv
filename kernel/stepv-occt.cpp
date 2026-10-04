@@ -2,6 +2,7 @@
 // work is in stepv-occt-core.cpp; this is argument parsing and the stdout
 // contract (one JSON line; OCCT's own chatter goes to stderr).
 
+#include "sandbox.h"
 #include "stepv_occt.h"
 
 #include <arpa/inet.h>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +25,12 @@ constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 const char* const kUsage =
     "usage: stepv-occt <input> [--mesh <out>] [--linear-rel <f>] [--angular-deg <f>]\n";
+
+// realpath(), or "" when it does not resolve.
+std::string canonical(const std::string& p) {
+    char r[PATH_MAX];
+    return realpath(p.c_str(), r) ? r : "";
+}
 
 // Test hook for the sandbox (tests/sandbox.rs, #18). `spec` is one action,
 // tried from inside the sandbox; the outcome goes to stderr as
@@ -130,6 +138,28 @@ int main(int argc, char** argv) {
         std::free(const_cast<char*>(p));
     }
 
+    // Into the sandbox before the input is opened: from here on, what a
+    // hostile file can make this process do is bounded (sandbox.h). The mesh
+    // is created now, so the sandbox can grant that one file and no right to
+    // create any. An input that does not resolve gets no read access at all;
+    // the kernel then fails on it as it would anyway.
+    //
+    // Both paths are resolved here, outside it: inside, realpath() of a
+    // relative path cannot read the working directory's ancestry (macOS).
+    const std::string input_path = canonical(input);
+    const auto slash = input_path.rfind('/');
+    const std::string input_dir = slash == std::string::npos ? ""
+                                  : slash == 0               ? "/"
+                                                             : input_path.substr(0, slash);
+    if (!mesh_out.empty()) {
+        const int fd = open(mesh_out.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd >= 0) close(fd);
+        if (const std::string m = canonical(mesh_out); !m.empty()) mesh_out = m;
+    }
+    const std::string sandbox = stepv::enter_sandbox(input_dir, mesh_out);
+    // Unresolvable: the core reports it, in its own words.
+    if (!input_path.empty()) input = input_path;
+
     if (const char* e = std::getenv("STEPV_OCCT_TEST_ESCAPE")) escape_attempt(e);
 
     // The JSON summary is the contract on stdout, and OCCT's readers print
@@ -143,8 +173,12 @@ int main(int argc, char** argv) {
     char* json = stepv_occt_run(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
                                 linear_rel, angular_deg, &code);
     if (!json) return 3;
-    const std::string line = std::string(json) + "\n";
+    // The summary says which sandbox the run was in.
+    std::string line = json;
     stepv_occt_free(json);
+    if (!line.empty() && line[0] == '{')
+        line.insert(1, "\"sandbox\":\"" + sandbox + "\"" + (line.size() > 2 ? "," : ""));
+    line += "\n";
     if (write(json_fd, line.data(), line.size()) < 0) return 3;
     return code;
 }

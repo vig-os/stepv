@@ -311,6 +311,18 @@ a cheaper pass than a full transfer, which makes it an S2 design question.
 **Hard limits in the CLI, not the extension.** Wall-clock timeout (default 20 s) and a memory cap,
 with a non-zero exit. A Quick Look extension that hangs is a worse bug than one that shows an icon.
 
+**The kernel CLI sandboxes itself (#18).** The input is untrusted, and a memory-corruption bug in
+OCCT's readers would run the attacker's code with the kernel's rights. Before it opens the input,
+`stepv-occt` confines itself to what a run needs: reading the input's directory and below
+(multi-file assemblies resolve their external references there), and writing the one mesh file,
+which it creates first so that no right to create files is needed. The sandbox is
+`kernel/sandbox.cpp`: Landlock plus a seccomp deny list (sockets, exec, any clone without
+`CLONE_THREAD`, ptrace, namespaces, io_uring) on Linux, and a deny-by-default Seatbelt profile on
+macOS. It lives in the kernel rather than the CLI, so that every caller gets it: the thumbnailers,
+KDE, and the harness. The summary reports it (`"sandbox"`). An OS that can provide only part of it
+gets a warning, not a silent pass. In-process, `libstepvocct` is left alone: the App Sandbox is
+already the boundary there.
+
 **macOS note that will otherwise cost a day:** SceneKit and Model I/O **cannot read glTF**. Either
 emit USDZ (Quick Look renders it natively and the thumbnail comes free) or hand raw buffers across
 FFI into `SCNGeometrySource`. For a preview, raw buffers are less machinery — which is why `Mesh` in
@@ -629,6 +641,26 @@ macOS; the third needs a logged-in session.
 
 What only a human can do is listed in §7 "Owed".
 
+### Sandbox (#18): done
+
+The tests came first (`tests/sandbox.rs`). The kernel hook `STEPV_OCCT_TEST_ESCAPE` tries one
+forbidden action from inside the sandbox: a TCP connect, a UDP datagram, exec, a write outside the
+mesh, or a read outside the input's directory. The tests assert that the action is refused and has
+no effect, that the input's directory stays readable, and that the run still produces its mesh.
+Against the unsandboxed kernel, all seven refusal tests failed. With the sandbox:
+
+- **macOS** (Seatbelt): every action is refused (EPERM). `harness --strict` is unchanged at 99.5%
+  (388/391), cli-sweep is clean, and `s1-c5-214` still loads all 11 parts from its 12 sibling
+  files. `scripts/test-macos.sh` also holds both extensions to exactly app-sandbox + read-only
+  files, and checks that the bundled CLI's kernel runs sandboxed.
+- **Linux 7.0** (Landlock ABI 6 + seccomp, run with `scripts/test-linux-sandbox.sh` in a Debian
+  container with OCCT 7.8.1): network and exec are refused by seccomp (EPERM), files by Landlock
+  (EACCES). Over the whole corpus, every file gives the same summary and byte-identical meshes
+  with and without the sandbox.
+- **Found on the way (#22):** an early version broke relative input paths, every file then failed
+  cleanly, and `harness --strict` still exited 0. `--min-pass` now puts a floor under the pass
+  rate, and CI uses it.
+
 ---
 
 ### Work queue (ordered, 2026-10-04)
@@ -669,6 +701,10 @@ toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the 
   applies OCCT's default shape processing during transfer.
 - ~~**Perforated-face meshing.**~~ Decided in S3: the limits contain it, with no automatic coarser
   retry.
+- **Sandbox read scope (#18, #19).** The kernel may read the input's directory and below. An
+  external reference that points *above* it (`../parts/x.stp`) is refused and shows as missing.
+  Widening that would mean trusting more of the disk to a hostile file. Quick Look is narrower
+  still: it grants the one file, which is why multi-file assemblies are blank there (#19).
 - **macOS containment.** In-process, the extension cannot cap one file's time or memory itself.
   It relies on the system killing a hung or ballooning extension. If that proves too coarse in
   practice, the next step is an XPC service inside the `.appex`: launchd may start one where exec

@@ -200,6 +200,21 @@ fn glb_is_valid_and_keeps_part_names() {
 }
 
 #[test]
+fn the_kernel_runs_sandboxed() {
+    let t = Scratch::new("sandbox");
+    let png = t.path("a.png");
+    let (code, j, out) = stepv(&[s(&data("assembly.step")), "--png", s(&png)], &t.0);
+    assert_eq!(code, 0, "{j}");
+    let expected = if cfg!(target_os = "macos") {
+        "macos-profile"
+    } else {
+        "landlock+seccomp"
+    };
+    assert_eq!(j["kernel"]["sandbox"], expected, "{j}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("warning"));
+}
+
+#[test]
 fn mesh_output_decodes_and_carries_face_colours() {
     if !kernel_available() {
         return;

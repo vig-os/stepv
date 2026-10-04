@@ -72,7 +72,11 @@ impl KernelRun {
 
     /// The sandbox must not cost the kernel its actual job.
     fn assert_did_the_work(&self, b: &Layout) {
-        assert_eq!(self.code, 0, "summary {}\nstderr:\n{}", self.summary, self.stderr);
+        assert_eq!(
+            self.code, 0,
+            "summary {}\nstderr:\n{}",
+            self.summary, self.stderr
+        );
         assert_eq!(self.summary["ok"], true, "{}", self.summary);
         let mesh = std::fs::metadata(b.path("out/assembly.msh")).expect("mesh written");
         assert!(mesh.len() > 0);
@@ -129,10 +133,15 @@ fn refuses_tcp_connections() {
     let b = Layout::new("tcp");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let Some(r) = kernel(&b, Some(&format!("connect:{addr}"))) else { return };
+    let Some(r) = kernel(&b, Some(&format!("connect:{addr}"))) else {
+        return;
+    };
     r.assert_refused("connect");
     listener.set_nonblocking(true).unwrap();
-    assert!(listener.accept().is_err(), "the kernel reached the listener");
+    assert!(
+        listener.accept().is_err(),
+        "the kernel reached the listener"
+    );
     r.assert_did_the_work(&b);
 }
 
@@ -141,7 +150,9 @@ fn refuses_udp_datagrams() {
     let b = Layout::new("udp");
     let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     let addr = sock.local_addr().unwrap();
-    let Some(r) = kernel(&b, Some(&format!("udp:{addr}"))) else { return };
+    let Some(r) = kernel(&b, Some(&format!("udp:{addr}"))) else {
+        return;
+    };
     r.assert_refused("udp");
     sock.set_nonblocking(true).unwrap();
     assert!(sock.recv(&mut [0; 8]).is_err(), "a datagram got out");
@@ -151,7 +162,9 @@ fn refuses_udp_datagrams() {
 #[test]
 fn refuses_exec() {
     let b = Layout::new("exec");
-    let Some(r) = kernel(&b, Some("exec:/bin/sh")) else { return };
+    let Some(r) = kernel(&b, Some("exec:/bin/sh")) else {
+        return;
+    };
     r.assert_refused("exec");
     r.assert_did_the_work(&b);
 }
@@ -161,7 +174,9 @@ fn refuses_writes_outside_the_output_file() {
     for target in ["elsewhere/probe", "out/beside-the-mesh", "in/planted.step"] {
         let b = Layout::new("write");
         let p = b.path(target);
-        let Some(r) = kernel(&b, Some(&format!("write:{}", s(&p)))) else { return };
+        let Some(r) = kernel(&b, Some(&format!("write:{}", s(&p)))) else {
+            return;
+        };
         r.assert_refused("write");
         assert!(!p.exists(), "{target} was created");
         r.assert_did_the_work(&b);
@@ -172,7 +187,9 @@ fn refuses_writes_outside_the_output_file() {
 fn refuses_overwriting_existing_files() {
     let b = Layout::new("overwrite");
     let canary = b.path("elsewhere/canary");
-    let Some(r) = kernel(&b, Some(&format!("write:{}", s(&canary)))) else { return };
+    let Some(r) = kernel(&b, Some(&format!("write:{}", s(&canary)))) else {
+        return;
+    };
     r.assert_refused("write");
     assert_eq!(std::fs::read_to_string(&canary).unwrap(), "secret\n");
 }
@@ -181,7 +198,9 @@ fn refuses_overwriting_existing_files() {
 fn refuses_reads_outside_the_input_directory() {
     let b = Layout::new("read");
     let canary = b.path("elsewhere/canary");
-    let Some(r) = kernel(&b, Some(&format!("read:{}", s(&canary)))) else { return };
+    let Some(r) = kernel(&b, Some(&format!("read:{}", s(&canary)))) else {
+        return;
+    };
     r.assert_refused("read");
     r.assert_did_the_work(&b);
 }
@@ -193,7 +212,9 @@ fn allows_the_input_directory_and_below() {
     for target in ["in/sibling.step", "in/sub/nested.step"] {
         let b = Layout::new("siblings");
         let p = b.path(target);
-        let Some(r) = kernel(&b, Some(&format!("read:{}", s(&p)))) else { return };
+        let Some(r) = kernel(&b, Some(&format!("read:{}", s(&p)))) else {
+            return;
+        };
         assert_eq!(r.escape("read"), Some(true), "{target}: {}", r.stderr);
         r.assert_did_the_work(&b);
     }

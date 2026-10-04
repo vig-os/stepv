@@ -66,6 +66,22 @@ pub struct Summary {
     pub t_mesh_ms: f64,
     pub t_extract_ms: f64,
     pub peak_rss_bytes: u64,
+    /// The sandbox the kernel ran in (#18): `landlock+seccomp` (Linux) or
+    /// `macos-profile` when complete; `landlock`, `seccomp` or `none` when the
+    /// OS could not provide all of it. Absent from kernels that predate it.
+    #[serde(default)]
+    pub sandbox: Option<String>,
+}
+
+impl Summary {
+    /// Whether the kernel ran fully sandboxed.
+    #[must_use]
+    pub fn sandboxed(&self) -> bool {
+        matches!(
+            self.sandbox.as_deref(),
+            Some("landlock+seccomp" | "macos-profile")
+        )
+    }
 }
 
 /// How a kernel run ended.

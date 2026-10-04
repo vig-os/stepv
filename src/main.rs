@@ -331,8 +331,16 @@ fn tessellate(
         "stage": s.stage, "error": s.error, "parts": s.parts, "faces": s.faces,
         "triangles": s.triangles, "segments": s.segments, "bbox": s.bbox,
         "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
-        "peak_rss_bytes": s.peak_rss_bytes,
+        "peak_rss_bytes": s.peak_rss_bytes, "sandbox": s.sandbox,
     })));
+    // Loudly: the run worked, but less contained than it should have been.
+    if let Some(s) = run.summary.as_ref().filter(|s| !s.sandboxed()) {
+        eprintln!(
+            "stepv: warning: the kernel ran without its full sandbox ({}): this OS \
+             lacks Landlock or seccomp, or refused the sandbox profile",
+            s.sandbox.as_deref().unwrap_or("kernel predates sandboxing")
+        );
+    }
     report["wall_ms"] = json!((run.wall.as_secs_f64() * 1e3).round());
 
     let outcome = match run.outcome {

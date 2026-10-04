@@ -3,8 +3,9 @@
 <plist version="1.0">
 <dict>
 	<!-- Quick Look extensions must be sandboxed. Quick Look grants read
-	     access to the file being previewed; the bundled CLI and kernel run
-	     as children and inherit the sandbox. -->
+	     access to the file being previewed; the kernel runs in-process
+	     (libstepvocct), inside this sandbox. Nothing more: no network, no
+	     writes. scripts/test-macos.sh holds these to exactly this. -->
 	<key>com.apple.security.app-sandbox</key><true/>
 	<key>com.apple.security.files.user-selected.read-only</key><true/>
 </dict>
