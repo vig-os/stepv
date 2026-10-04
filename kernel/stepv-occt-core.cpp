@@ -1,11 +1,16 @@
-// stepv-occt — the Plan B kernel (plan.md §3): native OCCT, run as a
-// subprocess by the Rust side.
+// stepv-occt core — the Plan B kernel (plan.md §3): native OCCT.
 //
-// One input file in; a JSON summary on stdout and, with --mesh, the planar
-// mesh buffers in a file. It is a separate process on purpose: a hostile or
-// broken CAD file that crashes OCCT takes down this process, not the
-// previewer, and the parent enforces the wall-clock cap by killing it. That
-// is the isolation the WASM sandbox was going to provide under Plan A.
+// One input file in; a JSON summary and, optionally, the planar mesh buffers
+// in a file. Two front doors onto this one implementation:
+//
+//   - stepv-occt (stepv-occt.cpp): the CLI the Rust side runs as a
+//     SUBPROCESS, so a crash takes down a child, not the caller, and the
+//     parent enforces time and memory by killing it (Linux, the stepv CLI);
+//   - libstepvocct + stepv_occt.h: the same thing IN-PROCESS, for the macOS
+//     Quick Look extensions, whose sandbox forbids exec (posix_spawn fails
+//     with EPERM). There the extension process itself is the containment:
+//     the system runs it apart from Finder and kills it on hang or memory
+//     pressure.
 //
 // Units: OCCT's readers convert to millimetres, so everything emitted here is
 // in mm regardless of the file's declared units.
@@ -61,6 +66,8 @@
 //               but a renderer should hide it by default.
 //
 // src/occt.rs is the reader; keep the two in step.
+
+#include "stepv_occt.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -123,6 +130,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <sstream>
@@ -132,11 +140,8 @@
 namespace {
 
 constexpr int kExitOk = 0;
-constexpr int kExitUsage = 2;
 constexpr int kExitFailed = 3;
 
-const char* const kUsage =
-    "usage: stepv-occt <input> [--mesh <out>] [--linear-rel <f>] [--angular-deg <f>] [--serial]\n";
 
 // ── JSON output ─────────────────────────────────────────────────────────────
 
@@ -933,68 +938,39 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    std::string input, mesh_out;
-    double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
-    bool parallel = true;
-    for (int i = 1; i < argc; ++i) {
-        std::string a = argv[i];
-        auto value = [&]() -> const char* {
-            if (i + 1 >= argc) {
-                std::fputs(kUsage, stderr);
-                std::exit(kExitUsage);
-            }
-            return argv[++i];
-        };
-        if (a == "--mesh") mesh_out = value();
-        else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
-        else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
-        else if (a == "--serial") parallel = false;
-        else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
-        else if (!a.empty() && a[0] == '-') { std::fputs(kUsage, stderr); return kExitUsage; }
-        else if (input.empty()) input = a;
-        else { std::fputs(kUsage, stderr); return kExitUsage; }
-    }
-    if (input.empty() || !(linear_rel > 0) || !(angular_deg > 0)) {
-        std::fputs(kUsage, stderr);
-        return kExitUsage;
-    }
 
-    // Test hook for the memory cap (tests/cli.rs): allocate and touch this many
-    // MiB, then hold them, so the parent's cap has something deterministic to
-    // catch. A real file's footprint depends on its geometry and timing.
-    if (const char* b = std::getenv("STEPV_OCCT_TEST_BALLOON_MB")) {
-        const std::size_t bytes = std::strtoull(b, nullptr, 10) << 20;
-        auto* p = static_cast<volatile char*>(std::malloc(bytes));
-        for (std::size_t i = 0; p && i < bytes; i += 4096) p[i] = 1;
-        sleep(5);
-        std::free(const_cast<char*>(p));
-    }
-
-    // The JSON summary is the contract on stdout, and OCCT's readers print
-    // progress chatter to stdout. Keep the real stdout for the summary alone
-    // and point fd 1 at stderr for everything else.
-    const int json_fd = dup(STDOUT_FILENO);
-    std::fflush(stdout);
-    dup2(STDERR_FILENO, STDOUT_FILENO);
-    Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+extern "C" char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
+                                double angular_deg, int* exit_code) {
+    // OCCT's data-exchange layer keeps global state (Interface_Static, the
+    // XSControl session): one file at a time per process. The CLI never
+    // notices (one run per process); Quick Look issues concurrent requests.
+    static std::mutex serial;
+    std::lock_guard<std::mutex> lock(serial);
+    static std::once_flag quiet;
+    std::call_once(quiet, [] {
+        Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+    });
 
     Summary s;
-    int code;
-    try {
-        code = run(input, mesh_out, linear_rel, angular_deg, parallel, s);
-    } catch (const Standard_Failure& e) {
-        s.error = std::string("OCCT: ") + e.GetMessageString();
-        code = kExitFailed;
-    } catch (const std::bad_alloc&) {
-        s.error = "out of memory";
-        code = kExitFailed;
-    } catch (const std::exception& e) {
-        s.error = e.what();
-        code = kExitFailed;
+    int code = kExitFailed;
+    if (!input || !(linear_rel > 0) || !(angular_deg > 0)) {
+        s.error = "invalid arguments";
+    } else {
+        try {
+            code = run(input, mesh_out ? mesh_out : "", linear_rel, angular_deg, true, s);
+        } catch (const Standard_Failure& e) {
+            s.error = std::string("OCCT: ") + e.GetMessageString();
+        } catch (const std::bad_alloc&) {
+            s.error = "out of memory";
+        } catch (const std::exception& e) {
+            s.error = e.what();
+        }
     }
-
-    const std::string json = to_json(s) + "\n";
-    if (write(json_fd, json.data(), json.size()) < 0) return kExitFailed;
-    return code;
+    if (exit_code) *exit_code = code;
+    const std::string json = to_json(s);
+    char* out = static_cast<char*>(std::malloc(json.size() + 1));
+    if (out) std::memcpy(out, json.c_str(), json.size() + 1);
+    return out;
 }
+
+extern "C" void stepv_occt_free(char* p) { std::free(p); }

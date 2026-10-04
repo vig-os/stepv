@@ -17,13 +17,24 @@ if(OpenCASCADE_VERSION VERSION_LESS 7.8)
   message(FATAL_ERROR "stepv-occt needs OCCT >= 7.8, found ${OpenCASCADE_VERSION}")
 endif()
 
-add_executable(stepv-occt stepv-occt.cpp)
-target_include_directories(stepv-occt PRIVATE ${OpenCASCADE_INCLUDE_DIR})
-target_compile_options(stepv-occt PRIVATE -Wall -Wextra)
-target_link_libraries(stepv-occt PRIVATE
+set(STEPV_OCCT_LIBS
   TKDESTEP TKDEIGES TKXCAF TKXSBase TKLCAF TKCAF TKCDF
   TKMesh TKShHealing TKTopAlgo TKBRep TKGeomAlgo TKGeomBase TKG3d TKG2d
   TKMath TKernel)
+
+# The kernel CLI: what the Rust side runs as a subprocess. Core compiled in,
+# so it carries no dependency on libstepvocct at run time.
+add_executable(stepv-occt stepv-occt.cpp stepv-occt-core.cpp)
+target_include_directories(stepv-occt PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+target_compile_options(stepv-occt PRIVATE -Wall -Wextra)
+target_link_libraries(stepv-occt PRIVATE ${STEPV_OCCT_LIBS})
+
+# The same kernel in-process (stepv_occt.h): the macOS Quick Look extensions,
+# whose sandbox forbids exec.
+add_library(stepvocct SHARED stepv-occt-core.cpp)
+target_include_directories(stepvocct PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+target_compile_options(stepvocct PRIVATE -Wall -Wextra)
+target_link_libraries(stepvocct PRIVATE ${STEPV_OCCT_LIBS})
 
 # Generator for the synthetic `stress-assembly` fixture (`just fixtures`).
 add_executable(stress-gen stress-gen.cpp)
@@ -39,3 +50,5 @@ target_link_libraries(fixture-gen PRIVATE
 
 # The kernel ships; the generators are dev tools.
 install(TARGETS stepv-occt RUNTIME DESTINATION libexec/stepv)
+install(TARGETS stepvocct LIBRARY DESTINATION lib)
+install(FILES stepv_occt.h DESTINATION include)
