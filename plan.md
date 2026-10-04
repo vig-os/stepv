@@ -403,9 +403,15 @@ release train; §"Repo setup" below records what still has to be wired for it.
   the flake-generated hooks the way they do through `mkProjectShell`. Inert here — all four keys are
   empty, so each resolves to its devkit default — but set one and it is silently ignored. The gap is
   commented at the call site in `flake.nix`.
-- **CodeQL default setup must be disabled** in repo settings (Settings → Code security → Code
-  scanning). The scaffold rendered an advanced CodeQL config, which conflicts with default setup and
-  makes uploads reject. The scaffold does not change that API setting for you.
+Checked and **not** owed, recorded so nobody re-investigates:
+
+- **CodeQL default setup** — the scaffold warns that its advanced config conflicts with GitHub's
+  default code-scanning setup and does not change that API setting for you. Verified via
+  `gh api /repos/vig-os/stepv/code-scanning/default-setup`: already `not-configured`, so the
+  advanced config's uploads will not reject. Nothing to do.
+- **No Rust leg in `codeql.yml`** — the matrix is `['actions']` and that is deliberate. Devkit's own
+  comment states Rust omits its CodeQL leg; `actions` is always analyzed. Not a mis-render from the
+  first scaffold running before `Cargo.toml` existed.
 
 ### org-config
 
