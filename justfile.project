@@ -121,20 +121,23 @@ clean-artifacts:
 # STEPV RECIPES
 # ===============================================================================
 
-# Fetch the robustness corpus into tests/fixtures/ (gitignored). The corpus is
-# the gate: a kernel is chosen on its pass rate here, not on reputation.
-# See plan.md §5 and tests/fixtures/manifest.toml.
+# Fetch the robustness corpus into tests/fixtures/ (gitignored) and rewrite
+# tests/fixtures/corpus.sha256 (committed). The corpus is the gate: a kernel is
+# chosen on its pass rate here, not on reputation. Pass source names to fetch
+# only those. See plan.md §5 and tests/fixtures/manifest.toml.
 [group('harness')]
-fixtures:
-    @echo "Not implemented — plan.md §5 / vig-os/stepv#1."
-    @echo "Read tests/fixtures/manifest.toml for the sources this must fetch,"
-    @echo "then implement here. Deliberately left undone rather than stubbed"
-    @echo "with a silent success, which would make an empty corpus look green."
-    @exit 1
+fixtures *sources: kernel
+    python3 scripts/fetch-fixtures.py {{ sources }}
+
+# Build the Plan B native-OCCT kernel (kernel/) into target/kernel/stepv-occt.
+[group('harness')]
+kernel:
+    cmake -S kernel -B target/kernel -DCMAKE_BUILD_TYPE=Release
+    cmake --build target/kernel -j
 
 # Run the kernel robustness harness over tests/fixtures/ and print the
 # pass-rate / timing table that plan.md §5 asks you to record.
 # ALWAYS --release: debug wasmtime is ~100x slower and looks like a broken kernel.
 [group('harness')]
-harness *args:
+harness *args: kernel
     cargo run --release --example harness -- {{ args }}

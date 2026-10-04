@@ -16,6 +16,7 @@
 /tests/fixtures/*
 !/tests/fixtures/README.md
 !/tests/fixtures/manifest.toml
+!/tests/fixtures/corpus.sha256
 
 # Harness output: pass-rate tables, timings, rendered PNG files under comparison.
 /harness-out/

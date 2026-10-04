@@ -23,16 +23,18 @@ name = "stepv"
 path = "src/main.rs"
 
 [dependencies]
-# ── Kernel (Plan A, plan.md §3) ───────────────────────────────────────
-# DELIBERATELY NOT DECLARED YET. The kernel dependency is
+# ── Kernel ────────────────────────────────────────────────────────────
+# Plan B (plan.md §3): native OCCT in a subprocess, kernel/stepv-occt.cpp,
+# driven by src/occt.rs. No Rust dependency on OCCT at all.
 #
-#     cargo add occt-wasm@4.1
-#
-# and adding it is step S1 of the spike (plan.md §5) — the step whose
-# whole purpose is to find out whether it holds up. Nothing in this repo should
-# claim a kernel works before the harness has run against real STEP files.
-# Pin the exact minor when you add it: the crate went 0.3 -> 4.x in roughly
-# four months, so read its CHANGELOG on every bump.
+# Plan A (`occt-wasm`) was tried in S1 and failed its gate: the crates.io
+# 4.0.0 cannot instantiate its own module, and on upstream main STEP import
+# traps because the standalone WASI build has no filesystem. See plan.md §5
+# "S1 result" before re-adding it.
+
+# The kernel's JSON summary (and, from S2, `--info`).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Content-addressed cache keys over (path, size, mtime). Same hash function
 # cxad uses for its node store, so a future shared cache needs no migration.
