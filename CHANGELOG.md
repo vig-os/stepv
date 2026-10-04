@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zooms; the info text sits on a light panel and reads in dark mode
 - `harness --strict` passed a pass-rate collapse in which every file failed cleanly. `--min-pass`
   now sets a floor, and CI uses it ([#22](https://github.com/vig-os/stepv/issues/22))
+- A multi-file STEP assembly whose part files cannot be read no longer fails as an unexplained "no
+  geometry": the kernel counts the referenced part files (`external_files`, `external_missing`),
+  the error names the cause, and the Quick Look preview explains that it can open only the one
+  file ([#19](https://github.com/vig-os/stepv/issues/19))
 
 ### Security
 

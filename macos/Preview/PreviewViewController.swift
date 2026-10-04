@@ -93,6 +93,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 // Degrade honestly: the header still says what the file is.
                 lines.append("No preview: \(run.error ?? "no geometry")")
             }
+            if let note = StepvSceneBuilder.externalNote(run.summary) { lines.append(note) }
             DispatchQueue.main.async {
                 self.sceneView.scene = built
                 if let camera, let built {

@@ -97,6 +97,7 @@
 #include <Message_PrinterOStream.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Quantity_Color.hxx>
+#include <STEPCAFControl_ExternFile.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <Standard_Failure.hxx>
 #include <TCollection_AsciiString.hxx>
@@ -191,6 +192,10 @@ struct Summary {
     std::size_t vertices = 0;
     std::size_t triangles = 0;
     std::size_t segments = 0;
+    // Multi-file STEP assemblies (#19): the part files the top-level file
+    // references, and how many of them could not be read (missing, or
+    // outside what a sandbox lets this process open).
+    std::size_t external_files = 0, external_missing = 0;
     double t_read_ms = 0, t_transfer_ms = 0, t_mesh_ms = 0, t_extract_ms = 0;
 };
 
@@ -234,6 +239,8 @@ std::string to_json(const Summary& s) {
       << ",\"construction_parts\":" << s.construction_parts;
     o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles
       << ",\"segments\":" << s.segments;
+    o << ",\"external_files\":" << s.external_files
+      << ",\"external_missing\":" << s.external_missing;
     o << ",\"t_read_ms\":" << s.t_read_ms << ",\"t_transfer_ms\":" << s.t_transfer_ms
       << ",\"t_mesh_ms\":" << s.t_mesh_ms << ",\"t_extract_ms\":" << s.t_extract_ms;
     o << ",\"peak_rss_bytes\":" << peak_rss_bytes() << "}";
@@ -726,6 +733,15 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
             s.error = "STEP transfer failed";
             return false;
         }
+        // OCCT skips an unreadable part file SILENTLY: count them, so a
+        // half-empty or empty assembly says why.
+        for (NCollection_DataMap<TCollection_AsciiString, Handle(STEPCAFControl_ExternFile)>::Iterator
+                 it(reader.ExternFiles());
+             it.More(); it.Next()) {
+            ++s.external_files;
+            if (it.Value().IsNull() || it.Value()->GetLoadStatus() != IFSelect_RetDone)
+                ++s.external_missing;
+        }
     } else if (ext == "iges" || ext == "igs") {
         s.format = "iges";
         s.stage = "read";
@@ -810,7 +826,11 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
         if (p.face_colored) ++s.parts_face_colored;
     }
     if (parts.empty() || bbox.IsVoid()) {
-        s.error = "no geometry in file";
+        s.error = s.external_missing
+                      ? "multi-file assembly: " + std::to_string(s.external_missing) + " of " +
+                            std::to_string(s.external_files) +
+                            " part files it references could not be read"
+                      : "no geometry in file";
         return kExitFailed;
     }
     s.bbox = bbox;

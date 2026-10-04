@@ -332,6 +332,7 @@ fn tessellate(
         "triangles": s.triangles, "segments": s.segments, "bbox": s.bbox,
         "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
         "peak_rss_bytes": s.peak_rss_bytes, "sandbox": s.sandbox,
+        "external_files": s.external_files, "external_missing": s.external_missing,
     })));
     // Loudly: the run worked, but less contained than it should have been.
     if let Some(s) = run.summary.as_ref().filter(|s| !s.sandboxed()) {
