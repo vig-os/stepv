@@ -631,6 +631,29 @@ What only a human can do is listed in §7 "Owed".
 
 ---
 
+### Work queue (ordered, 2026-10-04)
+
+Agent work, in order:
+
+1. **#18 Sandbox the kernel on every path** (`priority:high`, security). Test-first: write the
+   forbidden-action tests and see them fail on today's kernel, then Landlock + seccomp on Linux
+   and a sandbox profile for the macOS CLI.
+2. **#20 Quick Look preview bugs** (`priority:high`, in progress on
+   `bugfix/20-ql-preview-camera-contrast-zoom`). Part 1 is done: the face-on camera rule
+   (`render::Camera::for_scene`) is used by `stepv --png`. Still to do:
+   - expose it via stepv-capi, for the thumbnail extension and the preview's SceneKit camera;
+   - use it as `stepv view`'s initial and reset camera;
+   - put the info text on a contrasting panel;
+   - make scroll zoom in the preview (`SCNView` subclass overriding `scrollWheel`).
+3. **#19 Multi-file assemblies blank in Quick Look** (`priority:medium`). At minimum an honest
+   message; whether to widen sandbox read access is decided *with* #18.
+4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`, `needs-human`). The
+   kernel topology export can start; the viewer's platform (A native macOS / B cross-platform Rust
+   / C both, staged) needs a decision first.
+
+Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
+toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.
+
 ## 6. Open questions
 
 - ~~**Precompiled `.cwasm` distribution.**~~ Moot: Plan B has no WASM module (S1).
