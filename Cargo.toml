@@ -1,0 +1,46 @@
+[package]
+name = "stepv"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Fast STEP/IGES/BREP preview and thumbnails for macOS Quick Look and Linux file managers"
+repository = "https://github.com/vig-os/stepv"
+homepage = "https://github.com/vig-os/stepv"
+license = "Apache-2.0"
+keywords = ["cad", "step", "opencascade", "quicklook", "thumbnail"]
+categories = ["command-line-utilities", "graphics"]
+
+# Single crate (lib + bin) on purpose while the kernel decision is being
+# validated — see plan.md §"Crate layout". Split into `stepv-core` +
+# `stepv` only when a SECOND consumer of the library appears (the C ABI for the
+# Swift Quick Look extension is the expected trigger).
+[lib]
+name = "stepv"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stepv"
+path = "src/main.rs"
+
+[dependencies]
+# ── Kernel (Plan A, plan.md §3) ───────────────────────────────────────
+# DELIBERATELY NOT DECLARED YET. The kernel dependency is
+#
+#     cargo add occt-wasm@4.1
+#
+# and adding it is step S1 of the spike (plan.md §5) — the step whose
+# whole purpose is to find out whether it holds up. Nothing in this repo should
+# claim a kernel works before the harness has run against real STEP files.
+# Pin the exact minor when you add it: the crate went 0.3 -> 4.x in roughly
+# four months, so read its CHANGELOG on every bump.
+
+# Content-addressed cache keys over (path, size, mtime). Same hash function
+# cxad uses for its node store, so a future shared cache needs no migration.
+blake3 = "1"
+
+[dev-dependencies]
+
+[profile.release]
+# A previewer is latency-bound, not throughput-bound: `lto = "thin"` is the
+# cxad setting and keeps the link fast enough to stay pleasant to iterate on.
+lto = "thin"

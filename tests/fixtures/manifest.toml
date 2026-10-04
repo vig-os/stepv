@@ -1,0 +1,81 @@
+# Robustness corpus for the kernel harness (plan.md §5, vig-os/stepv#1).
+#
+# `just fixtures` must fetch these into this directory. The files themselves are
+# gitignored: some are large and some are redistribution-restricted, so neither
+# belongs in git. This manifest IS committed — it is the record of what the pass
+# rate was measured against, which is the only thing that makes the number mean
+# anything later.
+#
+# Each source carries `why`, because a corpus without stated intent degrades
+# into "files someone had lying around" within two months.
+
+[[source]]
+name = "cax-if"
+why = """
+The AP242 interoperability suite. Small, hand-built, and aimed squarely at the
+corners of the standard that real exporters disagree about. Highest signal per
+megabyte in the whole corpus — if a kernel fails here it will fail in the wild.
+"""
+url = "https://www.cax-if.org/cax/cax_testRounds.php"
+# Redistribution-restricted: fetch, never commit, never mirror.
+license = "see site terms"
+expect = "high pass rate; failures here are blockers"
+
+[[source]]
+name = "nist-pmi"
+why = """
+NIST's PMI test suite. Exercises semantic PMI and tolerancing annotations that
+AP242 carries and most viewers silently drop. We do not render PMI, but these
+files are unusually heavy users of the parts of the schema that break parsers.
+"""
+url = "https://www.nist.gov/el/systems-integration-division-73400/mbe-pmi-validation-and-conformance-testing"
+license = "US government work"
+expect = "must load; PMI content itself is out of scope"
+
+[[source]]
+name = "abc-dataset"
+why = """
+~1M CAD models in STEP, from real-world sources. This is the does-it-load sweep
+— the only way to get a pass-rate number with a meaningful denominator. Take a
+few hundred for routine runs; the full set is for a deliberate deep sweep.
+"""
+url = "https://deep-geometry.github.io/abc-dataset/"
+license = "MIT (per dataset terms — re-check before redistributing)"
+expect = "this is where the headline pass rate comes from"
+sample = 300
+
+[[source]]
+name = "exporter-matrix"
+why = """
+Output from the CAD systems whose files users will actually drop on the
+previewer: SolidWorks, NX, CATIA, Fusion 360, FreeCAD, Onshape. AP242
+interoperability breaks between WRITERS, not in the abstract, so a corpus with
+no exporter diversity cannot find the bugs that matter. Collect by hand.
+"""
+url = "hand-collected"
+license = "n/a — keep to files we are allowed to hold"
+expect = "names and colours resolve; this is where XCAF metadata is really tested"
+
+[[source]]
+name = "stress-assembly"
+why = """
+One deliberately enormous assembly, ~200 MB or more. Its entire job is to find
+the wasm32 4 GB arena cliff (plan.md §3 risk 3) on purpose, in a harness, rather
+than in a user's Finder window. A clean failure is a PASS for this fixture; a
+hang or a host OOM is a blocker.
+"""
+url = "hand-collected"
+license = "n/a"
+expect = "must fail CLEANLY — never hang, never OOM the host"
+
+[[source]]
+name = "malformed"
+why = """
+Truncated, corrupt, and empty files, plus a non-STEP file with a .step
+extension. A previewer is pointed at whatever is on disk, so these are normal
+input, not edge cases. The requirement is exit code 3 with valid header
+metadata still on stdout — never a panic across the wasmtime boundary.
+"""
+url = "generate locally"
+license = "n/a"
+expect = "exit 3, metadata still valid, no panic"

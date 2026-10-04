@@ -1,0 +1,12 @@
+# SSOT for the Rust toolchain — read by BOTH rustup and the flake (fenix
+# fromToolchainFile via devkit's mkRustProject), per the Rust language pack ADR
+# (vig-os/devkit, docs/designs/0001-rust-language-pack.md §2.2).
+#
+# Kept BYTE-IDENTICAL to gerchowl/cxad's pin on purpose: `toolchainHash` in
+# flake.nix is the hash of the toolchain THIS file resolves to, so sharing the
+# pin means sharing the hash and neither repo discovers it twice. Bump
+# deliberately — and when you do, re-derive the hash (see flake.nix).
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+profile = "minimal"

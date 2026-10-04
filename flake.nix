@@ -1,0 +1,205 @@
+{
+  description = "Project development environment (vigOS toolchain).";
+
+  # Downstream repos consume the shared toolchain as a flake INPUT, so updating
+  # the dev environment means bumping that input — it never overwrites your
+  # files. To update: `nix flake update vigos`.
+  inputs = {
+    # The shared vigOS toolchain (single source of truth).
+    # This scaffold deliberately FLOATS on the default branch so a fresh
+    # project works before its first pin. Once you depend on stability
+    # (especially the vigos.* home-manager module options), pin a release
+    # tag instead and bump deliberately:
+    #   vigos.url = "github:vig-os/devkit?ref=<tag>";
+    # Policy: https://github.com/vig-os/devkit/blob/main/docs/NIX.md
+    # "Home-manager modules - versioning & release policy".
+    vigos.url = "github:vig-os/devkit";
+    # Follow vigos's pinned nixpkgs + flake-utils so your tools match the
+    # toolchain exactly (one resolved nixpkgs, no drift).
+    nixpkgs.follows = "vigos/nixpkgs";
+    flake-utils.follows = "vigos/flake-utils";
+  };
+
+  outputs =
+    {
+      self,
+      vigos,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ vigos.overlays.default ];
+          config.allowUnfree = true;
+        };
+
+        # ────────────────────────────────────────────────────────────────────
+        # Your project tools go here. This block is YOURS: a dev-environment
+        # update never overwrites it (scaffold-once / never-overwrite, the same
+        # guarantee as justfile.project and docker-compose.project.yaml).
+        #
+        #   extraPackages = pkgs: [
+        #     pkgs.postgresql_16
+        #     pkgs.ffmpeg
+        #   ];
+        # ────────────────────────────────────────────────────────────────────
+        extraPackages = pkgs: [
+          # Fixture corpus fetching for the robustness harness (plan.md §5).
+          pkgs.curl
+          pkgs.unzip
+          # PLAN B ONLY (plan.md §3). If the occt-wasm spike fails and the
+          # fallback native-OCCT converter is built, uncomment these AND add
+          # "native" to `modules` below — devkit's `native` module deliberately
+          # leaves third-party libraries (Geant4, ROOT, OCCT, …) to the
+          # consumer's extraPackages, so OCCT itself must be named here.
+          #
+          #   pkgs.opencascade-occt
+          #   pkgs.fontconfig
+        ];
+
+        # Devkit knobs read from .vig-os (#1224, #1432, #1431, #1282, #1633): the
+        # flake-generated pre-commit hooks — the branch guard and the
+        # commit-message validator — follow the workspace manifest, mirroring
+        # the scaffolded .pre-commit-config.yaml renders (#1434). Managed
+        # block; leave it.
+        vigOsValue =
+          key:
+          let
+            vigOsPath = self + "/.vig-os";
+            declared = builtins.filter (l: nixpkgs.lib.hasPrefix "${key}=" l) (
+              nixpkgs.lib.splitString "\n" (builtins.readFile vigOsPath)
+            );
+          in
+          if !builtins.pathExists vigOsPath || declared == [ ] then
+            ""
+          else
+            nixpkgs.lib.removePrefix "${key}=" (builtins.head declared);
+
+        # A comma-separated manifest list -> a Nix list, or null when the key
+        # is absent/blank (= "keep the devkit default"). Whitespace around
+        # entries is trimmed and empty entries dropped, matching how
+        # init-workspace.sh resolves the same keys; validation (charset,
+        # non-empty) lives in mkProjectShell, which fails eval loudly on a bad
+        # value.
+        vigOsList =
+          key:
+          let
+            entries = builtins.filter (t: t != "") (
+              map (t: nixpkgs.lib.trim t) (nixpkgs.lib.splitString "," (vigOsValue key))
+            );
+          in
+          if entries == [ ] then null else entries;
+
+        # Workflow model (#1224): a `trunk` workspace drops the dev-branch
+        # clause. `gitflow` (the default) and an absent/blank value are inert.
+        workflow = if vigOsValue "DEVKIT_WORKFLOW" == "trunk" then "trunk" else "gitflow";
+
+        # Branch-type set (#1432): DEVKIT_BRANCH_TYPES replaces the
+        # issue-numbered alternation of the branch guard.
+        branchTypes = vigOsList "DEVKIT_BRANCH_TYPES";
+
+        # Approved commit types (#1431): DEVKIT_COMMIT_TYPES replaces the
+        # validate-commit-msg `--types` list, so the local hook agrees with
+        # CI's validate-commit-range (#1434).
+        commitTypes = vigOsList "DEVKIT_COMMIT_TYPES";
+
+        # Refs policy (#1282): DEVKIT_REFS_POLICY steers whether a commit needs
+        # a `Refs: #N` line — chore-optional (default) | optional | required.
+        # Absent/blank forwards null (= the default); an unknown literal fails
+        # eval loudly in mkProjectShell (#1434).
+        refsPolicy =
+          let
+            raw = nixpkgs.lib.trim (vigOsValue "DEVKIT_REFS_POLICY");
+          in
+          if raw == "" then null else raw;
+
+        # Refs-optional types (#1633): DEVKIT_REFS_OPTIONAL_TYPES names the
+        # commit types that may omit `Refs:` and WINS over DEVKIT_REFS_POLICY.
+        # Absent/blank forwards null (= the policy decides); a value outside
+        # the approved types fails eval loudly in mkProjectShell.
+        refsOptionalTypes = vigOsList "DEVKIT_REFS_OPTIONAL_TYPES";
+
+        # ────────────────────────────────────────────────────────────────────
+        # Rust language pack (devkit #1400 / #1427).
+        #
+        # ONE call gives the dev shell, `checks` (fmt, clippy, nextest,
+        # doctests, cargo-doc) and `packages`. It is not optional sugar: the
+        # `rust` capability module REFUSES to load bare — `modules = [ "rust" ]`
+        # would hand you a toolchain, a green `nix flake check` that builds
+        # nothing, and CI that compiles nothing, so devkit made that an
+        # eval-time error and `mkRustProject` the only supported path.
+        #
+        # KNOWN GAP (raise with devkit before relying on it): mkRustProject's
+        # argument list has no `branchTypes` / `commitTypes` / `refsPolicy` /
+        # `refsOptionalTypes`, so those .vig-os knobs do NOT reach the
+        # flake-generated hooks the way they do through mkProjectShell. Inert
+        # here — all four keys are empty in .vig-os, so every one resolves to
+        # its devkit default. Set one and it will be silently ignored.
+        rust = vigos.lib.mkRustProject {
+          inherit pkgs workflow;
+          src = ./.;
+
+          # fenix needs the content hash of the toolchain rust-toolchain.toml
+          # resolves to. Shared with gerchowl/cxad, which pins the same channel
+          # and components byte-for-byte. Re-derive on a channel bump:
+          #   nix build .#devShells.${system}.default 2>&1 | grep 'got:'
+          toolchainHash = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
+
+          # Named rather than null so a break is attributed to `stepv` instead
+          # of reported against "the workspace" (plan.md §"Crate layout").
+          crates = [ "stepv" ];
+
+          # The harness corpus lives outside the cargo source filter; without
+          # this, fixture-driven tests see an empty directory under crane.
+          extraSrcFiles = [ "tests/fixtures" ];
+
+          # Host-runner hooks (#1167): direnv CI runs on the bare host runner,
+          # so the flake GENERATES .pre-commit-config.yaml from the shared base
+          # hook set, resolved from the Nix store. Customize here.
+          hooks = { };
+
+          tools = [
+            "nextest"
+            "deny"
+            "shear"
+            "about"
+          ];
+
+          extraPackages = extraPackages pkgs;
+
+          # PLAN B ONLY: add "native" here (cc/c++/cmake/make/pkg-config) when
+          # building the fallback native-OCCT converter. See extraPackages.
+          modules = [ ];
+        };
+      in
+      {
+        devShells.default = rust.devShell;
+
+        # fmt / clippy / nextest / doctest / cargo-doc per crate, plus the
+        # per-module dev-shell builds. Assigning these is the consumer's job by
+        # construction — dropping the line is a visible omission, which is why
+        # mkRustProject hands all three back together.
+        checks = rust.checks;
+        packages = rust.packages;
+
+        # Opt-in local dev services (#795): a daemonless process-compose stack
+        # (Postgres, SeaweedFS/S3, Redis, …) with service versions from the
+        # pinned vigos nixpkgs — no Docker/Podman daemon, no extra flake
+        # inputs. Uncomment, then `nix run .#services` (or enable the
+        # `services` recipe in justfile.project); service state lands in
+        # ./data — add it to .gitignore.
+        #
+        #   packages.services = vigos.lib.mkProjectServices {
+        #     inherit pkgs;
+        #     modules = [ { services.postgres."db".enable = true; } ];
+        #   };
+
+        # Future (upstream, opt-in): vigos may expose modular language shells —
+        # e.g. `vigos.devShells.${system}.{cpp,geant4,dataAnalysis}` — that you
+        # select without changing this scaffold. Out of scope today.
+      }
+    );
+}

@@ -1,0 +1,27 @@
+# Repo-specific root .gitignore entries — yours to edit; upgrades never
+# overwrite this file. This is the durable committed home for repo-ROOT ignores:
+# git honors a root ignore only from the root .gitignore, which devkit
+# regenerates on every upgrade, so entries added HERE are appended to that
+# regenerated .gitignore and survive. Put durable repo-root ignores below (not
+# in the managed .gitignore, where hand edits are lost).
+#
+# Examples (uncomment / add your own):
+#   /scratch/
+#   /secrets.local.yaml
+
+# ── stepv ────────────────────────────────────────────────────────────────────
+# Harness corpus: fetched by `just fixtures`, never committed. Some of it is
+# large (the ABC-dataset chunks) and some of it is redistribution-restricted
+# (the CAx-IF files), so neither belongs in git. Keep the README + manifest.
+/tests/fixtures/*
+!/tests/fixtures/README.md
+!/tests/fixtures/manifest.toml
+
+# Harness output: pass-rate tables, timings, rendered PNG files under comparison.
+/harness-out/
+
+# Cargo build artifacts. Needed HERE rather than relying on devkit's rendered
+# .gitignore: that fragment comes from live language detection, and the
+# scaffold ran before Cargo.toml existed, so no Rust fragment was emitted.
+# Cargo.lock IS committed — stepv ships a binary.
+/target/
