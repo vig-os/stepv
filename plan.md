@@ -668,18 +668,12 @@ Against the unsandboxed kernel, all seven refusal tests failed. With the sandbox
 
 Agent work, in order:
 
-1. **#18 Sandbox the kernel on every path** (`priority:high`, security). Test-first: write the
-   forbidden-action tests and see them fail on today's kernel, then Landlock + seccomp on Linux
-   and a sandbox profile for the macOS CLI.
-2. **#20 Quick Look preview bugs** (`priority:high`, in progress on
-   `bugfix/20-ql-preview-camera-contrast-zoom`). Part 1 is done: the face-on camera rule
-   (`render::Camera::for_scene`) is used by `stepv --png`. Still to do:
-   - expose it via stepv-capi, for the thumbnail extension and the preview's SceneKit camera;
-   - use it as `stepv view`'s initial and reset camera;
-   - put the info text on a contrasting panel;
-   - make scroll zoom in the preview (`SCNView` subclass overriding `scrollWheel`).
-3. **#19 Multi-file assemblies blank in Quick Look** (`priority:medium`). At minimum an honest
-   message; whether to widen sandbox read access is decided *with* #18.
+1. ~~**#18 Sandbox the kernel on every path**~~: done, see "Sandbox (#18)" above. Found on the
+   way: #22, the harness's pass-rate floor.
+2. ~~**#20 Quick Look preview bugs**~~: done (#24). Every front-end opens on
+   `render::Camera::for_scene`; the preview gained scroll zoom and a readable info panel.
+3. **#19 Multi-file assemblies blank in Quick Look** (`priority:medium`, #25): the honest message.
+   Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`, `needs-human`). The
    kernel topology export can start; the viewer's platform (A native macOS / B cross-platform Rust
    / C both, staged) needs a decision first.
