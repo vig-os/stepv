@@ -655,8 +655,9 @@ Against the unsandboxed kernel, all seven refusal tests failed. With the sandbox
   files, and checks that the bundled CLI's kernel runs sandboxed.
 - **Linux 7.0** (Landlock ABI 6 + seccomp, run with `scripts/test-linux-sandbox.sh` in a Debian
   container with OCCT 7.8.1): network and exec are refused by seccomp (EPERM), files by Landlock
-  (EACCES). Over the whole corpus, every file gives the same summary and byte-identical meshes
-  with and without the sandbox.
+  (EACCES). Over all 401 corpus files, the sandboxed and unsandboxed kernels give the same summary.
+  The meshes are byte-identical with one exception, ABC `00000143`: its parallel meshing differs
+  from run to run on the unsandboxed kernel too. Nothing printed a permission error.
 - **Found on the way (#22):** an early version broke relative input paths, every file then failed
   cleanly, and `harness --strict` still exited 0. `--min-pass` now puts a floor under the pass
   rate, and CI uses it.
