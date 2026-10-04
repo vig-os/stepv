@@ -18,6 +18,43 @@ enum StepvSceneBuilder {
         return out
     }
 
+    /// The view to open on, from the renderer (stepv_view_angles): the same
+    /// one `stepv --png` and the thumbnail use, so a flat part is face-on.
+    static func viewAngles(_ mesh: Data) -> (azimuthDeg: Float, elevationDeg: Float) {
+        var az: Float = -35, el: Float = 30  // render::Camera::default()
+        _ = mesh.withUnsafeBytes { buf in
+            stepv_view_angles(buf.bindMemory(to: UInt8.self).baseAddress, buf.count, &az, &el)
+        }
+        return (az, el)
+    }
+
+    /// An orthographic camera on `scene` from stepv's orbit angles, framing
+    /// its bounding sphere. The direction toward the eye and the screen's up
+    /// are render.rs's view() inverted: (-sin a cos e, sin e, cos a cos e)
+    /// and (sin a sin e, cos e, -cos a sin e). That up is well-defined
+    /// straight overhead, where the world's Y would make look(at:) degenerate.
+    static func camera(for scene: SCNScene, azimuthDeg: Float, elevationDeg: Float) -> SCNNode {
+        let (lo, hi) = scene.rootNode.boundingBox
+        let centre = SCNVector3((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
+        let (dx, dy, dz) = (hi.x - lo.x, hi.y - lo.y, hi.z - lo.z)
+        let radius = max((dx * dx + dy * dy + dz * dz).squareRoot() / 2, 1e-6)
+        let a = CGFloat(azimuthDeg) * .pi / 180, e = CGFloat(elevationDeg) * .pi / 180
+        let toward = SCNVector3(-sin(a) * cos(e), sin(e), cos(a) * cos(e))
+        let up = SCNVector3(sin(a) * sin(e), cos(e), -cos(a) * sin(e))
+        let node = SCNNode()
+        node.name = "stepv-camera"
+        let cam = SCNCamera()
+        cam.usesOrthographicProjection = true
+        cam.orthographicScale = Double(radius) * 1.1
+        cam.zNear = Double(radius) * 0.01
+        cam.zFar = Double(radius) * 10
+        node.camera = cam
+        node.position = SCNVector3(centre.x + toward.x * radius * 4, centre.y + toward.y * radius * 4,
+                                   centre.z + toward.z * radius * 4)
+        node.look(at: centre, up: up, localFront: SCNVector3(0, 0, -1))
+        return node
+    }
+
     /// SceneKit scene from the buffers: one node per part, triangles grouped
     /// by (colour, faithful?) into elements, approximated faces amber,
     /// missing-face outlines and sketch curves as lines; construction hidden.

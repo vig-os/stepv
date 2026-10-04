@@ -189,6 +189,8 @@ macos-install: macos-app
     for x in /Applications/stepv.app/Contents/PlugIns/*.appex; do pluginkit -a "$x"; done
     pluginkit -e use -i ch.exoma.stepv.thumbnail
     pluginkit -e use -i ch.exoma.stepv.preview
+    # Running extensions keep serving the old binary for hours otherwise.
+    pkill -f '/stepv.app/Contents/PlugIns/' || true
     qlmanage -r >/dev/null 2>&1 || true
 
 # Headless macOS checks (Swift reader vs Rust, offscreen preview render, and

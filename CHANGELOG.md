@@ -47,4 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Quick Look preview ([#20](https://github.com/vig-os/stepv/issues/20)): flat parts and sketches
+  open face-on, not edge-on (also in thumbnails, `stepv --png` and `stepv view`); the scroll wheel
+  zooms; the info text sits on a light panel and reads in dark mode
+
 ### Security
