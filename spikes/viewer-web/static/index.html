@@ -167,11 +167,30 @@ function frame(now) {
   if (bench && --left === 0) {
     const f = [...frames].sort((a, b) => a - b);
     const r = renderer.domElement.getBoundingClientRect();
-    pick(r.left + r.width / 2, r.top + r.height / 2);
+    // Picks over the same 9x9 grid as spike A: mean and worst latency.
+    const picks = []; let hits = 0;
+    for (let i = 0; i < 81; i++) {
+      const x = ((i % 9) / 4 - 1) * 0.9, y = (Math.floor(i / 9) / 4 - 1) * 0.9;
+      const h = pick(r.left + (x + 1) / 2 * r.width, r.top + (1 - (y + 1) / 2) * r.height);
+      picks.push(pickMs); if (h) hits++;
+    }
+    const pickMean = picks.reduce((a, b) => a + b, 0) / picks.length, pickMax = Math.max(...picks);
+    // GPU-synchronised, matched to spike A: 1280x800 at pixel ratio 1, MSAA
+    // (antialias), render + gl.finish() per frame.
+    renderer.setPixelRatio(1); renderer.setSize(1280, 800, false); camera.aspect = 1.6; camera.updateProjectionMatrix();
+    const gl = renderer.getContext(), synced = [];
+    for (let i = 0; i < 60; i++) {
+      const off = camera.position.clone().sub(centre).applyAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 180);
+      camera.position.copy(centre).add(off); camera.lookAt(centre);
+      const t = performance.now(); renderer.render(scene, camera); gl.finish(); synced.push(performance.now() - t);
+    }
+    synced.sort((a, b) => a - b);
+    const heap = performance.memory ? ` js heap ${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} MB,` : '';
     fetch(`/bench?t=${token}`, { method: 'POST', body:
       `${parts.length} parts, ${triangles} triangles, fetch+parse ${((tFetched - t0) / 1e3).toFixed(2)} s, ` +
       `first frame ${((firstFrame - t0) / 1e3).toFixed(2)} s (page-relative), frame p50 ${f[f.length >> 1].toFixed(2)} ms ` +
-      `p95 ${f[Math.floor(f.length * 0.95)].toFixed(2)} ms, centre pick ${pickMs.toFixed(1)} ms` });
+      `p95 ${f[Math.floor(f.length * 0.95)].toFixed(2)} ms;${heap} pick over 81 points (${hits} hits): mean ${pickMean.toFixed(1)} ms, ` +
+      `max ${pickMax.toFixed(1)} ms; GPU-synced frame (1280x800, MSAA) p50 ${synced[30].toFixed(2)} ms p95 ${synced[57].toFixed(2)} ms` });
     return;
   }
   requestAnimationFrame(frame);

@@ -360,6 +360,7 @@ struct App {
     bench: Option<usize>,
     started: Instant,
     first_frame: Option<Duration>,
+    synth: Vec<bool>,
 }
 
 impl App {
@@ -389,7 +390,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         let now = Instant::now();
         self.frames.push((now - self.last).as_secs_f64() * 1e3);
@@ -401,10 +402,34 @@ impl eframe::App for App {
 
         egui::Panel::left("tree").default_size(240.0).show(root, |ui| {
             ui.heading("Model");
+            // SPIKE_TREE=N adds N synthetic leaves in nested headers of 100
+            // (the naive layout); SPIKE_TREE_ROWS=N the same as one
+            // virtualised list (ScrollArea::show_rows).
+            let synth = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+            if let Some(n) = synth("SPIKE_TREE_ROWS") {
+                self.synth.resize(n, true);
+                let row = ui.text_style_height(&egui::TextStyle::Body);
+                egui::ScrollArea::vertical().show_rows(ui, row, n, |ui, range| {
+                    for i in range {
+                        ui.checkbox(&mut self.synth[i], format!("part {i}"));
+                    }
+                });
+                return;
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let tree = self.m.topo.tree.clone();
                 for n in &tree {
                     self.tree(ui, n);
+                }
+                if let Some(n) = synth("SPIKE_TREE") {
+                    self.synth.resize(n, true);
+                    for g in 0..n.div_ceil(100) {
+                        egui::CollapsingHeader::new(format!("assembly {g}")).default_open(true).show(ui, |ui| {
+                            for i in g * 100..((g + 1) * 100).min(n) {
+                                ui.checkbox(&mut self.synth[i], format!("part {i}"));
+                            }
+                        });
+                    }
                 }
             });
         });
@@ -513,6 +538,13 @@ impl eframe::App for App {
                     f[f.len() / 2],
                     f[f.len() * 95 / 100]
                 );
+                // GPU-synchronised: render offscreen at 1280x800 with 4x
+                // MSAA and wait for the GPU each time (the methodology review:
+                // the loop rate above is CPU submission only).
+                if let Some(rs) = frame.wgpu_render_state() {
+                    let ms = synced_frames(rs, &self.orbit, self.radius, &self.visible, 60);
+                    println!("bench: GPU-synced offscreen frame (1280x800, 4x MSAA) p50 {:.2} ms p95 {:.2} ms", ms.0, ms.1);
+                }
                 // Picks over a 9x9 grid of the view: mean and worst latency.
                 let inv = self.orbit.view_proj(1.6, self.radius).inverse();
                 let (mut times, mut hits) = (Vec::new(), 0);
@@ -531,6 +563,70 @@ impl eframe::App for App {
         }
         ctx.request_repaint();
     }
+}
+
+/// Renders `n` frames into an offscreen target, waiting for the GPU after
+/// each: (p50, p95) in ms, what a frame really costs.
+fn synced_frames(rs: &egui_wgpu::RenderState, orbit: &Orbit, radius: f32, visible: &[bool], n: usize) -> (f64, f64) {
+    let (d, q) = (&rs.device, &rs.queue);
+    let res = rs.renderer.read();
+    let gpu: &Gpu = res.callback_resources.get().unwrap();
+    let size = wgpu::Extent3d { width: 1280, height: 800, depth_or_array_layers: 1 };
+    let tex = |format, label| {
+        d.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: SAMPLES,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+    };
+    let (color, depth) = (tex(rs.target_format, "c"), tex(DEPTH, "d"));
+    let mut times = Vec::new();
+    let mut o = Orbit { az: orbit.az, el: orbit.el, dist: orbit.dist, target: orbit.target };
+    for _ in 0..n {
+        o.az += 1.0;
+        let e = o.eye();
+        let u = Uniforms { view_proj: o.view_proj(1.6, radius).to_cols_array_2d(), eye: [e.x, e.y, e.z, 0.0], clip: [0.0; 4], flags: [0; 4] };
+        let t0 = Instant::now();
+        q.write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&u));
+        let mut enc = d.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_bind_group(0, &gpu.bind, &[]);
+            pass.set_vertex_buffer(0, gpu.vertices.slice(..));
+            pass.set_index_buffer(gpu.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (r, &v) in gpu.ranges.iter().zip(visible) {
+                if v && !r.is_empty() {
+                    pass.draw_indexed(r.clone(), 0, 0..1);
+                }
+            }
+        }
+        q.submit([enc.finish()]);
+        let _ = d.poll(wgpu::PollType::wait_indefinitely());
+        times.push(t0.elapsed().as_secs_f64() * 1e3);
+    }
+    times.sort_by(f64::total_cmp);
+    (times[n / 2], times[n * 95 / 100])
 }
 
 fn surface(s: &Surface) -> String {
@@ -590,6 +686,7 @@ fn main() -> eframe::Result {
                 bench,
                 started,
                 first_frame: None,
+                synth: Vec::new(),
             }))
         }),
     )
