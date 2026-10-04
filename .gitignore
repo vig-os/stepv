@@ -70,9 +70,11 @@ data/
 # future scaffold ever stops emitting it, add it back — this file is the
 # durable home for root ignores and survives regeneration.
 
+# The committed CLI-test corpus (kernel/fixture-gen, `just test-data`). The
+# managed .gitignore ignores every `data/` directory (process-compose state);
+# this one is source, so re-include it.
+!/tests/data/
+
 # flake-hooks opt-in (#1092): the generated .pre-commit-config.yaml is a
 # /nix/store symlink — never commit it.
 .pre-commit-config.yaml
-
-# From .gitignore.project: the committed CLI-test corpus.
-!/tests/data/
