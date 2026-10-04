@@ -103,7 +103,9 @@ void escape_attempt(const std::string& spec) {
         close(fd);
         report(ok, err);
     } else if (kind == "kill") {
-        report(kill(static_cast<pid_t>(std::atoi(arg.c_str())), SIGTERM) == 0, errno);
+        // errno read only after the call: argument evaluation order is unspecified.
+        const bool ok = kill(static_cast<pid_t>(std::atoi(arg.c_str())), SIGTERM) == 0;
+        report(ok, errno);
     } else if (kind == "read") {
         const int fd = open(arg.c_str(), O_RDONLY);
         if (fd < 0) { report(false, errno); return; }
