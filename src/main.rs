@@ -248,6 +248,7 @@ fn run(args: &Args) -> (u8, Value) {
         Format::Png => {
             let opts = render::Options {
                 show_construction: args.show_construction,
+                camera: render::Camera::for_scene(&scene),
                 ..render::Options::square(args.size)
             };
             match render::render(&scene, &opts).map(|img| img.to_png()) {

@@ -76,6 +76,137 @@ impl Default for Camera {
     }
 }
 
+impl Camera {
+    /// The camera to open a scene with: looking straight down the normal of
+    /// a FLAT model (a sketch, a drawing, a sheet), so it is not seen edge-on,
+    /// and the isometric default for anything three-dimensional.
+    ///
+    /// Flatness is a principal-axis fit of everything drawn: when the spread
+    /// along the least-varying axis is under 1% of the spread along the
+    /// most-varying one, that axis is the plane's normal. That works for a
+    /// plane at any tilt, not just the coordinate planes.
+    #[must_use]
+    pub fn for_scene(scene: &Scene) -> Self {
+        plane_normal(scene).map_or_else(Self::default, Self::looking_along)
+    }
+
+    /// A camera whose view direction is `-n` (it sits on the `+n` side),
+    /// with `n` flipped if needed to stay on the same side as the default
+    /// view, so a flat part is seen from above or from the front, not the
+    /// back or underneath.
+    #[must_use]
+    pub fn looking_along(n: [f32; 3]) -> Self {
+        // The view() convention: CAD Z-up mapped to Y-up as (x, z, -y).
+        let mut a = normalize([n[0], n[2], -n[1]]);
+        let def = Self::default();
+        let (sa, ca) = def.azimuth_deg.to_radians().sin_cos();
+        let (se, ce) = def.elevation_deg.to_radians().sin_cos();
+        let toward_default = [-sa * ce, se, ca * ce];
+        if dot(a, toward_default) < 0.0 {
+            a = [-a[0], -a[1], -a[2]];
+        }
+        Self {
+            azimuth_deg: (-a[0]).atan2(a[2]).to_degrees(),
+            elevation_deg: a[1].atan2(a[0].hypot(a[2])).to_degrees(),
+            ..def
+        }
+    }
+}
+
+/// The normal of a flat scene, or `None` if it is three-dimensional.
+#[allow(clippy::needless_range_loop)]
+fn plane_normal(scene: &Scene) -> Option<[f32; 3]> {
+    // Every drawn point; capped by striding so a huge mesh stays cheap.
+    let mut pts: Vec<[f64; 3]> = Vec::new();
+    for part in &scene.parts {
+        pts.extend(
+            part.mesh
+                .positions
+                .chunks_exact(3)
+                .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]),
+        );
+        pts.extend(
+            part.lines
+                .positions
+                .chunks_exact(3)
+                .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]),
+        );
+    }
+    let stride = (pts.len() / 50_000).max(1);
+    let sample: Vec<[f64; 3]> = pts.iter().step_by(stride).copied().collect();
+    if sample.len() < 3 {
+        return None;
+    }
+    let n = sample.len() as f64;
+    let mut mean = [0.0; 3];
+    for p in &sample {
+        for k in 0..3 {
+            mean[k] += p[k] / n;
+        }
+    }
+    let mut cov = [[0.0f64; 3]; 3];
+    for p in &sample {
+        let d = [p[0] - mean[0], p[1] - mean[1], p[2] - mean[2]];
+        for i in 0..3 {
+            for j in 0..3 {
+                cov[i][j] += d[i] * d[j] / n;
+            }
+        }
+    }
+    let (values, vectors) = symmetric_eigen(cov);
+    let (lo, hi) = (values[0], values[2]);
+    // Spread is the square root of the variance.
+    if hi <= 0.0 || lo.max(0.0).sqrt() > 0.01 * hi.sqrt() {
+        return None;
+    }
+    let v = vectors[0];
+    Some([v[0] as f32, v[1] as f32, v[2] as f32])
+}
+
+/// Eigen-decomposition of a symmetric 3×3 matrix by cyclic Jacobi rotations:
+/// eigenvalues ascending, with their unit eigenvectors.
+// Index loops mirror the textbook rotation formulas.
+#[allow(clippy::needless_range_loop)]
+fn symmetric_eigen(mut a: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..50 {
+        let off = a[0][1].abs() + a[0][2].abs() + a[1][2].abs();
+        if off < 1e-30 {
+            break;
+        }
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-300 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+            let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+            let t = if theta == 0.0 { 1.0 } else { t };
+            let c = 1.0 / (t * t + 1.0).sqrt();
+            let s = t * c;
+            for k in 0..3 {
+                let (akp, akq) = (a[k][p], a[k][q]);
+                a[k][p] = c * akp - s * akq;
+                a[k][q] = s * akp + c * akq;
+            }
+            for k in 0..3 {
+                let (apk, aqk) = (a[p][k], a[q][k]);
+                a[p][k] = c * apk - s * aqk;
+                a[q][k] = s * apk + c * aqk;
+            }
+            for row in &mut v {
+                let (vp, vq) = (row[p], row[q]);
+                row[p] = c * vp - s * vq;
+                row[q] = s * vp + c * vq;
+            }
+        }
+    }
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&i, &j| a[i][i].total_cmp(&a[j][j]));
+    let values = idx.map(|i| a[i][i]);
+    let vectors = idx.map(|i| [v[0][i], v[1][i], v[2][i]]);
+    (values, vectors)
+}
+
 /// How the model is fitted to the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
@@ -636,6 +767,100 @@ mod tests {
                 assert_eq!(img.pixel(x, 63)[3], 0, "az {az}: bottom row clear");
             }
         }
+    }
+
+    fn flat_square(normal_axis: usize) -> Scene {
+        // A unit square in the plane perpendicular to `normal_axis`.
+        let mut corners = [[0.0f32; 3]; 4];
+        let (u, w) = match normal_axis {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        for (i, c) in corners.iter_mut().enumerate() {
+            c[u] = (i & 1) as f32;
+            c[w] = (i >> 1) as f32;
+        }
+        let mut s = cube([FaceStatus::Ok; 6]);
+        let m = &mut s.parts[0].mesh;
+        m.positions = corners.iter().flatten().copied().collect();
+        m.normals = vec![0.0; 12];
+        m.indices = vec![0, 1, 3, 0, 3, 2];
+        m.face_ids = vec![0, 0];
+        s
+    }
+
+    fn coverage(img: &Image) -> usize {
+        img.rgba.chunks_exact(4).filter(|p| p[3] > 0).count()
+    }
+
+    #[test]
+    fn flat_models_are_viewed_face_on() {
+        for axis in 0..3 {
+            let s = flat_square(axis);
+            let cam = Camera::for_scene(&s);
+            assert_ne!(
+                cam,
+                Camera::default(),
+                "axis {axis}: flat scene gets its own camera"
+            );
+            let face_on = render(
+                &s,
+                &Options {
+                    camera: cam,
+                    ..Options::square(64)
+                },
+            )
+            .unwrap();
+            // Face-on, a square fills its fitted box; at the isometric
+            // default it is a sliver or a thin parallelogram.
+            let iso = render(&s, &Options::square(64)).unwrap();
+            assert!(
+                coverage(&face_on) > coverage(&iso),
+                "axis {axis}: face-on {} vs iso {}",
+                coverage(&face_on),
+                coverage(&iso)
+            );
+            assert!(
+                coverage(&face_on) > 64 * 64 * 6 / 10,
+                "axis {axis}: fills the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tilted_plane_is_still_found() {
+        let mut s = flat_square(2);
+        // Tilt the XY square 40° about X.
+        let (sn, cs) = 40f32.to_radians().sin_cos();
+        for p in s.parts[0].mesh.positions.chunks_exact_mut(3) {
+            let (y, z) = (p[1], p[2]);
+            p[1] = y * cs - z * sn;
+            p[2] = y * sn + z * cs;
+        }
+        let img = render(
+            &s,
+            &Options {
+                camera: Camera::for_scene(&s),
+                ..Options::square(64)
+            },
+        )
+        .unwrap();
+        assert!(coverage(&img) > 64 * 64 * 6 / 10);
+    }
+
+    #[test]
+    fn solids_keep_the_isometric_default() {
+        assert_eq!(
+            Camera::for_scene(&cube([FaceStatus::Ok; 6])),
+            Camera::default()
+        );
+    }
+
+    #[test]
+    fn top_view_of_xy_plane_looks_down() {
+        let cam = Camera::looking_along([0.0, 0.0, 1.0]);
+        assert!((cam.elevation_deg - 90.0).abs() < 1e-3, "{cam:?}");
     }
 
     #[test]
