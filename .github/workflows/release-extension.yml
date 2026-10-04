@@ -5,8 +5,9 @@
 # Release, and a failure here blocks publication (DOWNSTREAM_RELEASE.md
 # "Extension Hook"). So everything that can go wrong goes wrong here:
 #
-#   - linux:  the AppImage (whole nix closure, OCCT included; runs on any
-#             Linux), smoke-tested, with a build-provenance attestation;
+#   - linux:  a relocatable tarball (binaries, every library and nix's own
+#             loader; runs on any Linux without FUSE or user namespaces),
+#             proven in clean distro containers, with a provenance attestation;
 #   - macos:  stepv.app as a DMG: Developer-ID signed, notarised and stapled
 #             when the Apple secrets exist, and a FINAL release refuses to ship
 #             without them; a candidate falls back to ad-hoc and says so;
@@ -57,7 +58,7 @@ permissions:
 
 jobs:
   linux:
-    name: Linux AppImage
+    name: Linux tarball
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
@@ -74,30 +75,23 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
 
-      - name: Build the AppImage
+      - name: Build the relocatable tarball
         env:
           PUBLISH_VERSION: ${{ inputs.publish_version }}
         run: |
-          nix bundle --bundler github:ralismark/nix-appimage/7946addbc0d97e358a6d7aefe5e82310f0fe6b18 \
-            .#default -o stepv.AppImage
-          mkdir -p dist
-          cp -L stepv.AppImage "dist/stepv-${PUBLISH_VERSION}-x86_64.AppImage"
-          chmod +x dist/*.AppImage
+          nix build .#default -o result
+          nix develop --command scripts/package-linux.sh result "$PUBLISH_VERSION"
 
-      - name: Smoke-test the AppImage
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: |
-          app=$(ls dist/*.AppImage)
-          "$app" --version
-          "$app" tests/data/assembly.step --png "$RUNNER_TEMP/a.png" --no-cache
-          test -s "$RUNNER_TEMP/a.png"
-          (cd dist && sha256sum ./*.AppImage > SHA256SUMS-linux)
+      - name: Prove it on distros without nix
+        run: scripts/test-linux-tarball.sh dist/stepv-*-linux.tar.gz
+
+      - name: Checksums
+        run: (cd dist && sha256sum ./*.tar.gz > SHA256SUMS-linux)
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
-          subject-path: dist/*.AppImage
+          subject-path: dist/*.tar.gz
 
       - name: Upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

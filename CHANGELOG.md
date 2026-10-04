@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The kernel runs in-process (the extension sandbox forbids exec) via `libstepvocct` and the
     `stepv-capi` C ABI; the interactive SceneKit preview uses per-face colour and the overlay
   - Built without Xcode; one shared copy of OCCT (57 MB app)
-- **Release train** ([#10](https://github.com/vig-os/stepv/issues/10)): AppImage, Developer-ID
+- **Release train** ([#10](https://github.com/vig-os/stepv/issues/10)): relocatable Linux tarball, Developer-ID
   signed and notarised DMG, build-provenance attestations, crates.io publish (Trusted Publishing
   after the first release)
 - **`NOTICE`** with OCCT's LGPL-2.1 and exception, shipped with every package ([#8](https://github.com/vig-os/stepv/issues/8))

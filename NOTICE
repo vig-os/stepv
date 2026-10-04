@@ -24,9 +24,8 @@ Corresponding source: https://github.com/Open-Cascade-SAS/OCCT/tree/V7_9_3
 OCCT is always DYNAMICALLY linked and kept in separate, replaceable files —
 never compiled into the `stepv` binary:
 
-  - Linux AppImage: the OCCT shared libraries (libTK*.so) inside the image.
-    `./stepv-*.AppImage --appimage-extract` unpacks it; replace them, then
-    run the extracted `AppRun`.
+  - Linux tarball: the OCCT shared libraries are stepv/lib/libTK*.so.
+    Replace them with a build of the same OCCT version.
   - macOS stepv.app: Contents/Frameworks/libTK*.dylib. Replace them with a
     build of the same OCCT version, then re-sign the bundle
     (`codesign --force --deep --sign - stepv.app` for local use).
@@ -37,7 +36,7 @@ never compiled into the `stepv` binary:
 Other libraries bundled with the binary packages
 =============================================================================
 
-The AppImage and stepv.app also carry these libraries, which OCCT or stepv
+The Linux tarball and stepv.app also carry these libraries, which OCCT or stepv
 link against, unmodified and dynamically linked:
 
   GNU libiconv / libcharset   LGPL-2.1-or-later   https://www.gnu.org/software/libiconv/
@@ -50,6 +49,14 @@ link against, unmodified and dynamically linked:
   zlib                        zlib License        https://zlib.net
   bzip2                       bzip2 License (BSD-style)          https://sourceware.org/bzip2/
   Brotli                      MIT                 https://github.com/google/brotli
+
+The Linux tarball additionally carries the C/C++ runtime it was built with,
+so that it runs independently of the host's:
+
+  GNU C Library (glibc,       LGPL-2.1-or-later   https://www.gnu.org/software/libc/
+  incl. the dynamic loader)   (replaceable: stepv/lib/ld.so and libc.so.6)
+  libstdc++, libgcc_s         GPL-3.0 with the GCC Runtime Library Exception
+                              https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html
 
 Their license texts are distributed with their upstream sources at the
 addresses above.

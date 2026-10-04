@@ -38,9 +38,15 @@ On a 391-file robustness corpus (NIST PMI, 300 ABC models, CAx-IF rounds, a 221 
 it once. If previews don't appear, enable *stepv* under System Settings → General → Login Items &
 Extensions → Quick Look.
 
-**Linux.** Download `stepv-<version>-x86_64.AppImage` from Releases and put it on your `PATH` as
-`stepv`. For thumbnails and the file-type association, also install the integration files from a
-checkout with `PREFIX=~/.local packaging/linux/install.sh --integration-only`. With Nix:
+**Linux.** Download `stepv-<version>-x86_64-linux.tar.gz` from Releases. It runs on any Linux
+distribution, with no dependencies and no root:
+
+```bash
+tar -xzf stepv-*-linux.tar.gz -C ~/.local/opt
+~/.local/opt/stepv/install-integration.sh   # stepv on PATH + thumbnails, MIME, desktop entry
+```
+
+With Nix:
 
 ```bash
 nix profile install github:vig-os/stepv

@@ -614,7 +614,9 @@ macOS; the third needs a logged-in session.
   (`scripts/set-version.py`); devkit's freeze only covers CHANGELOG.md.
 - **`release-extension.yml`**, the seam that blocks publication on failure, builds and gates the
   release artefacts:
-  - an AppImage of the whole nix closure, smoke-tested;
+  - a relocatable Linux tarball: binaries, every library and nix's own loader. Not an AppImage:
+    nix-appimage needs unprivileged user namespaces, which Ubuntu 24.04+ forbids. It is proven in
+    debian:11, ubuntu:22.04/24.04 and fedora:41 containers without /nix;
   - a DMG, Developer-ID signed, notarised and stapled when the Apple secrets exist (a *final*
     release refuses to ship without them; a candidate falls back to ad-hoc);
   - build-provenance attestations for both;
@@ -622,7 +624,7 @@ macOS; the third needs a logged-in session.
     publish and by Trusted Publishing (OIDC) after.
 - **`release-assets.yml`** attaches the attested artefacts to the published Release. The seam's
   token ceiling, `contents: read`, can't.
-- The Kernel CI builds the AppImage and the macOS app on every PR, so neither is first built on
+- The Kernel CI builds the Linux tarball (proven in clean debian/ubuntu/fedora containers) and the macOS app on every PR, so neither is first built on
   release day. The crate packages to 34 files (98 KB) and verifies from its own tarball.
 
 What only a human can do is listed in §7 "Owed".
@@ -717,7 +719,7 @@ that an agent must not take. Each one is the last step before something ships.
      `justfile.project` and `kernel.yml`.
 
 Done since S1, for the record: kernel CI (#11, `kernel.yml`: nix build, flake check, strict
-harness, CLI sweep, AppImage, macOS app, Linux integration, advisories) and `deny.toml` (#13:
+harness, CLI sweep, Linux tarball, macOS app, Linux integration, advisories) and `deny.toml` (#13:
 bans/licenses/sources inside flake check, advisories in CI).
 
 Checked and **not** owed, recorded so nobody re-investigates:

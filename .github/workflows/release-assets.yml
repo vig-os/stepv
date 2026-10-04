@@ -1,7 +1,7 @@
 # Attach stepv's release artefacts to the GitHub Release (vig-os/stepv#10).
 # Project-owned.
 #
-# release-extension.yml builds, tests, signs and attests the AppImage and the
+# release-extension.yml builds, tests, signs and attests the Linux tarball and the
 # DMG before devkit publishes the Release, but that seam's token ceiling is
 # contents: read (DOWNSTREAM_RELEASE.md), so it cannot write the Release. This
 # workflow owns its own grant and runs after publication: it finds the

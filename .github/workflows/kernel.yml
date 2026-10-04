@@ -79,20 +79,17 @@ jobs:
         # register extensions; it runs locally via `just macos-test --quicklook`.
         run: nix develop --command just macos-test
 
-      - name: Linux AppImage (the release artefact) and a smoke test of it
+      - name: Linux release tarball, proven on distros without nix
         if: runner.os == 'Linux'
-        # The whole closure, OCCT included, in one file that runs on any
-        # Linux: what release-extension.yml publishes. Proven here on every PR.
-        # APPIMAGE_EXTRACT_AND_RUN: runners have no FUSE.
+        # The release artefact: binaries + every library + nix's own loader,
+        # started through it, so no FUSE, no user namespaces (Ubuntu 24.04+
+        # forbids those, which is why an AppImage was dropped), no glibc
+        # dependency. Unpacked and exercised in debian:11, ubuntu:22.04,
+        # ubuntu:24.04 and fedora:41 containers, none of which has /nix.
         run: |
-          nix bundle --bundler github:ralismark/nix-appimage/7946addbc0d97e358a6d7aefe5e82310f0fe6b18 \
-            .#default -o stepv.AppImage
-          export APPIMAGE_EXTRACT_AND_RUN=1
-          ./stepv.AppImage --version
-          ./stepv.AppImage tests/data/assembly.step --png "$RUNNER_TEMP/a.png" --no-cache
-          ./stepv.AppImage tests/data/sketch.step --png "$RUNNER_TEMP/s.png" --no-cache
-          test -s "$RUNNER_TEMP/a.png" && test -s "$RUNNER_TEMP/s.png"
-          ls -la stepv.AppImage
+          nix build .#default -o result
+          nix develop --command scripts/package-linux.sh result ci
+          scripts/test-linux-tarball.sh dist/stepv-ci-*-linux.tar.gz
 
       - name: Linux desktop integration
         if: runner.os == 'Linux'
