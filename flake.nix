@@ -168,7 +168,10 @@
 
           # Named rather than null so a break is attributed to `stepv` instead
           # of reported against "the workspace" (plan.md §"Crate layout").
-          crates = [ "stepv" ];
+          crates = [
+            "stepv"
+            "stepv-capi"
+          ];
 
           # The harness corpus manifest and the committed CLI-test corpus live
           # outside the cargo source filter; without this, crane drops them.

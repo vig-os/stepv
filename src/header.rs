@@ -50,6 +50,12 @@ pub struct Info {
     pub header_error: Option<String>,
 }
 
+/// `info` as a JSON object (the `info` field of the CLI report).
+#[must_use]
+pub fn to_json(info: &Info) -> String {
+    serde_json::to_string(info).expect("Info is plain data and always serialises")
+}
+
 /// Reads `path`'s header. Never fails: I/O errors become `header_error`.
 #[must_use]
 pub fn read(path: &Path) -> Info {

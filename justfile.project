@@ -45,7 +45,7 @@ lint:
 [private]
 _rust-lint:
     cargo fmt --check
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
     cargo clippy --all-targets --no-default-features -- -D warnings
 
 # Format code
@@ -76,7 +76,7 @@ test *args:
 # whose hooks have no rustfmt or clippy.
 [private]
 _rust-test *args: kernel _rust-lint
-    cargo test {{ args }}
+    cargo test --workspace {{ args }}
 
 # Run tests with coverage (same exit-5 rule as `test` above)
 [group('test')]
@@ -168,6 +168,39 @@ test-data: kernel
 cli-sweep *args: kernel
     cargo build --release
     python3 scripts/cli-sweep.py {{ args }}
+
+# S5: build target/macos/stepv.app (Quick Look preview + thumbnail extensions).
+# stepv-capi is built ON ITS OWN: building it with --workspace would unify in
+# the CLI's default `viewer` feature and drag the window library into the
+# extensions. Sign with STEPV_SIGN_IDENTITY (default ad-hoc).
+[group('macos')]
+macos-app: kernel
+    cargo build --release --bin stepv
+    cargo build --release -p stepv-capi
+    scripts/build-macos-app.sh
+
+# Install target/macos/stepv.app into /Applications and enable its Quick Look
+# extensions (what launching the app and System Settings would do).
+[group('macos')]
+macos-install: macos-app
+    rm -rf /Applications/stepv.app
+    cp -R target/macos/stepv.app /Applications/
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/stepv.app
+    for x in /Applications/stepv.app/Contents/PlugIns/*.appex; do pluginkit -a "$x"; done
+    pluginkit -e use -i ch.exoma.stepv.thumbnail
+    pluginkit -e use -i ch.exoma.stepv.preview
+    qlmanage -r >/dev/null 2>&1 || true
+
+# Headless macOS checks (Swift reader vs Rust, offscreen preview render, and
+# with --quicklook the real Quick Look round trip against /Applications).
+[group('macos')]
+macos-test *args: macos-app
+    scripts/test-macos.sh {{ args }}
+
+# DMG; signed with STEPV_SIGN_IDENTITY and notarised when Apple credentials exist.
+[group('macos')]
+macos-package: macos-app
+    scripts/package-macos.sh
 
 # Run the kernel robustness harness over tests/fixtures/ and print the
 # pass-rate / timing table that plan.md §5 asks you to record.

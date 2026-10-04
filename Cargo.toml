@@ -10,10 +10,15 @@ license = "Apache-2.0"
 keywords = ["cad", "step", "opencascade", "quicklook", "thumbnail"]
 categories = ["command-line-utilities", "graphics"]
 
-# Single crate (lib + bin) on purpose while the kernel decision is being
-# validated — see plan.md §"Crate layout". Split into `stepv-core` +
-# `stepv` only when a SECOND consumer of the library appears (the C ABI for the
-# Swift Quick Look extension is the expected trigger).
+# The library + CLI crate. plan.md §"Crate layout" deferred any split until a
+# SECOND consumer of the library appeared; it has — the Swift Quick Look
+# extensions, which cannot exec the CLI — so the C ABI they link is its own
+# workspace member, capi/ (stepv-capi). The library stays here rather than in
+# a separate stepv-core: one crate on crates.io, no extra publish to keep
+# in step.
+[workspace]
+members = [".", "capi"]
+
 [lib]
 name = "stepv"
 path = "src/lib.rs"
