@@ -35,7 +35,9 @@ categories = ["command-line-utilities", "graphics"]
 # a separate stepv-core: one crate on crates.io, no extra publish to keep
 # in step.
 [workspace]
-members = [".", "capi"]
+members = [".", "capi", "spikes/viewer-egui"]
+# Spikes (#27) are standalone, so their dependencies never reach the product.
+exclude = ["spikes"]
 
 [lib]
 name = "stepv"

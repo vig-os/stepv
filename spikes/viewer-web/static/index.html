@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>stepv spike B</title>
+<style>
+  body { margin: 0; display: grid; grid-template-columns: 240px 1fr 260px; grid-template-rows: 1fr 24px;
+         height: 100vh; font: 13px system-ui, sans-serif; background: #e8eaee; color: #111; }
+  #tree, #inspect { overflow: auto; padding: 8px; background: #f7f7f8; }
+  #view { position: relative; } canvas { display: block; }
+  #status { grid-column: 1 / 4; padding: 4px 8px; background: #ddd; }
+  ul { list-style: none; padding-left: 14px; margin: 2px 0; } h3 { margin: 4px 0 8px; }
+</style>
+<script type="importmap">{ "imports": { "three": "/three.module.min.js" } }</script>
+</head>
+<body>
+<div id="tree"><h3>Model</h3></div>
+<div id="view"></div>
+<div id="inspect">
+  <h3>Section</h3>
+  <label><input type="checkbox" id="clip"> clip</label>
+  <label><input type="radio" name="axis" value="0" checked>X</label>
+  <label><input type="radio" name="axis" value="1">Y</label>
+  <label><input type="radio" name="axis" value="2">Z</label>
+  <input type="range" id="offset" min="0" max="1" step="0.001" value="0.5">
+  <h3>Selection</h3><div id="sel">click a face</div>
+</div>
+<div id="status"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from '/OrbitControls.js';
+
+const t0 = performance.now();
+const q = new URLSearchParams(location.search), token = q.get('t'), bench = +q.get('bench') || 0;
+const [buf, topo] = await Promise.all([
+  fetch(`/mesh?t=${token}`).then(r => r.arrayBuffer()),
+  fetch(`/topology?t=${token}`).then(r => r.json()),
+]);
+const tFetched = performance.now();
+
+// ── Scene: one Mesh per part ──
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.localClippingEnabled = true;
+renderer.setPixelRatio(devicePixelRatio);
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xe8eaee);
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 1e7);
+camera.up.set(0, 0, 1);  // CAD Z-up
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const headlight = new THREE.DirectionalLight(0xffffff, 2.2);
+camera.add(headlight); scene.add(camera);
+const plane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+const material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, clippingPlanes: [] });
+
+const dv = new DataView(buf); let o = 0;
+const u32 = () => { const v = dv.getUint32(o, true); o += 4; return v; };
+const f32s = n => { const a = new Float32Array(buf.slice(o, o + n * 4)); o += n * 4; return a; };
+const u32s = n => { const a = new Uint32Array(buf.slice(o, o + n * 4)); o += n * 4; return a; };
+const parts = [], box = new THREE.Box3();
+let triangles = 0;
+for (let i = 0, n = u32(); i < n; i++) {
+  const nv = u32(), nt = u32();
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(f32s(nv * 3), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(f32s(nv * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(f32s(nv * 3), 3));
+  g.setIndex(new THREE.BufferAttribute(u32s(nt * 3), 1));
+  const faceIds = u32s(nt);
+  g.computeBoundingBox(); g.computeBoundingSphere();
+  const m = new THREE.Mesh(g, material);
+  m.userData = { part: i, faceIds };
+  scene.add(m); parts.push(m); box.union(g.boundingBox); triangles += nt;
+}
+const centre = box.getCenter(new THREE.Vector3()), radius = box.getSize(new THREE.Vector3()).length() / 2;
+camera.position.copy(centre).add(new THREE.Vector3(1, -1.2, 0.9).normalize().multiplyScalar(radius * 3.5));
+camera.near = radius * 0.01; camera.far = radius * 20; camera.updateProjectionMatrix();
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(centre); controls.update();
+
+// ── Tree ──
+const tree = document.getElementById('tree');
+function node(n) {
+  const li = document.createElement('li');
+  if ('part' in n) {
+    const cb = Object.assign(document.createElement('input'), { type: 'checkbox', checked: true });
+    cb.onchange = () => { parts[n.part].visible = cb.checked; };
+    li.append(cb, ` ${n.name} #${n.part}`);
+  } else {
+    const d = document.createElement('details'); d.open = true;
+    d.append(Object.assign(document.createElement('summary'), { textContent: n.name }));
+    const ul = document.createElement('ul'); n.children.forEach(c => ul.append(node(c))); d.append(ul); li.append(d);
+  }
+  return li;
+}
+const ul = document.createElement('ul'); topo.tree.forEach(n => ul.append(node(n))); tree.append(ul);
+
+// ── Section ──
+const clipEl = document.getElementById('clip'), offsetEl = document.getElementById('offset');
+function section() {
+  const axis = +document.querySelector('input[name=axis]:checked').value;
+  const n = new THREE.Vector3(); n.setComponent(axis, -1);
+  const lo = box.min.getComponent(axis), hi = box.max.getComponent(axis);
+  plane.set(n, lo + (hi - lo) * +offsetEl.value);
+  material.clippingPlanes = clipEl.checked ? [plane] : [];
+  material.needsUpdate = true;
+}
+[clipEl, offsetEl, ...document.querySelectorAll('input[name=axis]')].forEach(e => e.oninput = section);
+
+// ── Picking ──
+const ray = new THREE.Raycaster(), sel = document.getElementById('sel');
+let pickMs = 0, highlight = null;
+function describe(s) {
+  if (s.surface === 'cylinder') return `cylinder, r = ${s.radius.toFixed(4)} (⌀ ${(2 * s.radius).toFixed(4)})`;
+  if (s.surface === 'plane') return `plane, normal [${s.normal.map(v => v.toFixed(3))}]`;
+  if ('radius' in s) return `${s.surface}, r = ${s.radius.toFixed(4)}`;
+  return s.surface;
+}
+function pick(x, y) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ray.setFromCamera(new THREE.Vector2((x - r.left) / r.width * 2 - 1, -(y - r.top) / r.height * 2 + 1), camera);
+  const t = performance.now();
+  const hits = ray.intersectObjects(parts.filter(p => p.visible), false)
+    .filter(h => !clipEl.checked || plane.distanceToPoint(h.point) >= 0);
+  pickMs = performance.now() - t;
+  return hits[0];
+}
+let down = null;
+renderer.domElement.addEventListener('pointerdown', e => down = [e.clientX, e.clientY]);
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 3) return;
+  const h = pick(e.clientX, e.clientY);
+  if (highlight) scene.remove(highlight);
+  if (!h) { sel.textContent = 'nothing'; return; }
+  const { part, faceIds } = h.object.userData, face = faceIds[h.faceIndex];
+  const p = topo.parts[part], proto = topo.prototypes[p.prototype], f = proto.faces[face];
+  sel.innerHTML = `part ${part}: ${p.name}<br>face ${face}: ${describe(f)}<br>face area ${f.area.toFixed(3)} mm²` +
+    `<br>part volume ${proto.volume == null ? '—' : proto.volume.toFixed(3) + ' mm³'}<br>pick ${pickMs.toFixed(1)} ms`;
+  // Highlight: the face's triangles as an overlay mesh.
+  const g = h.object.geometry, idx = g.index.array, tris = [];
+  for (let t = 0; t < faceIds.length; t++) if (faceIds[t] === face) tris.push(idx[3 * t], idx[3 * t + 1], idx[3 * t + 2]);
+  const hg = new THREE.BufferGeometry(); hg.setAttribute('position', g.attributes.position); hg.setIndex(tris);
+  highlight = new THREE.Mesh(hg, new THREE.MeshBasicMaterial({ color: 0xffd81a, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -1, clippingPlanes: material.clippingPlanes }));
+  scene.add(highlight);
+});
+
+// ── Loop ──
+const status = document.getElementById('status'), frames = [];
+let last = performance.now(), firstFrame = 0, left = bench;
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+function frame(now) {
+  frames.push(now - last); last = now; if (frames.length > 120) frames.shift();
+  if (left > 0) {  // orbit, as spike A's bench does
+    const off = camera.position.clone().sub(centre).applyAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 180);
+    camera.position.copy(centre).add(off); camera.lookAt(centre);
+  } else controls.update();
+  renderer.render(scene, camera);
+  if (!firstFrame) firstFrame = performance.now();
+  const avg = frames.reduce((a, b) => a + b, 0) / frames.length;
+  status.textContent = `${parts.length} parts · ${triangles} triangles · fetch ${((tFetched - t0) / 1e3).toFixed(2)} s · frame ${avg.toFixed(2)} ms`;
+  if (bench && --left === 0) {
+    const f = [...frames].sort((a, b) => a - b);
+    const r = renderer.domElement.getBoundingClientRect();
+    pick(r.left + r.width / 2, r.top + r.height / 2);
+    fetch(`/bench?t=${token}`, { method: 'POST', body:
+      `${parts.length} parts, ${triangles} triangles, fetch+parse ${((tFetched - t0) / 1e3).toFixed(2)} s, ` +
+      `first frame ${((firstFrame - t0) / 1e3).toFixed(2)} s (page-relative), frame p50 ${f[f.length >> 1].toFixed(2)} ms ` +
+      `p95 ${f[Math.floor(f.length * 0.95)].toFixed(2)} ms, centre pick ${pickMs.toFixed(1)} ms` });
+    return;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
