@@ -1,8 +1,11 @@
 # stepv — implementation plan and handoff
 
-**Status:** scaffolded, kernel unproven. Nothing here has rendered a STEP file yet.
-**Audience:** the next agent or human picking this up cold. Read §1–§3, then start at §5 step S1.
-**Written:** 2026-10-04.
+**Status:** S1 done — **Plan A failed its gate, Plan B passed it** (§5 "S1 result"). The kernel is
+native OCCT 7.9.3 in a subprocess (`kernel/stepv-occt.cpp`, driven by `src/occt.rs`); 97.2% of a
+391-file corpus loads and tessellates cleanly with zero crashes. Next is S2.
+**Audience:** the next agent or human picking this up cold. Read §1–§3 and §5 "S1 result", then
+start at S2.
+**Written:** 2026-10-04. **S1 recorded:** 2026-10-04.
 
 Everything in §1–§4 is a *settled decision with stated evidence*. §5 is the work. §6 is what is
 deliberately unresolved. If you disagree with a decision, §3 names the exact observation that would
@@ -60,8 +63,8 @@ never "which kernel" but "which packaging of OCCT".
 <!-- pyml disable-num-lines 13 line-length -->
 | Option | Verdict | Why |
 | --- | --- | --- |
-| **`occt-wasm`** (OCCT V8 to WASM, run on wasmtime) | **CHOSEN — Plan A** | Has the full data-exchange surface; see §3 |
-| **Native OCCT in C++** | **Fallback — Plan B** | Correct and proven, but you build OCCT and own a C++ build on two platforms |
+| **`occt-wasm`** (OCCT V8 to WASM, run on wasmtime) | Plan A — **failed S1** | Has the full data-exchange surface on paper; in the Rust crate STEP import traps (no FS in the WASI build). See §3, §5 "S1 result" |
+| **Native OCCT in C++** | Plan B — **CHOSEN after S1** | 97.2% on the S1 corpus, 0 crashes. OCCT comes from nixpkgs, so the "own a C++ build" cost is one CMake file |
 | **`occt-import-js`** | Keep for a web path | Same idea as Plan A but browser-first, LGPL-2.1, powers Online3DViewer |
 | **`bschwind/opencascade-rs`** | **Rejected** | See below — the binding is missing everything that matters here |
 | **`cadrum`** | **Rejected, steal one idea** | See below |
@@ -117,6 +120,11 @@ X server. Borrow the approach (§4); do not take the dependency.
 ---
 
 ## 3. Plan A: `occt-wasm`
+
+> **Outcome (S1, 2026-10-04): rejected on evidence; Plan B is the kernel.** The reasoning below
+> is kept as written because it was sound *as a plan*. What it got wrong was the packaging, which
+> only running it could show. In the Rust crate, STEP import does not work at all. See §5
+> "S1 result" for the measurements and §3 "What would bring Plan A back" for the way back.
 
 [`andymai/occt-wasm`](https://github.com/andymai/occt-wasm) — OCCT **V8** compiled to WebAssembly,
 with a Rust crate that embeds the brotli-compressed module (~4.7 MB) and executes it on **wasmtime**.
@@ -176,6 +184,23 @@ Go to Plan B if **any** of these is observed in §5:
 - The 4 GB arena is hit by files in the size range users actually have.
 - An API break that cannot be absorbed in under a day, twice in a row.
 
+The first two were observed: a 0% pass rate (STEP import traps), and a cold start of 2.2 s.
+
+### What would bring Plan A back
+
+All three of these, verified by re-running `just harness` against it, not by reading a changelog:
+
+1. A crates.io release whose `OcctKernel::new()` instantiates. 4.0.0 does not; the fix is on
+   upstream `main` as crate 4.1.0, untagged as of 2026-10-04.
+2. STEP/XCAF import that does not go through a file. The facade writes the bytes to
+   `/tmp/*.step` and the standalone WASI module has no filesystem; its import list has no `open`
+   at all, so no host shim can fix it. OCCT has `STEPCAFControl_Reader::ReadStream`, so this is a
+   small facade change upstream, but it *is* upstream's change to make.
+3. A constructor that takes a precompiled module (`Module::deserialize`) and a store limiter.
+   4.x only has `new()`, which JIT-compiles the 23 MB module on every process start.
+
+Even then, Plan B's subprocess already gives the crash containment that was Plan A's best argument.
+
 ### Plan B: native OCCT in C++
 
 Roughly 200 lines. `STEPCAFControl_Reader` to an XCAF document, walk `XCAFDoc_DocumentTool`'s
@@ -197,6 +222,22 @@ needed.
 Only choose a Rust bridge over plain C++ if stepv grows substantial non-OCCT logic. A previewer
 will not.
 
+**As built in S1:** `kernel/stepv-occt.cpp` (~600 lines with the readers and the mesh writer),
+CMake, OCCT 7.9.3 from the pinned nixpkgs. It runs as a **subprocess** of the Rust side
+(`src/occt.rs`), not as a linked library, for three reasons:
+
+- **Containment.** A file that crashes OCCT kills a child process, and the caller gets a reported
+  `Crashed` outcome. That was Plan A's strongest argument, and a process boundary provides it.
+- **Hard limits for free.** The parent kills the child at the deadline. No cooperative
+  cancellation inside OCCT is needed.
+- **LGPL.** OCCT stays dynamically linked into a separate executable. Replacing it means replacing
+  shared libraries next to a binary we never link into.
+
+Contract: one input path; a one-line JSON summary on stdout (also on failure, with exit 3); with
+`--mesh`, the planar buffers in the `STEPVMSH` format specified at the top of the C++ file and
+decoded by `occt::read_mesh`. OCCT's own stdout chatter is redirected to stderr so it cannot
+corrupt the summary.
+
 ---
 
 ## 4. Architecture
@@ -207,10 +248,10 @@ Split hard at the mesh boundary. One CLI is the product boundary; both front-end
                   ┌──────────────────────────────────────┐
   .step/.stp  ──▶ │  stepv (CLI)                         │
   .iges/.igs      │                                      │
-  .brep           │   occt-wasm (OCCT V8 on wasmtime)    │
-                  │     xcafImportSTEP                   │
-                  │     tessellateRelative / meshBatch   │
-                  │   ↓                                  │
+  .brep           │   stepv-occt subprocess (OCCT 7.9)   │
+                  │     STEPCAF/IGESCAF reader → XCAF    │
+                  │     BRepMesh, bbox-relative defl.    │
+                  │   ↓  STEPVMSH buffers + JSON         │
                   │   Scene { bbox, parts[] }  (lib.rs)  │
                   │   ↓                                  │
                   │   cache: blake3(path,len,mtime,…)    │
@@ -233,8 +274,18 @@ failed but metadata is still valid — the front-ends depend on that distinction
 **Deflection is relative to the bounding-box diagonal.** This is the single most important number in
 the pipeline and the reason most CAD previewers are either visibly faceted on small parts or hang on
 big assemblies. `Deflection::{THUMBNAIL, PREVIEW}` in `src/lib.rs` encode the useful bands
-(linear 0.1–0.5% of the diagonal, angular 20–30°). `occt-wasm`'s `tessellateRelative` does this
-natively — use it, do not reimplement it.
+(linear 0.1–0.5% of the diagonal, angular 20–30°). **Correction from S1:** this plan used to say
+`occt-wasm`'s `tessellateRelative` "does this natively". It does not. It passes OCCT's
+`isRelative` flag, which scales deflection **per edge**, by each edge's own size, not by the
+model. The kernel computes the whole model's bbox diagonal and passes an absolute deflection
+with `Relative = false`.
+
+**S1 finding, mesher:** on these files, angular deflection costs far more than linear. The worst
+file in the corpus (ABC `00000046`, a perforated plate) spends 14.8 s and 7.2 GB in BRepMesh on
+two planar faces with ~1,250 holes each. That is the same at linear 0.1% and 0.5%, but drops to
+7.7 s and 4.2 GB at 30°. OCCT's alternative Delabella triangulator was still running after nine
+minutes on that file. Watson (the default) stays. The S2 timeout and memory cap are what make
+this file safe, not tuning.
 
 **Cache or be a fan event.** Finder re-requests thumbnails constantly. Key on
 `(path, len, mtime, deflection, output-kind)` — already implemented and unit-tested in
@@ -247,8 +298,11 @@ the STEP header (`FILE_DESCRIPTION`, `FILE_NAME`, originating system, schema, pa
 that as text alongside the bounding box. A header parse never fails. Foxtrot-based viewers show
 nothing. Ship `--info` (exit 0, JSON on stdout) before shipping pretty rendering.
 
-**Progressive display.** `getBoundingBox` is available before any tessellation. Show the box plus
-header metadata immediately, swap in geometry when it arrives.
+**Progressive display.** The bounding box is available before any tessellation. Show the box plus
+header metadata immediately, swap in geometry when it arrives. S1 shows where the wait actually
+is: on files that take over 1 s, **72% of wall time is STEP transfer** (entity translation plus
+OCCT's default shape healing) and 22% is meshing. A box-first display therefore has to come from
+a cheaper pass than a full transfer, which makes it an S2 design question.
 
 **Hard limits in the CLI, not the extension.** Wall-clock timeout (default 20 s) and a memory cap,
 with a non-zero exit. A Quick Look extension that hangs is a worse bug than one that shows an icon.
@@ -279,11 +333,13 @@ Tracked as [`vig-os/stepv#1`](https://github.com/vig-os/stepv/issues/1).
 ```bash
 cd ~/Projects/stepv
 direnv allow                      # or: nix develop
-cargo add occt-wasm@4.1
+just fixtures                     # builds kernel/, fetches + generates the corpus
+just harness                      # examples/harness.rs over tests/fixtures/
+just harness --cold-start 30      # spawn-to-result latency
 ```
 
-Write `tests/harness.rs` (or `examples/harness.rs` — it needs to run on real files, not fixtures in
-the cargo source filter). For each input file:
+(As originally written, this step began with `cargo add occt-wasm@4.1`; that crate version does
+not exist on crates.io — see "S1 result".) For each input file, `examples/harness.rs`:
 
 1. `xcafImportSTEP` the bytes.
 2. Walk XCAF labels; record how many parts resolved a **name** and a **colour**.
@@ -315,11 +371,97 @@ Always `--release` (risk 5 above).
 If the gate fails on the §3 criteria, switch to Plan B and record why here. **Do not proceed to S2
 until S1 has a recorded pass rate.**
 
+### S1 result (2026-10-04, sage: Mac Studio, arm64)
+
+**Plan A, `occt-wasm`: failed, 0% pass rate.** Measured in a scratch crate, not inferred:
+
+| Build | `OcctKernel::new()` | `import_step` / `xcaf_import_step` on a 10 mm cube |
+| --- | --- | --- |
+| crates.io 4.0.0 (latest published) | **fails**: `unknown import: env::emscripten_get_preloaded_image_data` | unreachable |
+| upstream `main` @ `1091f22` (crate 4.1.0, untagged) | OK, **2.2 s** (JIT, `--release`) | **wasm trap: `uninitialized element`** |
+
+The `cargo add occt-wasm@4.1` this plan prescribed is impossible: 4.1 is not on crates.io, and
+4.0.0 cannot instantiate at all (upstream PR #371: the crate's tests had been skipping silently
+since its first commit). On `main`, primitives and `tessellate` work, but both STEP importers
+write the input to `/tmp` inside a WASI module whose import list has no `open`. The facade's
+`ShapeFix` question (§6) is answered — `fix_shape` / `heal_*` exist — and is moot. §3 "What would
+bring Plan A back" lists the conditions.
+
+**Plan B, native OCCT 7.9.3: passed.** `just fixtures && just harness`, at `Deflection::PREVIEW`
+(0.1% of the bbox diagonal, 20°). One kernel process per file, run serially:
+
+<!-- pyml disable-num-lines 9 line-length -->
+| Source | Files | Pass | Partial | Clean fail | Bad mesh | Crash | Timeout | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | Max RSS MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| abc-dataset | 300 | 290 | 9 | 1 | 0 | 0 | 0 | 96.7% | 100.0% | 0.0% / 99.2% | 84 | 3205 | 7255 |
+| nist-pmi | 33 | 33 | 0 | 0 | 0 | 0 | 0 | 100.0% | 9.9% | 45.1% / 11.3% | 146 | 329 | 158 |
+| occt-import-js | 57 | 56 | 1 | 0 | 0 | 0 | 0 | 98.2% | 58.7% | 76.1% / 0.0% | 61 | 92 | 60 |
+| stress-assembly | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 100.0% | 100.0% | 0.0% / 0.0% | 20232 | 20232 | 2078 |
+| **all but malformed** | **391** | **380** | 10 | 1 | 0 | **0** | **0** | **97.2%** | 94.5% | 7.1% / 81.0% | 80 | 2694 | 7255 |
+| malformed (want clean fail) | 10 | — | — | **10** | 0 | 0 | 0 | — | — | — | — | — | 27 |
+
+*Partial* = loaded and drew, but some faces produced no triangles (10 files, 1–28 faces each, out of
+hundreds to thousands). These count **against** the pass rate, because they are exactly the
+silent failure §2 holds against Foxtrot. Here they are counted, and S2 has to surface them. The one
+clean fail is ABC `00000092`, a file that tessellates to zero triangles.
+
+Against the gate:
+
+| Metric | Target | Result |
+| --- | --- | --- |
+| Load + tessellate pass rate | Record it | **97.2%** (380/391); 99.7% load and draw something |
+| Parts with names resolved | Record it | 94.5% overall; exporter-dependent as expected: ABC/Onshape 100%, NIST 9.9% |
+| Parts with colours resolved | Record it | 7.1% at part level, 81.0% per face. Onshape colours faces, not parts, so the front-ends must render per-face colour or they will lose it |
+| p95 wall-clock, typical part | < 400 ms | **337 ms** for files under 1 MB (284 files). See the size breakdown below |
+| Cold start | Measure; decides precompiling | **62–69 ms** (min–p95, 30 runs, 6.6 KB file): spawn, OCCT init, read, mesh, write. With no WASM, there is nothing to precompile, so the `.cwasm` question is gone |
+| 200 MB assembly | Fail cleanly, never hang or OOM | **221 MB** synthetic assembly (60 distinct copies of NIST CTC 02): **loads**, 20.2 s, 2.1 GB peak. No hang. It needs S2's limits to be safe in Quick Look |
+| Cliff probe (one-off, not in the corpus) | Find it | A **745 MB** file (200 copies, 800 parts) also **loads**: 65.6 s, **5.5 GB** peak, 5.1M triangles. Native 64-bit has no 4 GB arena, so the cliff is now the host's RAM. That makes S2's memory cap mandatory |
+
+Wall-clock by input size (passing files, parent-side, spawn included):
+
+| File size | Files | p50 ms | p95 ms | max ms |
+| --- | ---: | ---: | ---: | ---: |
+| < 0.1 MB | 171 | 57 | 87 | 204 |
+| 0.1–1 MB | 113 | 109 | 337 | 836 |
+| 1–5 MB | 75 | 522 | 1456 | 4249 |
+| > 5 MB | 21 | 5604 | 21068 | 21164 |
+
+82.6% of passing files finish under 400 ms. The slow tail is the reason for the cache, the
+timeout and the bbox-first display, not a kernel defect. It is dominated by STEP transfer, not
+meshing (§4).
+
+**Two kernel bugs found and fixed by the harness:** (1) multi-file CAx-IF assemblies resolved
+to *no geometry* when given a relative path, because OCCT resolves external references only
+against an absolute one. The kernel now `realpath`s its input, and occt-import-js went from 78.9% to
+98.2%. (2) OCCT's auto-naming invented part names ("SOLID") for unnamed shapes, inflating the
+names column. It is now disabled.
+
+**Corpus caveats, stated so the number is not over-read.** `cax-if` (full rounds, behind
+registration) and `exporter-matrix` (hand-collected SolidWorks/NX/CATIA/Fusion/FreeCAD output)
+are **not yet in the corpus**. The CAx-IF rounds are covered only through the public subset in
+`occt-import-js`. The stress assembly is synthetic. ABC is all Onshape output. 97.2% is
+therefore a lower bound on robustness against one exporter and a sample of the standard, not a
+claim about CATIA. Exact bytes are in `tests/fixtures/corpus.sha256`; per-file results are in
+`harness-out/results.jsonl` after a run.
+
 ### S2 — The CLI for real
 
 Implement `--info` first (header metadata as JSON, exit 0) — it is the honest-degradation path and it
 cannot fail. Then `--glb`, then `--png` with the software rasteriser, then the cache wired through,
 then the timeout and memory cap. Keep the exit codes in `src/main.rs` exactly as documented.
+
+Carried in from S1:
+
+- `occt::run` already enforces the wall-clock cap by killing the child; the CLI maps
+  `Outcome::Timeout` to exit 4. The **memory cap** is not done. `RLIMIT_AS` is not enforced on
+  macOS, so it needs a per-platform answer (Linux: `RLIMIT_AS` in the child; macOS: watch the
+  child's RSS from the parent and kill it).
+- `--info` must **not** go through the kernel's full transfer: transfer is the slow stage.
+  Parse the Part 21 header directly in Rust.
+- Partial meshes (faces with no triangles) must be visible in the output, not just counted.
+  The JSON summary already carries `faces_unmeshed`.
+- Per-face colour: 81% of parts carry colour only per face (Onshape). `Mesh::face_ids` is
+  already per-triangle; the kernel needs to emit a face-colour table next to it.
 
 ### S3 — Limits and failure modes
 
@@ -346,16 +488,24 @@ release train; §"Repo setup" below records what still has to be wired for it.
 
 ## 6. Open questions
 
-- **Precompiled `.cwasm` distribution.** It is host-arch and wasmtime-version specific. Build at
-  install time, ship per-arch, or build on first run and cache? S1's cold-start delta decides whether
-  this matters at all.
-- **LGPL compliance wording.** Shipping the `.wasm` as a separate replaceable file is the plan (§3).
-  Someone should write the actual `NOTICE` text before the first public binary, not after.
+- ~~**Precompiled `.cwasm` distribution.**~~ Moot: Plan B has no WASM module (S1).
+- **Shipping OCCT.** New with Plan B. The Linux packages can depend on the distribution's OCCT,
+  but a macOS Quick Look extension must bundle the OCCT dylibs inside the app and sign them.
+  Measure the bundle size before S5 commits to it.
+- **LGPL compliance wording.** OCCT is dynamically linked into a separate executable (§3 "As
+  built"), so it is replaceable. Someone should write the actual `NOTICE` text before the first
+  public binary, not after.
 - **`occt-import-js` for a web path.** Same kernel, browser-first, LGPL-2.1. Likely the right answer
   if a web preview is ever wanted; explicitly out of scope now.
-- **Does `occt-wasm` expose `ShapeFix`?** The facade header was read for STEP/XCAF/mesh/glTF and
-  those are all present. Healing was *not* confirmed either way. Check during S1 — if absent, dirty
-  exporter output will fail more often than native OCCT would, and that is a Plan B argument.
+- ~~**Does `occt-wasm` expose `ShapeFix`?**~~ Answered in S1: yes (`fix_shape`, `heal_solid`,
+  `heal_face`, …), and moot, since its STEP import does not work. Under Plan B the STEP reader
+  applies OCCT's default shape processing during transfer.
+- **Perforated-face meshing.** BRepMesh's Watson triangulator needs 14.8 s and 7.2 GB on a plate
+  with ~1,250 holes (ABC `00000046`, §4). The limits contain it. Whether a thumbnail should fall
+  back to a coarser angle on timeout, rather than show nothing, is an S2/S3 product decision.
+- **Upstream report for `occt-wasm`.** The STEP-import-needs-a-filesystem gap (§3) is known
+  upstream (PR #371 "Known gap"), but no issue tracks it. Filing one is outward-facing, so it is
+  left to a human.
 - **Shared cache with cxad.** `src/cache.rs` deliberately uses blake3, the same function cxad's node
   store uses, so a future shared cache needs no migration. No such sharing is designed yet.
 
@@ -382,16 +532,22 @@ release train; §"Repo setup" below records what still has to be wired for it.
 - **`src/cache.rs`** — cache keys, implemented and unit-tested.
 - **`src/main.rs`** — the CLI argument surface and exit codes, fixed before either front-end exists.
   It exits 3 with an honest "not implemented" rather than faking a render.
+- **S1 (2026-10-04):** `kernel/` (the Plan B C++ kernel plus the `stress-gen` fixture generator, both
+  built by `just kernel`); `src/occt.rs` (subprocess driver, timeout, `STEPVMSH` decoder, tests);
+  `examples/harness.rs`; `just fixtures` implemented by `scripts/fetch-fixtures.py`, with every
+  download pinned by sha256 and the resulting bytes recorded in the committed
+  `tests/fixtures/corpus.sha256`; `flake.nix` with `pkgs.opencascade-occt` and the `native` module
+  enabled.
 
 ### Owed
 
-- **The `occt-wasm` dependency is deliberately not in `Cargo.toml`.** Adding it is S1. Nothing in
-  this repo should claim a kernel works before the harness has run.
-- **`just fixtures` is declared but not implemented.** `tests/fixtures/manifest.toml` records every
-  corpus source with its reason, licence posture and expectation — that file is committed and is
-  the record of what any pass rate was measured against. The recipe itself **exits 1 with a pointer
-  to this plan** rather than succeeding silently, because a `fixtures` recipe that no-ops makes an
-  empty corpus look green. Implementing the fetch is part of S1.
+- **The kernel is not built or exercised in CI.** `nix flake check` builds and tests the Rust crate
+  (the decoder tests run there), but not `kernel/`, and the harness needs the corpus, which CI does
+  not fetch. Owed: a CI job that runs `just kernel` and the harness on a small checked-in-safe
+  subset (the generated `malformed` set plus NIST, both redistributable).
+- **Hand-collected corpus sources** — `cax-if` (full rounds) and `exporter-matrix` — are still
+  empty, and `just fixtures` reports them as MISSING on every run. Until they are filled, the S1
+  pass rate covers only what §5 "Corpus caveats" says.
 - **`deny.toml`** — `mkRustProject` turns `cargo deny` on automatically once the file exists. Left
   out deliberately for now: the advisories check wants network access, and a nix build sandbox does
   not have it, so adding the file without checking that first turns every `nix flake check` red.

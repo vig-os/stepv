@@ -9,10 +9,11 @@
 //! and it is also exactly what the Plan B fallback (native OCCT via C++) would
 //! produce. See `plan.md` for both plans and the evidence behind them.
 //!
-//! Nothing here talks to a geometry kernel yet. That is step S1 of the spike,
-//! not an omission — see `plan.md` §5.
+//! The kernel itself is [`occt`]: native OCCT in a subprocess (Plan B — the
+//! `occt-wasm` spike failed its gate, `plan.md` §5 "S1 result").
 
 pub mod cache;
+pub mod occt;
 
 /// A triangle mesh for one part, in the file's own units.
 ///
