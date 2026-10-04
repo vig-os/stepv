@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use stepv::Deflection;
 use stepv::occt::{self, Outcome};
+use stepv::{Deflection, FaceStatus};
 
 const FIXTURES: &str = "tests/fixtures";
 const OUT: &str = "harness-out";
@@ -32,10 +32,17 @@ const CORPUS_EXTS: &[&str] = &["step", "stp", "iges", "igs", "brep"];
 /// What happened to one file, judged against what its source expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Verdict {
-    /// Loaded, every face meshed, every buffer well formed.
+    /// Loaded; every face is shown faithfully (`FaceStatus::is_faithful`:
+    /// exact triangles from any rung of the ladder, or a degenerate sliver
+    /// with nothing to draw).
     Pass,
-    /// Loaded and drew, but some faces produced no triangles: a part with
-    /// holes. Counted against the pass rate — it is the silent failure.
+    /// No surfaces at all, only curves (a sketch), drawn as lines. Counted as
+    /// a pass: everything in the file is shown.
+    Wireframe,
+    /// Some faces are `Approx`: drawn, shape right, boundary jagged, and
+    /// flagged for the renderer's warning treatment. Not a pass.
+    Degraded,
+    /// Some faces are `Missing`: holes, drawn as outlines. Not a pass.
     Partial,
     /// The kernel reported a clean failure (exit 3, valid summary).
     CleanFail,
@@ -47,8 +54,10 @@ enum Verdict {
 }
 
 impl Verdict {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Pass,
+        Self::Wireframe,
+        Self::Degraded,
         Self::Partial,
         Self::CleanFail,
         Self::BadMesh,
@@ -59,6 +68,8 @@ impl Verdict {
     fn name(self) -> &'static str {
         match self {
             Self::Pass => "pass",
+            Self::Wireframe => "wireframe",
+            Self::Degraded => "degraded",
             Self::Partial => "partial",
             Self::CleanFail => "clean-fail",
             Self::BadMesh => "bad-mesh",
@@ -185,12 +196,13 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
             }
             Ok(scene) => {
                 let bad = scene.parts.iter().position(|p| {
-                    !p.mesh.is_well_formed()
+                    !p.is_well_formed()
                         || !p
                             .mesh
                             .positions
                             .iter()
                             .chain(&p.mesh.normals)
+                            .chain(&p.lines.positions)
                             .all(|v| v.is_finite())
                 });
                 let s = run.summary.as_ref();
@@ -200,15 +212,32 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
                 } else if s.is_none_or(|s| s.triangles != scene.triangle_count()) {
                     note = Some("summary and buffers disagree on triangle count".into());
                     Verdict::BadMesh
-                } else if s.is_some_and(|s| s.faces_unmeshed > 0) {
-                    let s = s.expect("checked");
-                    note = Some(format!(
-                        "{} of {} faces unmeshed",
-                        s.faces_unmeshed, s.faces
-                    ));
-                    Verdict::Partial
+                } else if s.is_none_or(|s| s.segments != scene.segment_count()) {
+                    note = Some("summary and buffers disagree on segment count".into());
+                    Verdict::BadMesh
                 } else {
-                    Verdict::Pass
+                    let s = s.expect("checked");
+                    if s.faces_unmeshed > 0 {
+                        note = Some(format!(
+                            "{} of {} faces failed first pass: {} remeshed, {} healed, \
+                             {} refined, {} coarse, {} degenerate, {} approx, {} missing",
+                            s.faces_unmeshed,
+                            s.faces,
+                            s.faces_remeshed,
+                            s.faces_healed,
+                            s.faces_refined,
+                            s.faces_coarse,
+                            s.faces_degenerate,
+                            s.faces_approx,
+                            s.faces_missing
+                        ));
+                    }
+                    match scene.worst_face() {
+                        None if scene.segment_count() > 0 => Verdict::Wireframe,
+                        Some(FaceStatus::Missing) => Verdict::Partial,
+                        Some(FaceStatus::Approx) => Verdict::Degraded,
+                        _ => Verdict::Pass,
+                    }
                 }
             }
         },
@@ -251,7 +280,13 @@ fn jsonl(r: &Record) -> String {
             "stage": s.stage, "format": s.format, "parts": s.parts,
             "parts_named": s.parts_named, "parts_colored": s.parts_colored,
             "parts_face_colored": s.parts_face_colored, "faces": s.faces,
-            "faces_unmeshed": s.faces_unmeshed, "triangles": s.triangles,
+            "faces_unmeshed": s.faces_unmeshed, "faces_remeshed": s.faces_remeshed,
+            "faces_healed": s.faces_healed, "faces_refined": s.faces_refined,
+            "faces_coarse": s.faces_coarse, "faces_degenerate": s.faces_degenerate,
+            "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
+            "sketch_parts": s.sketch_parts, "construction_parts": s.construction_parts,
+            "segments": s.segments,
+            "triangles": s.triangles,
             "t_read_ms": s.t_read_ms, "t_transfer_ms": s.t_transfer_ms,
             "t_mesh_ms": s.t_mesh_ms, "t_extract_ms": s.t_extract_ms,
             "peak_rss_bytes": s.peak_rss_bytes,
@@ -268,10 +303,11 @@ fn report(records: &[Record]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "| Source | Files | Pass | Partial | Clean fail | Bad mesh | Crash | Timeout | \
-         Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | Max RSS MB |"
+        "| Source | Files | Pass | Wireframe | Degraded | Partial | Clean fail | Bad mesh | \
+         Crash | Timeout | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | \
+         Max RSS MB |"
     );
-    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(13));
+    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(15));
     let mut row = |name: &str, rs: &[&Record]| {
         let count = |v| rs.iter().filter(|r| r.verdict == v).count();
         let passed: Vec<_> = rs.iter().filter(|r| r.verdict == Verdict::Pass).collect();
@@ -279,7 +315,12 @@ fn report(records: &[Record]) -> String {
         walls.sort_by(f64::total_cmp);
         let sums: Vec<_> = rs
             .iter()
-            .filter(|r| matches!(r.verdict, Verdict::Pass | Verdict::Partial))
+            .filter(|r| {
+                matches!(
+                    r.verdict,
+                    Verdict::Pass | Verdict::Wireframe | Verdict::Degraded | Verdict::Partial
+                )
+            })
             .filter_map(|r| r.run.summary.as_ref())
             .collect();
         let parts: usize = sums.iter().map(|s| s.parts).sum();
@@ -295,7 +336,7 @@ fn report(records: &[Record]) -> String {
         let c = Verdict::ALL.map(count);
         let _ = writeln!(
             out,
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
             rs.len(),
             c[0],
             c[1],
@@ -303,7 +344,9 @@ fn report(records: &[Record]) -> String {
             c[3],
             c[4],
             c[5],
-            pct(c[0], rs.len()),
+            c[6],
+            c[7],
+            pct(c[0] + c[1], rs.len()),
             pct(named, parts),
             pct(colored, parts),
             pct(face_colored, parts),
@@ -325,6 +368,27 @@ fn report(records: &[Record]) -> String {
     // folding their clean failures in would make the pass rate meaningless.
     let real: Vec<&Record> = records.iter().filter(|r| r.source != "malformed").collect();
     row("**all but malformed**", &real);
+
+    // Where the first-pass failures landed on the recovery ladder.
+    let sums: Vec<_> = real.iter().filter_map(|r| r.run.summary.as_ref()).collect();
+    let total = |f: fn(&occt::Summary) -> usize| sums.iter().map(|s| f(s)).sum::<usize>();
+    let _ = writeln!(
+        out,
+        "\n| Faces failing first pass | Remeshed | Healed | Refined | Coarse | Degenerate | \
+         Approx | Missing | Sketch parts | Construction parts |\n|{}\n\
+         | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+        " ---: |".repeat(10),
+        total(|s| s.faces_unmeshed),
+        total(|s| s.faces_remeshed),
+        total(|s| s.faces_healed),
+        total(|s| s.faces_refined),
+        total(|s| s.faces_coarse),
+        total(|s| s.faces_degenerate),
+        total(|s| s.faces_approx),
+        total(|s| s.faces_missing),
+        total(|s| s.sketch_parts),
+        total(|s| s.construction_parts),
+    );
     out
 }
 

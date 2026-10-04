@@ -10,10 +10,10 @@
 // Units: OCCT's readers convert to millimetres, so everything emitted here is
 // in mm regardless of the file's declared units.
 //
-// Mesh file format ("STEPVMSH", version 1, little-endian, no padding):
+// Mesh file format ("STEPVMSH", version 2, little-endian, no padding):
 //
 //   magic        8 bytes  "STEPVMSH"
-//   version      u32      1
+//   version      u32      2
 //   bbox         6 x f64  min xyz, max xyz
 //   part_count   u32
 //   per part:
@@ -21,16 +21,58 @@
 //     name       name_len bytes, UTF-8
 //     has_color  u8
 //     rgb        3 x f32  (present, zero when has_color = 0)
+//     faces      u32
+//     face_status faces    x u8   FaceStatus, below
 //     vertices   u32
 //     triangles  u32
 //     positions  3 * vertices  x f32
 //     normals    3 * vertices  x f32
 //     indices    3 * triangles x u32
-//     face_ids   triangles     x u32
+//     face_ids   triangles     x u32   index into face_status
+//     segments   u32
+//     seg_points 6 * segments  x f32   two xyz endpoints per segment
+//     seg_kinds  segments      x u8    LineKind, below
+//
+// FaceStatus records HOW a face's triangles were obtained, so a renderer can
+// draw anything short of exact with a warning treatment instead of passing it
+// off as the model (plan.md §2, the silent-failure argument):
+//   0 Ok          first-pass mesh
+//   1 Remeshed    failed first pass; a clean re-mesh of an isolated copy worked
+//   2 Healed      needed ShapeFix on the copy, then meshed
+//   3 Refined     meshed with deflection relative to the FACE's own size (a
+//                 face far smaller than the model, or whose boundary
+//                 self-intersects at the model-relative deflection)
+//   4 Coarse      meshed only with relaxed deflection/angle; exact, coarse
+//   5 Degenerate  zero parametric width or vanishing area: nothing to draw,
+//                 and nothing missing either (an exporter's sliver)
+//   6 Approx      the mesher gave up; triangles are a UV-grid SAMPLE of the
+//                 surface clipped to the face. Shape is right, edges jagged
+//   7 Missing     nothing worked; no triangles, only the outline
+// The order is severity: a part's worst face is its maximum status.
+//
+// LineKind: 0 = curve of a part with no faces, in a file with NO faces at
+//               all (a sketch): the file's whole content, so draw it;
+//           1 = outline of a Missing face;
+//           2 = curve of a part with no faces, in a file that ALSO has
+//               solids: construction geometry, axes, PMI leaders. Kept,
+//               but a renderer should hide it by default.
 //
 // src/occt.rs is the reader; keep the two in step.
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <GCPnts_TangentialDeflection.hxx>
+#include <NCollection_DataMap.hxx>
+#include <ShapeFix_Shape.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
+#include <TopoDS_Edge.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
@@ -72,6 +114,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -131,9 +174,15 @@ struct Summary {
     std::size_t prototypes = 0;
     std::size_t prototypes_mesh_failed = 0;
     std::size_t faces = 0;
-    std::size_t faces_unmeshed = 0;
+    std::size_t faces_unmeshed = 0;  // failed the FIRST pass; the ladder below then ran
+    // Where each first-pass failure ended up on the recovery ladder.
+    std::size_t faces_remeshed = 0, faces_healed = 0, faces_refined = 0, faces_coarse = 0,
+                faces_degenerate = 0, faces_approx = 0, faces_missing = 0;
+    std::size_t sketch_parts = 0;        // faceless parts in a file with no faces
+    std::size_t construction_parts = 0;  // faceless parts beside solids
     std::size_t vertices = 0;
     std::size_t triangles = 0;
+    std::size_t segments = 0;
     double t_read_ms = 0, t_transfer_ms = 0, t_mesh_ms = 0, t_extract_ms = 0;
 };
 
@@ -169,8 +218,14 @@ std::string to_json(const Summary& s) {
       << ",\"parts_face_colored\":" << s.parts_face_colored;
     o << ",\"prototypes\":" << s.prototypes
       << ",\"prototypes_mesh_failed\":" << s.prototypes_mesh_failed;
-    o << ",\"faces\":" << s.faces << ",\"faces_unmeshed\":" << s.faces_unmeshed;
-    o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles;
+    o << ",\"faces\":" << s.faces << ",\"faces_unmeshed\":" << s.faces_unmeshed
+      << ",\"faces_remeshed\":" << s.faces_remeshed << ",\"faces_healed\":" << s.faces_healed
+      << ",\"faces_refined\":" << s.faces_refined << ",\"faces_coarse\":" << s.faces_coarse
+      << ",\"faces_degenerate\":" << s.faces_degenerate << ",\"faces_approx\":" << s.faces_approx
+      << ",\"faces_missing\":" << s.faces_missing << ",\"sketch_parts\":" << s.sketch_parts
+      << ",\"construction_parts\":" << s.construction_parts;
+    o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles
+      << ",\"segments\":" << s.segments;
     o << ",\"t_read_ms\":" << s.t_read_ms << ",\"t_transfer_ms\":" << s.t_transfer_ms
       << ",\"t_mesh_ms\":" << s.t_mesh_ms << ",\"t_extract_ms\":" << s.t_extract_ms;
     o << ",\"peak_rss_bytes\":" << peak_rss_bytes() << "}";
@@ -266,55 +321,323 @@ void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& 
     out.push_back(std::move(part));
 }
 
-// ── Mesh extraction ─────────────────────────────────────────────────────────
+// ── Per-face geometry and the recovery ladder ───────────────────────────────
 
-struct PartMesh {
-    std::vector<float> positions, normals;
-    std::vector<uint32_t> indices, face_ids;
+enum FaceStatus : uint8_t {
+    kOk = 0, kRemeshed, kHealed, kRefined, kCoarse, kDegenerate, kApprox, kMissing
+};
+enum LineKind : uint8_t { kSketch = 0, kMissingOutline = 1, kConstruction = 2 };
+
+// One face's output in its PROTOTYPE's coordinates (the face's own location
+// applied, the instance placement not yet). Computed once per face and reused
+// by every instance.
+struct FaceGeom {
+    FaceStatus status = kOk;
+    std::vector<gp_Pnt> nodes;
+    std::vector<gp_Dir> normals;
+    std::vector<std::array<uint32_t, 3>> tris;
+    std::vector<std::array<gp_Pnt, 2>> outline;  // only for kMissing
 };
 
-void extract(const TopoDS_Shape& shape, const TopLoc_Location& placement, PartMesh& m,
-             Summary& s) {
-    uint32_t face_id = 0;
-    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next(), ++face_id) {
-        const TopoDS_Face& face = TopoDS::Face(ex.Current());
-        ++s.faces;
-        TopLoc_Location floc;
-        Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, floc);
-        if (tri.IsNull() || tri->NbTriangles() == 0) {
-            // A face with no triangles is a HOLE in the rendered part. Count
-            // it — this is the silent failure plan.md §2 holds against Foxtrot.
-            ++s.faces_unmeshed;
-            continue;
-        }
-        if (!tri->HasNormals()) BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri);
+bool has_triangles(const TopoDS_Face& f) {
+    TopLoc_Location l;
+    Handle(Poly_Triangulation) t = BRep_Tool::Triangulation(f, l);
+    return !t.IsNull() && t->NbTriangles() > 0;
+}
 
-        const gp_Trsf trsf = (placement * floc).Transformation();
-        const bool reversed = face.Orientation() == TopAbs_REVERSED;
-        const uint32_t base = static_cast<uint32_t>(m.positions.size() / 3);
+// Appends an existing triangulation of `face`, oriented outward.
+void append_triangulation(const TopoDS_Face& face, FaceGeom& g) {
+    TopLoc_Location floc;
+    Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, floc);
+    if (tri.IsNull() || tri->NbTriangles() == 0) return;
+    if (!tri->HasNormals()) BRepLib_ToolTriangulatedShape::ComputeNormals(face, tri);
+    const gp_Trsf trsf = floc.Transformation();
+    const bool reversed = face.Orientation() == TopAbs_REVERSED;
+    const uint32_t base = static_cast<uint32_t>(g.nodes.size());
+    for (int i = 1; i <= tri->NbNodes(); ++i) {
+        g.nodes.push_back(tri->Node(i).Transformed(trsf));
+        gp_Dir n = tri->Normal(i);
+        n.Transform(trsf);
+        g.normals.push_back(reversed ? n.Reversed() : n);
+    }
+    for (int i = 1; i <= tri->NbTriangles(); ++i) {
+        int a, b, c;
+        tri->Triangle(i).Get(a, b, c);
+        if (reversed) std::swap(b, c);
+        g.tris.push_back({base + uint32_t(a - 1), base + uint32_t(b - 1), base + uint32_t(c - 1)});
+    }
+}
 
-        for (int i = 1; i <= tri->NbNodes(); ++i) {
-            gp_Pnt p = tri->Node(i).Transformed(trsf);
-            gp_Dir n = tri->Normal(i);
-            n.Transform(trsf);
-            if (reversed) n.Reverse();
-            m.positions.insert(m.positions.end(), {static_cast<float>(p.X()),
-                                                   static_cast<float>(p.Y()),
-                                                   static_cast<float>(p.Z())});
-            m.normals.insert(m.normals.end(), {static_cast<float>(n.X()),
-                                               static_cast<float>(n.Y()),
-                                               static_cast<float>(n.Z())});
-        }
-        for (int i = 1; i <= tri->NbTriangles(); ++i) {
-            int a, b, c;
-            tri->Triangle(i).Get(a, b, c);
-            if (reversed) std::swap(b, c);
-            m.indices.insert(m.indices.end(), {base + static_cast<uint32_t>(a - 1),
-                                               base + static_cast<uint32_t>(b - 1),
-                                               base + static_cast<uint32_t>(c - 1)});
-            m.face_ids.push_back(face_id);
+// An independent copy (geometry included, no triangulation): re-meshing it can
+// never disturb the shared edges of the faces around the original.
+TopoDS_Shape isolated_copy(const TopoDS_Face& f) {
+    return BRepBuilderAPI_Copy(f, /*copyGeom=*/true, /*copyMesh=*/false).Shape();
+}
+
+bool mesh_and_take(const TopoDS_Shape& shape, const IMeshTools_Parameters& p, FaceGeom& g) {
+    try {
+        BRepMesh_IncrementalMesh mesher(shape, p);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    bool any = false;
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face& f = TopoDS::Face(ex.Current());
+        if (has_triangles(f)) {
+            append_triangulation(f, g);
+            any = true;
         }
     }
+    return any;
+}
+
+// Rung 4: sample the surface on a UV grid and keep the cells whose centre lies
+// inside the face. No mesher involved, so it works on faces BRepMesh rejects;
+// the boundary is jagged at grid resolution, which is why it is flagged.
+bool approximate(const TopoDS_Face& face, FaceGeom& g) {
+    double u0, u1, v0, v1;
+    try {
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    if (!std::isfinite(u0) || !std::isfinite(u1) || !std::isfinite(v0) || !std::isfinite(v1) ||
+        !(u1 > u0) || !(v1 > v0))
+        return false;
+    constexpr int N = 48;
+    const double du = (u1 - u0) / N, dv = (v1 - v0) / N;
+    BRepAdaptor_Surface surf(face);  // applies the face's own location
+    BRepLProp_SLProps props(surf, 1, Precision::Confusion());
+    const double tol = BRep_Tool::Tolerance(face);
+    const bool reversed = face.Orientation() == TopAbs_REVERSED;
+
+    // Grid nodes, computed lazily: a NaN normal marks a degenerate point.
+    std::vector<int> index((N + 1) * (N + 1), -1);
+    auto node = [&](int i, int j) -> int {
+        int& k = index[i * (N + 1) + j];
+        if (k >= 0) return k;
+        const double u = u0 + i * du, v = v0 + j * dv;
+        props.SetParameters(u, v);
+        gp_Dir n(0, 0, 1);
+        if (props.IsNormalDefined()) n = props.Normal();
+        if (reversed) n.Reverse();
+        k = static_cast<int>(g.nodes.size());
+        g.nodes.push_back(props.Value());
+        g.normals.push_back(n);
+        return k;
+    };
+    BRepClass_FaceClassifier classifier;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            gp_Pnt2d centre(u0 + (i + 0.5) * du, v0 + (j + 0.5) * dv);
+            classifier.Perform(face, centre, tol);
+            if (classifier.State() != TopAbs_IN) continue;
+            uint32_t a = node(i, j), b = node(i + 1, j), c = node(i + 1, j + 1),
+                     d = node(i, j + 1);
+            if (reversed) {
+                g.tris.push_back({a, c, b});
+                g.tris.push_back({a, d, c});
+            } else {
+                g.tris.push_back({a, b, c});
+                g.tris.push_back({a, c, d});
+            }
+        }
+    }
+    return !g.tris.empty();
+}
+
+void discretize_edge(const TopoDS_Edge& e, double defl, double angle,
+                     std::vector<std::array<gp_Pnt, 2>>& out) {
+    if (BRep_Tool::Degenerated(e)) return;
+    try {
+        BRepAdaptor_Curve curve(e);  // applies the edge's own location
+        GCPnts_TangentialDeflection pts(curve, angle, defl);
+        for (int i = 1; i < pts.NbPoints(); ++i) out.push_back({pts.Value(i), pts.Value(i + 1)});
+    } catch (const Standard_Failure&) {
+        // An edge that cannot be evaluated is simply not drawn.
+    }
+}
+
+// A face no renderer could show: zero width in either parameter direction,
+// or |area| below 1e-8 of the bbox diagonal squared, which is under one pixel
+// on a 10,000-pixel-wide render of the whole model. Exporters leave such
+// slivers behind after booleans. It runs AFTER the refined re-mesh, so a real
+// but tiny face (a 0.0075 mm² fillet) is meshed, not discarded.
+bool degenerate(const TopoDS_Face& face, double diagonal) {
+    double u0, u1, v0, v1;
+    try {
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    auto flat = [](double a, double b) { return std::abs(b - a) <= 1e-9 * std::max(1.0, std::abs(a)); };
+    if (flat(u0, u1) || flat(v0, v1)) return true;
+    GProp_GProps g;
+    BRepGProp::SurfaceProperties(face, g);
+    return std::abs(g.Mass()) < 1e-8 * diagonal * diagonal;
+}
+
+// Runs the ladder for a face the first pass left without triangles.
+FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double diagonal,
+                 Summary& s) {
+    FaceGeom g;
+    // 1. Clean re-mesh of an isolated copy.
+    {
+        TopoDS_Shape c = isolated_copy(face);
+        if (mesh_and_take(c, p, g)) {
+            g.status = kRemeshed;
+            ++s.faces_remeshed;
+            return g;
+        }
+    }
+    // 2. ShapeFix the copy (it may split the face), then mesh.
+    try {
+        Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(isolated_copy(face));
+        fix->Perform();
+        if (mesh_and_take(fix->Shape(), p, g)) {
+            g.status = kHealed;
+            ++s.faces_healed;
+            return g;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    // 3. Deflection relative to the face itself, not the model. Recovers faces
+    //    thousands of times smaller than the model, and boundaries that only
+    //    self-intersect once discretized at the model-relative deflection.
+    {
+        TopoDS_Shape c = isolated_copy(face);
+        Bnd_Box fb;
+        BRepBndLib::Add(c, fb, false);
+        IMeshTools_Parameters fine = p;
+        fine.Deflection = std::max(1e-3 * std::sqrt(fb.SquareExtent()), 1e-7);
+        fine.InParallel = false;
+        if (!fb.IsVoid() && mesh_and_take(c, fine, g)) {
+            g.status = kRefined;
+            ++s.faces_refined;
+            return g;
+        }
+    }
+    // Nothing to draw is not the same as something missing.
+    if (degenerate(face, diagonal)) {
+        g = FaceGeom{};
+        g.status = kDegenerate;
+        ++s.faces_degenerate;
+        return g;
+    }
+    // 4. Relaxed parameters: 10x coarser, 45 degrees, no surface-deviation
+    //    control. Still the exact surface, just coarsely sampled.
+    {
+        IMeshTools_Parameters coarse = p;
+        coarse.Deflection = p.Deflection * 10;
+        coarse.Angle = 45.0 * M_PI / 180.0;
+        coarse.ControlSurfaceDeflection = false;
+        coarse.AllowQualityDecrease = true;
+        coarse.InParallel = false;
+        if (mesh_and_take(isolated_copy(face), coarse, g)) {
+            g.status = kCoarse;
+            ++s.faces_coarse;
+            return g;
+        }
+    }
+    // 5. UV-grid approximation.
+    g = FaceGeom{};
+    if (approximate(face, g)) {
+        g.status = kApprox;
+        ++s.faces_approx;
+        return g;
+    }
+    // 6. Give up on area; keep the outline so the hole is drawn, not hidden.
+    g = FaceGeom{};
+    g.status = kMissing;
+    ++s.faces_missing;
+    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next())
+        discretize_edge(TopoDS::Edge(ex.Current()), p.Deflection, p.Angle, g.outline);
+    return g;
+}
+
+using FaceCache = NCollection_DataMap<TopoDS_Shape, FaceGeom, TopTools_ShapeMapHasher>;
+
+// Per-prototype output, in prototype coordinates.
+struct ProtoGeom {
+    std::vector<FaceGeom> faces;
+    std::vector<std::array<gp_Pnt, 2>> sketch;  // curves of a part with no faces
+};
+
+ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Parameters& p,
+                             double diagonal, FaceCache& cache, Summary& s) {
+    ProtoGeom pg;
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(ex.Current());
+        if (const FaceGeom* hit = cache.Seek(face)) {
+            pg.faces.push_back(*hit);
+            continue;
+        }
+        FaceGeom g;
+        if (has_triangles(face)) {
+            append_triangulation(face, g);
+        } else {
+            ++s.faces_unmeshed;
+            g = recover(face, p, diagonal, s);
+        }
+        cache.Bind(face, g);
+        pg.faces.push_back(std::move(g));
+    }
+    if (pg.faces.empty()) {
+        // A sketch, a wireframe export, a curve set: no surfaces to mesh, but
+        // real content. Draw the curves rather than report "no geometry".
+        for (TopExp_Explorer ex(shape, TopAbs_EDGE); ex.More(); ex.Next())
+            discretize_edge(TopoDS::Edge(ex.Current()), p.Deflection, p.Angle, pg.sketch);
+    }
+    return pg;
+}
+
+struct PartMesh {
+    std::vector<uint8_t> face_status;
+    std::vector<float> positions, normals;
+    std::vector<uint32_t> indices, face_ids;
+    std::vector<float> seg_points;
+    std::vector<uint8_t> seg_kinds;
+};
+
+void push3(std::vector<float>& v, double x, double y, double z) {
+    v.insert(v.end(), {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)});
+}
+
+// Places one instance of a prototype.
+void place(const ProtoGeom& pg, const TopLoc_Location& placement, LineKind curve_kind,
+           PartMesh& m, Summary& s) {
+    const gp_Trsf t = placement.Transformation();
+    for (std::size_t fid = 0; fid < pg.faces.size(); ++fid) {
+        const FaceGeom& g = pg.faces[fid];
+        ++s.faces;
+        m.face_status.push_back(g.status);
+        const uint32_t base = static_cast<uint32_t>(m.positions.size() / 3);
+        for (std::size_t i = 0; i < g.nodes.size(); ++i) {
+            gp_Pnt p = g.nodes[i].Transformed(t);
+            gp_Dir n = g.normals[i].Transformed(t);
+            push3(m.positions, p.X(), p.Y(), p.Z());
+            push3(m.normals, n.X(), n.Y(), n.Z());
+        }
+        for (const auto& tri : g.tris) {
+            m.indices.insert(m.indices.end(), {base + tri[0], base + tri[1], base + tri[2]});
+            m.face_ids.push_back(static_cast<uint32_t>(fid));
+        }
+        for (const auto& seg : g.outline) {
+            for (const gp_Pnt& q : seg) {
+                gp_Pnt p = q.Transformed(t);
+                push3(m.seg_points, p.X(), p.Y(), p.Z());
+            }
+            m.seg_kinds.push_back(kMissingOutline);
+        }
+    }
+    for (const auto& seg : pg.sketch) {
+        for (const gp_Pnt& q : seg) {
+            gp_Pnt p = q.Transformed(t);
+            push3(m.seg_points, p.X(), p.Y(), p.Z());
+        }
+        m.seg_kinds.push_back(curve_kind);
+    }
+    if (!pg.sketch.empty()) ++(curve_kind == kSketch ? s.sketch_parts : s.construction_parts);
 }
 
 // ── Mesh file ───────────────────────────────────────────────────────────────
@@ -490,7 +813,19 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
         prototypes.emplace(entry(p.prototype), shape);
     }
     s.prototypes = prototypes.size();
+
+    // First-pass triangles plus the recovery ladder for every face that has
+    // none, once per prototype. Counted as mesh time: it is meshing.
+    FaceCache cache;
+    std::map<std::string, ProtoGeom> geoms;
+    for (const auto& [key, shape] : prototypes)
+        geoms.emplace(key, prototype_geometry(shape, params, s.diagonal, cache, s));
     s.t_mesh_ms = ms_since(t0);
+    // Faceless parts are the content of a sketch-only file, but construction
+    // geometry in a file that has solids.
+    bool any_faces = false;
+    for (const auto& [key, g] : geoms) any_faces |= !g.faces.empty();
+    const LineKind curve_kind = any_faces ? kConstruction : kSketch;
 
     // ── Extract placed buffers ──
     s.stage = "extract";
@@ -503,7 +838,7 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
             return kExitFailed;
         }
         f.write("STEPVMSH", 8);
-        put<uint32_t>(f, 1);
+        put<uint32_t>(f, 2);
         double x0, y0, z0, x1, y1, z1;
         bbox.Get(x0, y0, z0, x1, y1, z1);
         for (double v : {x0, y0, z0, x1, y1, z1}) put(f, v);
@@ -511,9 +846,10 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     }
     for (const auto& p : parts) {
         PartMesh m;
-        extract(prototypes.at(entry(p.prototype)), p.location, m, s);
+        place(geoms.at(entry(p.prototype)), p.location, curve_kind, m, s);
         s.vertices += m.positions.size() / 3;
         s.triangles += m.indices.size() / 3;
+        s.segments += m.seg_kinds.size();
         if (f.is_open()) {
             put<uint32_t>(f, static_cast<uint32_t>(p.name.size()));
             f.write(p.name.data(), static_cast<std::streamsize>(p.name.size()));
@@ -522,12 +858,17 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
             put(f, c.r);
             put(f, c.g);
             put(f, c.b);
+            put<uint32_t>(f, static_cast<uint32_t>(m.face_status.size()));
+            put_vec(f, m.face_status);
             put<uint32_t>(f, static_cast<uint32_t>(m.positions.size() / 3));
             put<uint32_t>(f, static_cast<uint32_t>(m.indices.size() / 3));
             put_vec(f, m.positions);
             put_vec(f, m.normals);
             put_vec(f, m.indices);
             put_vec(f, m.face_ids);
+            put<uint32_t>(f, static_cast<uint32_t>(m.seg_kinds.size()));
+            put_vec(f, m.seg_points);
+            put_vec(f, m.seg_kinds);
         }
     }
     if (f.is_open()) {
@@ -540,8 +881,8 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     s.t_extract_ms = ms_since(t0);
 
     s.stage = "done";
-    if (s.triangles == 0) {
-        s.error = "tessellation produced no triangles";
+    if (s.triangles == 0 && s.segments == 0) {
+        s.error = "file has neither surfaces nor curves to draw";
         return kExitFailed;
     }
     return kExitOk;
