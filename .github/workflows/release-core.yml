@@ -559,7 +559,7 @@ jobs:
           retry --retries 2 --backoff 5 --max-backoff 20 -- \
             gh workflow run sync-issues.yml \
               --ref "release/$VERSION" \
-              -f "target-branch=release/$VERSION"
+              -f "target-branch=sync/issue-mirror"
 
       - name: Wait for sync-issues completion
         if: ${{ inputs.release_kind == 'final' }}
@@ -621,6 +621,98 @@ jobs:
           set -euo pipefail
           retry --retries 3 --backoff 3 --max-backoff 20 -- git fetch origin "release/$VERSION"
           git reset --hard "origin/release/$VERSION"
+
+      # Rendered by init-workspace.sh (#1424): DEVKIT_SYNC_TARGET mirror mode.
+      # The sync dispatch above targeted the mirror, so the release branch has
+      # no archive yet; fold the mirror's snapshot dirs in, then re-pull so
+      # the finalize SHA (the tag target) includes the fold commit. A missing
+      # mirror or an already-identical archive is a clean no-op. commit-action
+      # only adds/updates files — a path deleted on the mirror survives on the
+      # release branch until it is removed by hand (archives only grow, so
+      # this stays theoretical).
+      - name: Stage sync mirror archive for fold
+        if: ${{ inputs.release_kind == 'final' }}
+        id: mirror_fold
+        run: |
+          set -euo pipefail
+          MIRROR_REF="$(retry --retries 3 --backoff 3 --max-backoff 20 -- git ls-remote origin "refs/heads/sync/issue-mirror")"
+          if [ -z "$MIRROR_REF" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Mirror branch 'sync/issue-mirror' not found; skipping fold."
+            exit 0
+          fi
+          retry --retries 3 --backoff 3 --max-backoff 20 -- git fetch origin "sync/issue-mirror"
+          staged=false
+          for dir in docs/issues docs/pull-requests; do
+            if git rev-parse -q --verify "FETCH_HEAD:${dir}" >/dev/null; then
+              git checkout FETCH_HEAD -- "${dir}"
+              staged=true
+            fi
+          done
+          if [ "$staged" != "true" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Mirror carries no snapshot dirs; skipping fold."
+            exit 0
+          fi
+          # commit-action parses FILE_PATHS as a COMMA-separated list and logs
+          # "No files to commit" + exits 0 when nothing resolves, so a
+          # newline-joined value folds NOTHING while every step stays green
+          # (#1502). Build the list from the staged diff with NUL framing:
+          # git status --porcelain C-quotes paths containing spaces and renders
+          # renames as "R old -> new", both of which parse wrong. The tr has to
+          # run inside the pipeline — command substitution drops NUL bytes.
+          mirror_paths() {
+            git diff --cached --name-only --no-renames --diff-filter=ACM -z -- docs/issues docs/pull-requests
+          }
+          if mirror_paths | tr '\0' '\n' | grep -q ','; then
+            echo "ERROR: a mirror archive path contains a comma, which FILE_PATHS cannot represent:"
+            mirror_paths | tr '\0' '\n' | grep ','
+            exit 1
+          fi
+          CHANGED="$(mirror_paths | tr '\0' ',')"
+          CHANGED="${CHANGED%,}"
+          if [ -z "$CHANGED" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Release branch already matches the mirror archive; nothing to fold."
+            exit 0
+          fi
+          echo "file_paths=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "Folding $(printf '%s\n' "$CHANGED" | tr ',' '\n' | wc -l) mirror archive path(s) into the release branch."
+
+      - name: Commit folded archive to the release branch
+        if: ${{ steps.mirror_fold.outputs.eligible == 'true' }}
+        uses: vig-os/commit-action@0361e9aa65b64711a18286ac5dfdcba7cc7a2ac7  # v0.3.2
+        env:
+          GH_TOKEN: ${{ steps.commit_app_token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_BRANCH: refs/heads/release/${{ needs.validate.outputs.version }}
+          MAX_ATTEMPTS: "3"
+          COMMIT_MESSAGE: "chore: fold sync mirror archive into release ${{ needs.validate.outputs.version }}"
+          FILE_PATHS: ${{ steps.mirror_fold.outputs.file_paths }}
+
+      - name: Re-pull release branch and verify the fold landed
+        if: ${{ steps.mirror_fold.outputs.eligible == 'true' }}
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          retry --retries 3 --backoff 3 --max-backoff 20 -- git fetch origin "release/$VERSION"
+          git reset --hard "origin/release/$VERSION"
+          # Assert the POST-CONDITION, not the step outcome: commit-action
+          # reports success when it commits nothing (#1502), and a fold that
+          # announces N paths and lands zero must not be green — promote later
+          # force-resets the mirror onto main and would take the only copy of
+          # the archive with it. M/D = a mirror path this branch lacks or has
+          # stale; A = a release-only path, tolerated (archives only grow).
+          retry --retries 3 --backoff 3 --max-backoff 20 -- git fetch origin "sync/issue-mirror"
+          UNFOLDED="$(git diff --name-only --no-renames --diff-filter=MD FETCH_HEAD HEAD -- docs/issues docs/pull-requests)"
+          if [ -n "$UNFOLDED" ]; then
+            echo "ERROR: the fold did not land — release/$VERSION is missing or stale for:"
+            printf '%s\n' "$UNFOLDED"
+            exit 1
+          fi
+          echo "Fold verified: release/$VERSION carries the mirror archive."
 
       - name: Output finalize SHA
         id: finalize

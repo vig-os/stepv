@@ -20,8 +20,8 @@
 # Harness output: pass-rate tables, timings, rendered PNG files under comparison.
 /harness-out/
 
-# Cargo build artifacts. Needed HERE rather than relying on devkit's rendered
-# .gitignore: that fragment comes from live language detection, and the
-# scaffold ran before Cargo.toml existed, so no Rust fragment was emitted.
-# Cargo.lock IS committed — stepv ships a binary.
-/target/
+# NOTE: /target/ is NOT listed here. Now that Cargo.toml exists, devkit's
+# scaffold detects Rust and emits the Cargo ignore fragment into the generated
+# .gitignore itself. Listing it here too produced a duplicate entry. If a
+# future scaffold ever stops emitting it, add it back — this file is the
+# durable home for root ignores and survives regeneration.
