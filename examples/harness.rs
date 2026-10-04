@@ -5,6 +5,7 @@
 //! just fixtures && just harness            # whole corpus
 //! just harness tests/fixtures/nist-pmi     # one source
 //! just harness --cold-start 30             # spawn-to-result latency only
+//! just harness --strict tests/fixtures/x   # CI gate: non-zero on any crash
 //! ```
 //!
 //! For each file: import through XCAF, tessellate at bbox-relative
@@ -98,6 +99,7 @@ struct Args {
     deflection: Deflection,
     cold_start: Option<usize>,
     memory: Option<u64>,
+    strict: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -107,6 +109,7 @@ fn parse_args() -> Result<Args, String> {
         deflection: Deflection::PREVIEW,
         cold_start: None,
         memory: None,
+        strict: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -125,6 +128,7 @@ fn parse_args() -> Result<Args, String> {
                     q => return Err(format!("--quality: unknown {q:?}")),
                 }
             }
+            "--strict" => a.strict = true,
             "--memory-gb" => {
                 let gb: f64 = value("--memory-gb")?
                     .parse()
@@ -478,6 +482,29 @@ fn main() -> ExitCode {
     let table = report(&records);
     let _ = std::fs::write(Path::new(OUT).join("summary.md"), &table);
     println!("{table}");
+    if args.strict {
+        // CI gate (vig-os/stepv#11): nothing may crash, hang, mis-decode or
+        // blow the cap, and every malformed file must fail CLEANLY.
+        let bad: Vec<_> = records
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.verdict,
+                    Verdict::Crash | Verdict::Timeout | Verdict::BadMesh | Verdict::MemoryCap
+                ) || (r.source == "malformed" && r.verdict != Verdict::CleanFail)
+            })
+            .collect();
+        for r in &bad {
+            eprintln!(
+                "harness --strict: {} {}",
+                r.verdict.name(),
+                r.path.display()
+            );
+        }
+        if !bad.is_empty() {
+            return ExitCode::FAILURE;
+        }
+    }
     ExitCode::SUCCESS
 }
 

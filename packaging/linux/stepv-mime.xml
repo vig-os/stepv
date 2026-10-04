@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- shared-mime-info definitions for the formats stepv reads.
+
+     model/step and model/iges already ship in freedesktop shared-mime-info
+     (glob-only in older releases); repeating them here adds CONTENT magic, so
+     a .stp exported with the wrong extension, or with none, still matches.
+     BREP (Open CASCADE's native format) has no registered type, so it gets
+     model/x-brep, keyed on the banner every BREP file carries. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="model/step">
+    <comment>STEP CAD model</comment>
+    <acronym>STEP</acronym>
+    <expanded-acronym>Standard for the Exchange of Product model data</expanded-acronym>
+    <glob pattern="*.step"/>
+    <glob pattern="*.stp"/>
+    <glob pattern="*.p21"/>
+    <magic priority="60">
+      <match type="string" value="ISO-10303-21;" offset="0:256"/>
+    </magic>
+    <generic-icon name="x-office-drawing"/>
+  </mime-type>
+  <mime-type type="model/iges">
+    <comment>IGES CAD model</comment>
+    <acronym>IGES</acronym>
+    <expanded-acronym>Initial Graphics Exchange Specification</expanded-acronym>
+    <glob pattern="*.igs"/>
+    <glob pattern="*.iges"/>
+    <generic-icon name="x-office-drawing"/>
+  </mime-type>
+  <mime-type type="model/x-brep">
+    <comment>Open CASCADE BREP model</comment>
+    <glob pattern="*.brep"/>
+    <magic priority="60">
+      <match type="string" value="CASCADE Topology" offset="0:512"/>
+    </magic>
+    <generic-icon name="x-office-drawing"/>
+  </mime-type>
+</mime-info>

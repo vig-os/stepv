@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=stepv
+GenericName=CAD Model Viewer
+Comment=Preview STEP, IGES and BREP models
+# The viewer window (`stepv view`); NoDisplay because it is a file handler,
+# not something to launch empty from the menu.
+Exec=stepv view %f
+TryExec=stepv
+Icon=x-office-drawing
+Terminal=false
+NoDisplay=true
+MimeType=model/step;model/iges;model/x-brep;
+Categories=Graphics;Viewer;Engineering;

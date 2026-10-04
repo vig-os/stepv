@@ -214,23 +214,47 @@
         # `stepv` is the CLI alone (what crates.io ships); `default` is the
         # product: the CLI with the kernel in libexec/stepv, where
         # occt::kernel_path() finds it relative to the binary.
-        packages = rust.packages // {
-          inherit kernel;
-          # Copied, not symlinked: on Linux current_exe() resolves symlinks,
-          # so a symlinked bin/stepv would look for libexec/ inside the
-          # CLI-only store path and never find the kernel.
-          default =
-            pkgs.runCommand "stepv-${kernel.version}"
-              {
-                meta.mainProgram = "stepv";
-                meta.description = "STEP/IGES/BREP previews and thumbnails: the CLI plus its OCCT kernel";
-              }
-              ''
-                mkdir -p $out/bin $out/libexec/stepv
-                cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
-                cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
-              '';
-        };
+        packages =
+          rust.packages
+          // {
+            inherit kernel;
+            # Copied, not symlinked: on Linux current_exe() resolves symlinks,
+            # so a symlinked bin/stepv would look for libexec/ inside the
+            # CLI-only store path and never find the kernel.
+            default =
+              pkgs.runCommand "stepv-${kernel.version}"
+                {
+                  meta.mainProgram = "stepv";
+                  meta.description = "STEP/IGES/BREP previews and thumbnails: the CLI plus its OCCT kernel";
+                }
+                ''
+                  mkdir -p $out/bin $out/libexec/stepv
+                  cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
+                  cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
+                  # Linux desktop integration (S4): harmless elsewhere.
+                  install -Dm644 ${./packaging/linux/stepv.thumbnailer} $out/share/thumbnailers/stepv.thumbnailer
+                  install -Dm644 ${./packaging/linux/stepv-mime.xml} $out/share/mime/packages/stepv.xml
+                  install -Dm644 ${./packaging/linux/stepv.desktop} $out/share/applications/stepv.desktop
+                '';
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Dolphin / KIO thumbnail plugin (S4). Linux only: KF6 does not
+            # build on darwin in nixpkgs. Runs the `stepv` CLI from PATH.
+            kde-thumbnailer = pkgs.stdenv.mkDerivation {
+              pname = "stepv-kde-thumbnailer";
+              inherit (kernel) version;
+              src = ./packaging/kde;
+              nativeBuildInputs = [
+                pkgs.cmake
+                pkgs.kdePackages.extra-cmake-modules
+              ];
+              buildInputs = [
+                pkgs.kdePackages.kio
+                pkgs.kdePackages.qtbase
+              ];
+              dontWrapQtApps = true;
+            };
+          };
 
         # Opt-in local dev services (#795): a daemonless process-compose stack
         # (Postgres, SeaweedFS/S3, Redis, …) with service versions from the

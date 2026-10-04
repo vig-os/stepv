@@ -31,9 +31,22 @@ info:
 # languages this repo declares in .vig-os (DEVKIT_LANGUAGES).
 
 # Run all linters
+#
+# stepv: the scaffold's recipes are Python-only, so in this Rust repo CI's
+# "Tests" and lint lanes ran NOTHING and reported green (vig-os/devkit#1811).
+# The Rust branch below is the real check: rustfmt, clippy with
+# warnings as errors on both feature sets, and the whole test suite against a
+# freshly built kernel. A repo with neither project file still says so.
 [group('quality')]
 lint:
-    @if [ -f pyproject.toml ]; then uv run ruff check .; else echo "just lint: no pyproject.toml — skipping"; fi
+    @if [ -f Cargo.toml ]; then just _rust-lint; fi
+    @if [ -f pyproject.toml ]; then uv run ruff check .; elif [ ! -f Cargo.toml ]; then echo "just lint: no pyproject.toml or Cargo.toml — skipping"; fi
+
+[private]
+_rust-lint:
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --no-default-features -- -D warnings
 
 # Format code
 [group('quality')]
@@ -55,7 +68,15 @@ precommit:
 # #1478).
 [group('test')]
 test *args:
-    @if [ ! -f pyproject.toml ]; then echo "just test: no pyproject.toml — skipping"; elif uv run pytest {{ args }}; then :; else rc=$?; if [ "$rc" -eq 5 ] && [ ! -d tests ]; then echo "just test: no tests collected and no tests/ directory — skipping"; else exit "$rc"; fi; fi
+    @if [ -f Cargo.toml ]; then just _rust-test {{ args }}; fi
+    @if [ ! -f pyproject.toml ]; then [ -f Cargo.toml ] || echo "just test: no pyproject.toml or Cargo.toml — skipping"; elif uv run pytest {{ args }}; then :; else rc=$?; if [ "$rc" -eq 5 ] && [ ! -d tests ]; then echo "just test: no tests collected and no tests/ directory — skipping"; else exit "$rc"; fi; fi
+
+# The CLI tests run the REAL kernel and fail without it (tests/cli.rs), so it
+# is built first. Lint runs here too: CI's lint lane only runs `just precommit`,
+# whose hooks have no rustfmt or clippy.
+[private]
+_rust-test *args: kernel _rust-lint
+    cargo test {{ args }}
 
 # Run tests with coverage (same exit-5 rule as `test` above)
 [group('test')]
@@ -140,6 +161,13 @@ kernel:
 test-data: kernel
     mkdir -p tests/data
     ./target/kernel/fixture-gen tests/data
+
+# S3: run the real CLI over the corpus with default limits; fails on any hang,
+# bad JSON, out-of-contract exit code, metadata-less exit 3, or kernel crash.
+[group('harness')]
+cli-sweep *args: kernel
+    cargo build --release
+    python3 scripts/cli-sweep.py {{ args }}
 
 # Run the kernel robustness harness over tests/fixtures/ and print the
 # pass-rate / timing table that plan.md §5 asks you to record.
