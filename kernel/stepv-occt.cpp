@@ -10,10 +10,10 @@
 // Units: OCCT's readers convert to millimetres, so everything emitted here is
 // in mm regardless of the file's declared units.
 //
-// Mesh file format ("STEPVMSH", version 2, little-endian, no padding):
+// Mesh file format ("STEPVMSH", version 3, little-endian, no padding):
 //
 //   magic        8 bytes  "STEPVMSH"
-//   version      u32      2
+//   version      u32      3
 //   bbox         6 x f64  min xyz, max xyz
 //   part_count   u32
 //   per part:
@@ -22,13 +22,16 @@
 //     has_color  u8
 //     rgb        3 x f32  (present, zero when has_color = 0)
 //     faces      u32
-//     face_status faces    x u8   FaceStatus, below
+//     per face:  status u8 (FaceStatus, below), has_color u8, rgb 3 x f32
+//                (zero when has_color = 0). The face colour, when present,
+//                overrides the part colour: 81% of parts in the S1 corpus
+//                carry colour only per face.
 //     vertices   u32
 //     triangles  u32
 //     positions  3 * vertices  x f32
 //     normals    3 * vertices  x f32
 //     indices    3 * triangles x u32
-//     face_ids   triangles     x u32   index into face_status
+//     face_ids   triangles     x u32   index into the per-face table
 //     segments   u32
 //     seg_points 6 * segments  x f32   two xyz endpoints per segment
 //     seg_kinds  segments      x u8    LineKind, below
@@ -333,6 +336,7 @@ enum LineKind : uint8_t { kSketch = 0, kMissingOutline = 1, kConstruction = 2 };
 // by every instance.
 struct FaceGeom {
     FaceStatus status = kOk;
+    std::optional<Rgb> color;  // per-face colour from XCAF, set by the caller
     std::vector<gp_Pnt> nodes;
     std::vector<gp_Dir> normals;
     std::vector<std::array<uint32_t, 3>> tris;
@@ -556,6 +560,28 @@ FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double
 }
 
 using FaceCache = NCollection_DataMap<TopoDS_Shape, FaceGeom, TopTools_ShapeMapHasher>;
+using FaceColors = NCollection_DataMap<TopoDS_Shape, Rgb, TopTools_ShapeMapHasher>;
+
+// Per-face colours of one prototype, from its XCAF sub-shape labels. A
+// colour on a shell or solid sub-shape applies to its faces; a colour on a
+// face label wins over both, so face labels are applied last.
+FaceColors face_colors(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& ct,
+                       const TDF_Label& prototype) {
+    FaceColors out;
+    TDF_LabelSequence subs;
+    st->GetSubShapes(prototype, subs);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const TDF_Label& sub : subs) {
+            const TopoDS_Shape shape = st->GetShape(sub);
+            const bool is_face = shape.ShapeType() == TopAbs_FACE;
+            if (is_face != (pass == 1)) continue;
+            const std::optional<Rgb> c = label_color(ct, sub);
+            if (!c) continue;
+            for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) out.Bind(ex.Current(), *c);
+        }
+    }
+    return out;
+}
 
 // Per-prototype output, in prototype coordinates.
 struct ProtoGeom {
@@ -564,12 +590,15 @@ struct ProtoGeom {
 };
 
 ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Parameters& p,
-                             double diagonal, FaceCache& cache, Summary& s) {
+                             double diagonal, const FaceColors& colors, FaceCache& cache,
+                             Summary& s) {
     ProtoGeom pg;
     for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
         const TopoDS_Face& face = TopoDS::Face(ex.Current());
+        const Rgb* color = colors.Seek(face);
         if (const FaceGeom* hit = cache.Seek(face)) {
             pg.faces.push_back(*hit);
+            pg.faces.back().color = color ? std::optional<Rgb>(*color) : std::nullopt;
             continue;
         }
         FaceGeom g;
@@ -581,6 +610,7 @@ ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Paramet
         }
         cache.Bind(face, g);
         pg.faces.push_back(std::move(g));
+        pg.faces.back().color = color ? std::optional<Rgb>(*color) : std::nullopt;
     }
     if (pg.faces.empty()) {
         // A sketch, a wireframe export, a curve set: no surfaces to mesh, but
@@ -593,6 +623,7 @@ ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Paramet
 
 struct PartMesh {
     std::vector<uint8_t> face_status;
+    std::vector<std::optional<Rgb>> face_color;
     std::vector<float> positions, normals;
     std::vector<uint32_t> indices, face_ids;
     std::vector<float> seg_points;
@@ -611,6 +642,7 @@ void place(const ProtoGeom& pg, const TopLoc_Location& placement, LineKind curve
         const FaceGeom& g = pg.faces[fid];
         ++s.faces;
         m.face_status.push_back(g.status);
+        m.face_color.push_back(g.color);
         const uint32_t base = static_cast<uint32_t>(m.positions.size() / 3);
         for (std::size_t i = 0; i < g.nodes.size(); ++i) {
             gp_Pnt p = g.nodes[i].Transformed(t);
@@ -794,6 +826,7 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     auto t0 = Clock::now();
     // Keyed by the label's entry ("0:1:1:3"): TDF_Label itself is not ordered.
     std::map<std::string, TopoDS_Shape> prototypes;
+    std::map<std::string, TDF_Label> prototype_labels;
     auto entry = [](const TDF_Label& l) {
         TCollection_AsciiString e;
         TDF_Tool::Entry(l, e);
@@ -811,6 +844,7 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
             ++s.prototypes_mesh_failed;
         }
         prototypes.emplace(entry(p.prototype), shape);
+        prototype_labels.emplace(entry(p.prototype), p.prototype);
     }
     s.prototypes = prototypes.size();
 
@@ -819,7 +853,9 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     FaceCache cache;
     std::map<std::string, ProtoGeom> geoms;
     for (const auto& [key, shape] : prototypes)
-        geoms.emplace(key, prototype_geometry(shape, params, s.diagonal, cache, s));
+        geoms.emplace(key, prototype_geometry(shape, params, s.diagonal,
+                                              face_colors(st, ct, prototype_labels.at(key)),
+                                              cache, s));
     s.t_mesh_ms = ms_since(t0);
     // Faceless parts are the content of a sketch-only file, but construction
     // geometry in a file that has solids.
@@ -838,7 +874,7 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
             return kExitFailed;
         }
         f.write("STEPVMSH", 8);
-        put<uint32_t>(f, 2);
+        put<uint32_t>(f, 3);
         double x0, y0, z0, x1, y1, z1;
         bbox.Get(x0, y0, z0, x1, y1, z1);
         for (double v : {x0, y0, z0, x1, y1, z1}) put(f, v);
@@ -859,7 +895,14 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
             put(f, c.g);
             put(f, c.b);
             put<uint32_t>(f, static_cast<uint32_t>(m.face_status.size()));
-            put_vec(f, m.face_status);
+            for (std::size_t i = 0; i < m.face_status.size(); ++i) {
+                put<uint8_t>(f, m.face_status[i]);
+                put<uint8_t>(f, m.face_color[i] ? 1 : 0);
+                const Rgb fc = m.face_color[i].value_or(Rgb{0, 0, 0});
+                put(f, fc.r);
+                put(f, fc.g);
+                put(f, fc.b);
+            }
             put<uint32_t>(f, static_cast<uint32_t>(m.positions.size() / 3));
             put<uint32_t>(f, static_cast<uint32_t>(m.indices.size() / 3));
             put_vec(f, m.positions);
@@ -915,6 +958,17 @@ int main(int argc, char** argv) {
     if (input.empty() || !(linear_rel > 0) || !(angular_deg > 0)) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
+    }
+
+    // Test hook for the memory cap (tests/cli.rs): allocate and touch this many
+    // MiB, then hold them, so the parent's cap has something deterministic to
+    // catch. A real file's footprint depends on its geometry and timing.
+    if (const char* b = std::getenv("STEPV_OCCT_TEST_BALLOON_MB")) {
+        const std::size_t bytes = std::strtoull(b, nullptr, 10) << 20;
+        auto* p = static_cast<volatile char*>(std::malloc(bytes));
+        for (std::size_t i = 0; p && i < bytes; i += 4096) p[i] = 1;
+        sleep(5);
+        std::free(const_cast<char*>(p));
     }
 
     // The JSON summary is the contract on stdout, and OCCT's readers print

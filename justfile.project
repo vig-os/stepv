@@ -135,6 +135,12 @@ kernel:
     cmake -S kernel -B target/kernel -DCMAKE_BUILD_TYPE=Release
     cmake --build target/kernel -j
 
+# Regenerate the small committed test corpus (tests/data/) the CLI tests use.
+[group('harness')]
+test-data: kernel
+    mkdir -p tests/data
+    ./target/kernel/fixture-gen tests/data
+
 # Run the kernel robustness harness over tests/fixtures/ and print the
 # pass-rate / timing table that plan.md §5 asks you to record.
 # ALWAYS --release: debug wasmtime is ~100x slower and looks like a broken kernel.

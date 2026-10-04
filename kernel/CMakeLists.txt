@@ -29,3 +29,13 @@ target_link_libraries(stepv-occt PRIVATE
 add_executable(stress-gen stress-gen.cpp)
 target_include_directories(stress-gen PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 target_link_libraries(stress-gen PRIVATE TKDESTEP TKXSBase TKTopAlgo TKBRep TKMath TKernel TKG3d)
+
+# Generator for the committed test corpus in tests/data/ (`just test-data`).
+add_executable(fixture-gen fixture-gen.cpp)
+target_include_directories(fixture-gen PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+target_link_libraries(fixture-gen PRIVATE
+  TKDESTEP TKDEIGES TKXCAF TKXSBase TKLCAF TKCAF TKCDF TKBO TKPrim
+  TKTopAlgo TKBRep TKGeomBase TKG3d TKMath TKernel)
+
+# The kernel ships; the generators are dev tools.
+install(TARGETS stepv-occt RUNTIME DESTINATION libexec/stepv)
