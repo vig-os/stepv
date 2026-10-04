@@ -32,6 +32,7 @@ ARGS:
 OPTIONS:
     --png <path>         Render a PNG thumbnail
     --glb <path>         Write a binary glTF
+    --mesh <path>        Write the raw STEPVMSH buffers (for front-ends)
     --size <px>          PNG edge length, 16..=4096 (default 512)
     --quality <q>        thumbnail | preview (default thumbnail)
     --timeout <secs>     Hard wall-clock cap (default 20)
@@ -68,6 +69,9 @@ const EXIT_TIMEOUT: u8 = 4;
 enum Format {
     Png,
     Glb,
+    /// The kernel's STEPVMSH buffers, validated: what the macOS preview
+    /// extension reads (format spec at the top of kernel/stepv-occt.cpp).
+    Mesh,
 }
 
 #[derive(Debug)]
@@ -110,14 +114,14 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     while let Some(arg) = it.next() {
         let mut value = |flag: &str| it.next().cloned().ok_or(format!("{flag} needs a value"));
         match arg.as_str() {
-            "--png" | "--glb" => {
+            "--png" | "--glb" | "--mesh" => {
                 if a.output.is_some() {
-                    return Err("give one of --png or --glb, not both".into());
+                    return Err("give one of --png, --glb or --mesh".into());
                 }
-                let f = if arg == "--png" {
-                    Format::Png
-                } else {
-                    Format::Glb
+                let f = match arg.as_str() {
+                    "--png" => Format::Png,
+                    "--glb" => Format::Glb,
+                    _ => Format::Mesh,
                 };
                 a.output = Some((f, PathBuf::from(value(arg)?)));
             }
@@ -203,7 +207,7 @@ fn run(args: &Args) -> (u8, Value) {
     }
     if args.view {
         let scene = match tessellate(args, &mut report, None) {
-            Ok(s) => s,
+            Ok((s, _)) => s,
             Err(code) => return (code, report),
         };
         let name = args
@@ -234,7 +238,7 @@ fn run(args: &Args) -> (u8, Value) {
         return (code, report);
     }
 
-    let scene = match tessellate(args, &mut report, cache_path.as_deref()) {
+    let (scene, raw) = match tessellate(args, &mut report, cache_path.as_deref()) {
         Ok(s) => s,
         Err(code) => return (code, report),
     };
@@ -260,6 +264,7 @@ fn run(args: &Args) -> (u8, Value) {
                 show_construction: args.show_construction,
             },
         ),
+        Format::Mesh => raw,
     };
     if let Err(e) = write_atomic(&out, &bytes) {
         return fail(
@@ -286,7 +291,11 @@ fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
 
 /// Runs the kernel and decodes its buffers. On failure, fills `report` and
 /// returns the exit code. Shared by `--png`/`--glb` and `view`.
-fn tessellate(args: &Args, report: &mut Value, cache_path: Option<&Path>) -> Result<Scene, u8> {
+fn tessellate(
+    args: &Args,
+    report: &mut Value,
+    cache_path: Option<&Path>,
+) -> Result<(Scene, Vec<u8>), u8> {
     // ── Kernel ──
     let kernel = occt::kernel_path();
     if !kernel.is_file() {
@@ -361,7 +370,11 @@ fn tessellate(args: &Args, report: &mut Value, cache_path: Option<&Path>) -> Res
 
     let scene = std::fs::read(&mesh)
         .map_err(|e| e.to_string())
-        .and_then(|b| occt::read_mesh(&b).map_err(|e| e.to_string()));
+        .and_then(|b| {
+            occt::read_mesh(&b)
+                .map(|s| (s, b))
+                .map_err(|e| e.to_string())
+        });
     let _ = std::fs::remove_file(&mesh);
     // The kernel wrote it: a decode failure is a stepv bug, not user input.
     scene.map_err(|e| {
@@ -390,6 +403,7 @@ fn cache_path(args: &Args, format: Format) -> Option<PathBuf> {
     let (output, ext) = match format {
         Format::Png => (cache::Output::ThumbnailPng, "png"),
         Format::Glb => (cache::Output::Glb, "glb"),
+        Format::Mesh => (cache::Output::Buffers, "msh"),
     };
     let variant = u64::from(args.size) | (u64::from(args.show_construction) << 32);
     let key = cache::key(&cache::KeyInputs {

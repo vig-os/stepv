@@ -200,6 +200,29 @@ fn glb_is_valid_and_keeps_part_names() {
 }
 
 #[test]
+fn mesh_output_decodes_and_carries_face_colours() {
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("mesh");
+    let out = t.path("a.msh");
+    let (code, j, _) = stepv(
+        &[s(&data("assembly.step")), "--mesh", s(&out), "--no-cache"],
+        &t.0,
+    );
+    assert_eq!(code, 0, "{j}");
+    let scene = stepv::occt::read_mesh(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(scene.parts.len(), 3);
+    let red_faces = scene
+        .parts
+        .iter()
+        .flat_map(|p| &p.faces)
+        .filter(|f| f.color.is_some_and(|c| c.r > 0.8 && c.g < 0.2))
+        .count();
+    assert_eq!(red_faces, 1, "the plate's top face keeps its own colour");
+}
+
+#[test]
 fn every_format_renders() {
     if !kernel_available() {
         return;
