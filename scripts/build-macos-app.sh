@@ -42,6 +42,10 @@ done
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/PlugIns"
 sed "s/@VERSION@/$version/g" "$src/Host/Info.plist" > "$app/Contents/Info.plist"
+# Licence obligations travel with the binary (NOTICE; OCCT's LGPL + exception).
+mkdir -p "$app/Contents/Resources/licenses"
+cp "$root/NOTICE" "$root/LICENSE" "$app/Contents/Resources/"
+cp "$root"/licenses/*.txt "$app/Contents/Resources/licenses/"
 
 # ── Swift: Apple's toolchain, with a clean environment so the nix dev shell's
 #    SDKROOT/CC/LD settings cannot leak into it. ──
