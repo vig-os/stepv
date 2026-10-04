@@ -12,7 +12,8 @@
 #   3. the robustness gate on the REDISTRIBUTABLE corpus only (NIST PMI is US
 #      government work; `malformed` is generated): `harness --strict` fails
 #      on any crash/timeout/bad mesh or a malformed file that does not fail
-#      cleanly, and `cli-sweep` holds the CLI to its exit-code contract;
+#      cleanly, `--min-pass` on a pass-rate collapse (#22), and `cli-sweep`
+#      holds the CLI to its exit-code contract;
 #   4. on Linux, the desktop integration exactly as GNOME/XFCE invoke it.
 name: Kernel
 
@@ -68,7 +69,7 @@ jobs:
         run: nix develop --command just fixtures nist-pmi malformed
 
       - name: Robustness gate (harness --strict)
-        run: nix develop --command just harness --strict tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
+        run: nix develop --command just harness --strict --min-pass 95 tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
 
       - name: CLI contract sweep
         run: nix develop --command just cli-sweep tests/fixtures/nist-pmi tests/fixtures/malformed tests/data

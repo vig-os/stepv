@@ -6,6 +6,7 @@
 //! just harness tests/fixtures/nist-pmi     # one source
 //! just harness --cold-start 30             # spawn-to-result latency only
 //! just harness --strict tests/fixtures/x   # CI gate: non-zero on any crash
+//! just harness --min-pass 95 ...           # ... or below a 95% pass rate
 //! ```
 //!
 //! For each file: import through XCAF, tessellate at bbox-relative
@@ -100,6 +101,8 @@ struct Args {
     cold_start: Option<usize>,
     memory: Option<u64>,
     strict: bool,
+    /// Fail below this pass rate (percent), over the non-malformed files.
+    min_pass: Option<f64>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -110,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
         cold_start: None,
         memory: None,
         strict: false,
+        min_pass: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -129,6 +133,13 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "--strict" => a.strict = true,
+            "--min-pass" => {
+                a.min_pass = Some(
+                    value("--min-pass")?
+                        .parse()
+                        .map_err(|e| format!("--min-pass: {e}"))?,
+                );
+            }
             "--memory-gb" => {
                 let gb: f64 = value("--memory-gb")?
                     .parse()
@@ -502,6 +513,17 @@ fn main() -> ExitCode {
             );
         }
         if !bad.is_empty() {
+            return ExitCode::FAILURE;
+        }
+    }
+    // A collapse in which every file fails CLEANLY passes --strict (#22): the
+    // floor catches it.
+    if let Some(floor) = args.min_pass {
+        let real: Vec<_> = records.iter().filter(|r| r.source != "malformed").collect();
+        let passed = real.iter().filter(|r| r.verdict == Verdict::Pass).count();
+        let rate = 100.0 * passed as f64 / real.len().max(1) as f64;
+        if rate < floor {
+            eprintln!("harness --min-pass: {rate:.1}% passed, below the {floor}% floor");
             return ExitCode::FAILURE;
         }
     }
