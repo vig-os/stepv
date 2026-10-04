@@ -58,6 +58,12 @@ jobs:
       - name: nix flake check
         run: nix flake check --print-build-logs
 
+      - name: cargo deny check advisories
+        if: runner.os == 'Linux'
+        # The one cargo-deny check the nix sandbox cannot run (it fetches the
+        # RustSec database); bans/licenses/sources run inside flake check.
+        run: nix develop --command cargo deny check advisories
+
       - name: Fetch the redistributable corpus
         run: nix develop --command just fixtures nist-pmi malformed
 
