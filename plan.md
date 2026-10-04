@@ -689,6 +689,40 @@ with the mesh (a STEPVMSH v4) once the viewer exists. Point-to-point distances b
 (`BRepExtrema_DistShapeShape`) are kernel queries a viewer would make on demand, not data to
 precompute.
 
+### Viewer stack (#27 spike, 2026-10-05): egui + wgpu
+
+**Decided:** #21's cross-platform viewer (option B) is built on egui + wgpu (eframe), in-process in
+`stepv view`, with the minifb viewer kept as the `--software` fallback. The alternative was
+three.js in a browser fed by a loopback server.
+
+Both were prototyped against the same kernel output (`spikes/` on `feature/27-viewer-stack-spike`)
+and measured. The full table is on #27.
+
+- **Rendering speed did not decide it.** At matched settings (the 1.77M-triangle stress assembly,
+  1280×800, MSAA, GPU-synchronised), both draw a frame in under 1 ms on Apple Silicon. On Linux
+  with no GPU, wgpu runs on lavapipe at about 6 fps for that model.
+- **What decided it:**
+  - No loopback listener beside a kernel that #18 just sandboxed.
+  - One language and toolchain. The minified JS failed the repo's hooks.
+  - No browser launch: 5.6 s cold.
+  - The tested Rust (camera, overlay rules, topology checks) is reused, not re-implemented in JS.
+- **What it costs:**
+  - 188 crates and a 12–20 MB binary, so it stays behind the `viewer` feature, with a CI tripwire
+    keeping it out of the Quick Look capi.
+  - Real API churn: three breaking renames hit in one afternoon. Versions are pinned.
+  - A heavier Linux build: a 4 GiB VM needs `-j2`.
+- **The condition that would have flipped it:** an egui model tree failing at scale. It doesn't when
+  virtualised: 40k nodes cost 2.2 ms per frame. Built naively from nested headers, the same tree
+  costs 38 ms.
+- **Reviews:** two rounds of fresh agent reviews. Round 1 covered graphics, packaging/security and
+  CAD product. Round 2 covered methodology, which caught that the first frame-time comparison was
+  invalid, and productisation, which supplied the follow-ups.
+
+The prototypes' data plane is throwaway. The product is a fresh `view::` module: #28 (scaffold,
+fallback, tripwire), #29 (id-buffer picking), #30 (virtualised tree), #31 (overlay, edges,
+STEPVMSH v4), #32 (CI, packaging), #33 (measurements through a sandboxed kernel query channel),
+and #34 (capping, fat lines).
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
