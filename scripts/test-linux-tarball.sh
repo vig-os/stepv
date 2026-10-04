@@ -11,8 +11,9 @@ for image in debian:11 ubuntu:22.04 ubuntu:24.04 fedora:41; do
   echo "== $image"
   docker run --rm -v "$tarball:/stepv.tar.gz:ro" -v "$root/tests/data:/data:ro" "$image" sh -ec '
     test ! -e /nix
-    mkdir /opt && cd /opt && tar -xzf /stepv.tar.gz
-    s=/opt/stepv/bin/stepv
+    mkdir -p /tmp/unpack
+    tar -xzf /stepv.tar.gz -C /tmp/unpack
+    s=/tmp/unpack/stepv/bin/stepv
     $s --version
     for f in assembly.step box.igs box.brep sketch.step; do
       $s /data/$f --png /tmp/$f.png --size 128 --no-cache >/dev/null
