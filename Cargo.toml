@@ -43,6 +43,16 @@ blake3 = "1"
 # PNG encoding for `--png` (the rasteriser itself is src/render.rs).
 png = "0.18"
 
+# The `stepv view` window. Pure Rust; on Linux it dlopens X11/Wayland at run
+# time, so building it needs no system libraries.
+minifb = { version = "0.29", optional = true }
+
+[features]
+default = ["viewer"]
+# `stepv view`: an interactive window over the software rasteriser. Off for a
+# headless build (`--no-default-features`): thumbnails and --glb need no window.
+viewer = ["dep:minifb"]
+
 # proc_pid_rusage: the macOS half of the kernel memory cap (src/occt.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

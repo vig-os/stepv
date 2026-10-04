@@ -17,6 +17,7 @@ pub mod glb;
 pub mod header;
 pub mod occt;
 pub mod render;
+pub mod viewer;
 
 /// A triangle mesh for one part, in the file's own units.
 ///

@@ -16,7 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use stepv::occt::{self, Limits, Outcome};
-use stepv::{Deflection, cache, glb, header, render};
+use stepv::{Deflection, Scene, cache, glb, header, render, viewer};
 
 const USAGE: &str = "\
 stepv — STEP/IGES/BREP preview and thumbnails
@@ -24,6 +24,7 @@ stepv — STEP/IGES/BREP preview and thumbnails
 USAGE:
     stepv <input> [--png <out> | --glb <out>] [options]
     stepv <input> --info
+    stepv view <input> [options]     Interactive viewer window
 
 ARGS:
     <input>              .step / .stp / .iges / .igs / .brep
@@ -40,6 +41,11 @@ OPTIONS:
     --info               Print header metadata as JSON and exit
     -V, --version        Print the version
     -h, --help           Print this help
+
+VIEWER:
+    Drag to orbit, right- or shift-drag to pan, scroll to zoom; R reset,
+    F front, T top, C construction curves, Q or Esc to quit. Defaults to
+    --quality preview and --timeout 120.
 
 OUTPUT:
     One JSON line on stdout for every run past argument parsing, success
@@ -74,6 +80,7 @@ struct Args {
     limits: Limits,
     show_construction: bool,
     cache: bool,
+    view: bool,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -86,6 +93,17 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         limits: Limits::DEFAULT,
         show_construction: false,
         cache: true,
+        view: false,
+    };
+    let argv = match argv.split_first() {
+        Some((first, rest)) if first == "view" => {
+            a.view = true;
+            // A person is waiting at a window, not a file manager in a loop.
+            a.deflection = Deflection::PREVIEW;
+            a.limits.timeout = Duration::from_secs(120);
+            rest
+        }
+        _ => argv,
     };
     let mut input = None;
     let mut it = argv.iter();
@@ -143,7 +161,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         }
     }
     a.input = input.ok_or("no input file given")?;
-    if !a.info && a.output.is_none() {
+    if a.view && a.output.is_some() {
+        return Err("view takes no --png/--glb".into());
+    }
+    if !a.info && !a.view && a.output.is_none() {
         return Err("nothing to do: give --png, --glb or --info".into());
     }
     Ok(a)
@@ -180,6 +201,29 @@ fn run(args: &Args) -> (u8, Value) {
         report["status"] = json!("info");
         return (EXIT_OK, report);
     }
+    if args.view {
+        let scene = match tessellate(args, &mut report, None) {
+            Ok(s) => s,
+            Err(code) => return (code, report),
+        };
+        let name = args
+            .input
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let warn = match scene.worst_face() {
+            Some(stepv::FaceStatus::Approx) => " — some faces approximated",
+            Some(stepv::FaceStatus::Missing) => " — some faces missing",
+            _ => "",
+        };
+        let title = format!("stepv — {name} ({} parts){warn}", scene.parts.len());
+        return match viewer::run(&scene, &title) {
+            Ok(()) => {
+                report["status"] = json!("ok");
+                (EXIT_OK, report)
+            }
+            Err(e) => fail(report, EXIT_FAILED, "error", &e),
+        };
+    }
     let (format, out) = args.output.clone().expect("checked in parse_args");
 
     // ── Cache ──
@@ -190,15 +234,68 @@ fn run(args: &Args) -> (u8, Value) {
         return (code, report);
     }
 
-    // ── Kernel ──
-    let kernel = occt::kernel_path();
-    if !kernel.is_file() {
+    let scene = match tessellate(args, &mut report, cache_path.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return (code, report),
+    };
+    report["worst_face"] = json!(scene.worst_face().map(|s| format!("{s:?}").to_lowercase()));
+
+    let bytes = match format {
+        Format::Png => {
+            let opts = render::Options {
+                show_construction: args.show_construction,
+                ..render::Options::square(args.size)
+            };
+            match render::render(&scene, &opts).map(|img| img.to_png()) {
+                Ok(Ok(png)) => png,
+                Ok(Err(e)) => {
+                    return fail(report, EXIT_FAILED, "error", &format!("PNG encode: {e}"));
+                }
+                Err(e) => return fail(report, EXIT_FAILED, "failed", &e.to_string()),
+            }
+        }
+        Format::Glb => glb::to_glb(
+            &scene,
+            &glb::Options {
+                show_construction: args.show_construction,
+            },
+        ),
+    };
+    if let Err(e) = write_atomic(&out, &bytes) {
         return fail(
             report,
             EXIT_FAILED,
             "error",
-            &format!("kernel not found at {}", kernel.display()),
+            &format!("cannot write {}: {e}", out.display()),
         );
+    }
+    if let Some(cp) = &cache_path {
+        let _ = write_atomic(cp, &bytes);
+    }
+    report["status"] = json!("ok");
+    report["output"] = json!(out);
+    report["cached"] = json!(false);
+    (EXIT_OK, report)
+}
+
+fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
+    report["status"] = json!(status);
+    report["error"] = json!(msg);
+    code
+}
+
+/// Runs the kernel and decodes its buffers. On failure, fills `report` and
+/// returns the exit code. Shared by `--png`/`--glb` and `view`.
+fn tessellate(args: &Args, report: &mut Value, cache_path: Option<&Path>) -> Result<Scene, u8> {
+    // ── Kernel ──
+    let kernel = occt::kernel_path();
+    if !kernel.is_file() {
+        return Err(fail_in(
+            report,
+            EXIT_FAILED,
+            "error",
+            &format!("kernel not found at {}", kernel.display()),
+        ));
     }
     let mesh = temp_path("msh");
     let result = occt::run(
@@ -212,12 +309,12 @@ fn run(args: &Args) -> (u8, Value) {
         Ok(r) => r,
         Err(e) => {
             let _ = std::fs::remove_file(&mesh);
-            return fail(
+            return Err(fail_in(
                 report,
                 EXIT_FAILED,
                 "error",
                 &format!("cannot start kernel: {e}"),
-            );
+            ));
         }
     };
     report["kernel"] = json!(run.summary.as_ref().map(|s| json!({
@@ -255,68 +352,26 @@ fn run(args: &Args) -> (u8, Value) {
         // Timeouts are not cached: a busy machine is not a property of the file.
         if code == EXIT_FAILED
             && status != "crashed"
-            && let Some(cp) = &cache_path
+            && let Some(cp) = cache_path
         {
             remember_failure(cp, status, &msg);
         }
-        return fail(report, code, status, &msg);
+        return Err(fail_in(report, code, status, &msg));
     }
 
     let scene = std::fs::read(&mesh)
         .map_err(|e| e.to_string())
         .and_then(|b| occt::read_mesh(&b).map_err(|e| e.to_string()));
     let _ = std::fs::remove_file(&mesh);
-    let scene = match scene {
-        Ok(s) => s,
-        // The kernel wrote it: a decode failure is a stepv bug, not user input.
-        Err(e) => {
-            return fail(
-                report,
-                EXIT_FAILED,
-                "error",
-                &format!("bad kernel output: {e}"),
-            );
-        }
-    };
-    report["worst_face"] = json!(scene.worst_face().map(|s| format!("{s:?}").to_lowercase()));
-
-    let bytes = match format {
-        Format::Png => {
-            let opts = render::Options {
-                size: args.size,
-                show_construction: args.show_construction,
-                ..render::Options::default()
-            };
-            match render::render(&scene, &opts).map(|img| img.to_png()) {
-                Ok(Ok(png)) => png,
-                Ok(Err(e)) => {
-                    return fail(report, EXIT_FAILED, "error", &format!("PNG encode: {e}"));
-                }
-                Err(e) => return fail(report, EXIT_FAILED, "failed", &e.to_string()),
-            }
-        }
-        Format::Glb => glb::to_glb(
-            &scene,
-            &glb::Options {
-                show_construction: args.show_construction,
-            },
-        ),
-    };
-    if let Err(e) = write_atomic(&out, &bytes) {
-        return fail(
+    // The kernel wrote it: a decode failure is a stepv bug, not user input.
+    scene.map_err(|e| {
+        fail_in(
             report,
             EXIT_FAILED,
             "error",
-            &format!("cannot write {}: {e}", out.display()),
-        );
-    }
-    if let Some(cp) = &cache_path {
-        let _ = write_atomic(cp, &bytes);
-    }
-    report["status"] = json!("ok");
-    report["output"] = json!(out);
-    report["cached"] = json!(false);
-    (EXIT_OK, report)
+            &format!("bad kernel output: {e}"),
+        )
+    })
 }
 
 fn fail(mut report: Value, code: u8, status: &str, msg: &str) -> (u8, Value) {
@@ -442,6 +497,23 @@ mod tests {
         ] {
             assert!(args(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn view_subcommand_takes_preview_defaults() {
+        let a = args(&["view", "m.step"]).unwrap();
+        assert!(a.view);
+        assert_eq!(a.deflection, Deflection::PREVIEW);
+        assert_eq!(a.limits.timeout, Duration::from_secs(120));
+        assert!(args(&["view", "m.step", "--png", "o.png"]).is_err());
+        // An explicit option still wins over the view default.
+        assert_eq!(
+            args(&["view", "m.step", "--timeout", "5"])
+                .unwrap()
+                .limits
+                .timeout,
+            Duration::from_secs(5)
+        );
     }
 
     #[test]

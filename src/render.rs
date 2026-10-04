@@ -16,22 +16,74 @@ use crate::{Color, FaceStatus, LineKind, Scene};
 /// Rendering options.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
-    /// Output edge length in pixels (square).
-    pub size: u32,
+    pub width: u32,
+    pub height: u32,
     /// Draw `LineKind::Construction` curves.
     pub show_construction: bool,
     /// Supersampling factor per axis (1 = none).
     pub supersample: u32,
+    pub camera: Camera,
+    pub fit: Fit,
+}
+
+impl Options {
+    /// A square image of `size` pixels with the default camera.
+    #[must_use]
+    pub fn square(size: u32) -> Self {
+        Self {
+            width: size,
+            height: size,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            size: 512,
+            width: 512,
+            height: 512,
             show_construction: false,
             supersample: 2,
+            camera: Camera::default(),
+            fit: Fit::Tight,
         }
     }
+}
+
+/// An orthographic orbit camera. The model is Z-up (CAD convention).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    /// Rotation about the vertical axis, degrees.
+    pub azimuth_deg: f32,
+    /// Tilt above the horizon, degrees.
+    pub elevation_deg: f32,
+    /// Magnification over the fitted view; 1 = fitted.
+    pub zoom: f32,
+    /// Pan in fractions of the image's shorter edge.
+    pub pan: [f32; 2],
+}
+
+impl Default for Camera {
+    /// The isometric-ish view thumbnails use.
+    fn default() -> Self {
+        Self {
+            azimuth_deg: -35.0,
+            elevation_deg: 30.0,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+        }
+    }
+}
+
+/// How the model is fitted to the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Tight to the projected extents: best use of a thumbnail's pixels.
+    Tight,
+    /// To the bounding sphere: rotation-invariant, so an orbiting model in
+    /// the viewer does not grow and shrink as it turns.
+    Sphere,
 }
 
 /// An RGBA8 image, straight (non-premultiplied) alpha, sRGB.
@@ -97,9 +149,9 @@ const SKETCH: [f32; 3] = [0.12, 0.13, 0.15];
 const CONSTRUCTION: [f32; 3] = [0.35, 0.45, 0.60];
 
 /// View rotation: azimuth −35° about Y, then elevation 30° about X.
-fn view(p: [f32; 3]) -> [f32; 3] {
-    let (sa, ca) = (-35f32).to_radians().sin_cos();
-    let (se, ce) = 30f32.to_radians().sin_cos();
+fn view(cam: &Camera, p: [f32; 3]) -> [f32; 3] {
+    let (sa, ca) = cam.azimuth_deg.to_radians().sin_cos();
+    let (se, ce) = cam.elevation_deg.to_radians().sin_cos();
     // The scene is Z-up (CAD convention); swap to Y-up for the view.
     let (x, y, z) = (p[0], p[2], -p[1]);
     let (x, z) = (x * ca + z * sa, -x * sa + z * ca);
@@ -162,60 +214,84 @@ impl Target {
 /// [`EmptyScene`] when there are no triangles and no lines to draw.
 pub fn render(scene: &Scene, opts: &Options) -> Result<Image, EmptyScene> {
     let ss = opts.supersample.max(1) as usize;
-    let n = opts.size.max(8) as usize * ss;
+    let (w, h) = (
+        opts.width.max(8) as usize * ss,
+        opts.height.max(8) as usize * ss,
+    );
+    let cam = &opts.camera;
     let visible = |k: LineKind| k != LineKind::Construction || opts.show_construction;
 
-    // Fit: projected extents of everything that will be drawn.
-    let mut lo = [f32::INFINITY; 2];
-    let mut hi = [f32::NEG_INFINITY; 2];
-    let mut grow = |p: [f32; 3]| {
-        let v = view(p);
-        for k in 0..2 {
-            lo[k] = lo[k].min(v[k]);
-            hi[k] = hi[k].max(v[k]);
-        }
-    };
-    let mut drawn = 0usize;
+    // Everything that will be drawn, in model space.
+    let mut points: Vec<[f32; 3]> = Vec::new();
     for part in &scene.parts {
         for i in &part.mesh.indices {
-            let i = *i as usize * 3;
-            grow([
-                part.mesh.positions[i],
-                part.mesh.positions[i + 1],
-                part.mesh.positions[i + 2],
-            ]);
+            points.push(vtx(&part.mesh, *i));
         }
-        drawn += part.mesh.triangle_count();
         for (s, k) in part.lines.kinds.iter().enumerate() {
             if visible(*k) {
                 let q = &part.lines.positions[s * 6..s * 6 + 6];
-                grow([q[0], q[1], q[2]]);
-                grow([q[3], q[4], q[5]]);
-                drawn += 1;
+                points.push([q[0], q[1], q[2]]);
+                points.push([q[3], q[4], q[5]]);
             }
         }
     }
-    if drawn == 0 || !lo[0].is_finite() {
+    if points.is_empty() {
         return Err(EmptyScene);
     }
-    let margin = 0.06 * n as f32;
-    let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(f32::EPSILON);
-    let scale = (n as f32 - 2.0 * margin) / span;
-    // Centre the drawing in the square.
-    let off = [
-        (n as f32 - (hi[0] - lo[0]) * scale) / 2.0,
-        (n as f32 - (hi[1] - lo[1]) * scale) / 2.0,
-    ];
+    let short = w.min(h) as f32;
+    let margin = 0.06 * short;
+    // (centre in view space, half-extent to fit) per fit mode.
+    let (centre, half) = match opts.fit {
+        Fit::Tight => {
+            let mut lo = [f32::INFINITY; 2];
+            let mut hi = [f32::NEG_INFINITY; 2];
+            for p in &points {
+                let v = view(cam, *p);
+                for k in 0..2 {
+                    lo[k] = lo[k].min(v[k]);
+                    hi[k] = hi[k].max(v[k]);
+                }
+            }
+            let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+            // Scale so the larger extent, against its own image edge, fits.
+            let sx = (hi[0] - lo[0]) / (w as f32 - 2.0 * margin);
+            let sy = (hi[1] - lo[1]) / (h as f32 - 2.0 * margin);
+            (
+                c,
+                sx.max(sy).max(f32::EPSILON) * (short - 2.0 * margin) / 2.0,
+            )
+        }
+        Fit::Sphere => {
+            let mut lo = [f32::INFINITY; 3];
+            let mut hi = [f32::NEG_INFINITY; 3];
+            for p in &points {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            let mid = [
+                (lo[0] + hi[0]) / 2.0,
+                (lo[1] + hi[1]) / 2.0,
+                (lo[2] + hi[2]) / 2.0,
+            ];
+            let r = (dot(sub(hi, lo), sub(hi, lo)).sqrt() / 2.0).max(f32::EPSILON);
+            let c = view(cam, mid);
+            ([c[0], c[1]], r)
+        }
+    };
+    let scale = (short - 2.0 * margin) / (2.0 * half) * cam.zoom.max(1e-3);
+    let pan = [cam.pan[0] * short, cam.pan[1] * short];
     let screen = |p: [f32; 3]| -> [f32; 3] {
-        let v = view(p);
+        let v = view(cam, p);
         [
-            off[0] + (v[0] - lo[0]) * scale,
-            n as f32 - (off[1] + (v[1] - lo[1]) * scale),
+            w as f32 / 2.0 + (v[0] - centre[0]) * scale + pan[0],
+            h as f32 / 2.0 - (v[1] - centre[1]) * scale + pan[1],
             -v[2], // nearer = smaller
         ]
     };
 
-    let mut t = Target::new(n, n);
+    let mut t = Target::new(w, h);
     let key = normalize([0.35, 0.75, 0.55]);
     let fill = normalize([-0.6, 0.2, 0.4]);
     let stripe = (6 * ss) as i64;
@@ -244,10 +320,10 @@ pub fn render(scene: &Scene, opts: &Options) -> Result<Image, EmptyScene> {
             // Flat shading from the view-space face normal, two-sided: CAD
             // exports do not reliably orient faces, and a black back face
             // reads as "broken model".
-            let wa = view(vtx(m, tri[0]));
+            let wa = view(cam, vtx(m, tri[0]));
             let nrm = normalize(cross(
-                sub(view(vtx(m, tri[1])), wa),
-                sub(view(vtx(m, tri[2])), wa),
+                sub(view(cam, vtx(m, tri[1])), wa),
+                sub(view(cam, vtx(m, tri[2])), wa),
             ));
             let light = 0.22 + 0.62 * dot(nrm, key).abs() + 0.16 * dot(nrm, fill).abs();
             let shaded = [base.r * light, base.g * light, base.b * light];
@@ -537,10 +613,41 @@ mod tests {
     }
 
     fn opts() -> Options {
-        Options {
-            size: 64,
-            ..Options::default()
+        Options::square(64)
+    }
+
+    #[test]
+    fn sphere_fit_is_rotation_invariant_in_scale() {
+        // Orbiting must not change the model's on-screen size: with a sphere
+        // fit, the covered area of a cube varies only with its silhouette,
+        // never jumps by a refit. Check that the fit keeps it inside.
+        for az in [-35.0, 10.0, 80.0, 170.0] {
+            let o = Options {
+                fit: Fit::Sphere,
+                camera: Camera {
+                    azimuth_deg: az,
+                    ..Camera::default()
+                },
+                ..Options::square(64)
+            };
+            let img = render(&cube([FaceStatus::Ok; 6]), &o).unwrap();
+            for x in 0..64 {
+                assert_eq!(img.pixel(x, 0)[3], 0, "az {az}: top row clear");
+                assert_eq!(img.pixel(x, 63)[3], 0, "az {az}: bottom row clear");
+            }
         }
+    }
+
+    #[test]
+    fn non_square_images_are_supported() {
+        let o = Options {
+            width: 96,
+            height: 48,
+            ..Options::default()
+        };
+        let img = render(&cube([FaceStatus::Ok; 6]), &o).unwrap();
+        assert_eq!((img.width, img.height), (96, 48));
+        assert_eq!(img.pixel(48, 24)[3], 255);
     }
 
     #[test]
