@@ -43,6 +43,7 @@ pub unsafe extern "C" fn stepv_render_png(
         let scene = occt::read_mesh(bytes).map_err(|_| STEPV_ERR_DECODE)?;
         let opts = render::Options {
             show_construction,
+            camera: render::Camera::for_scene(&scene),
             ..render::Options::square(size)
         };
         let img = render::render(&scene, &opts).map_err(|_| STEPV_ERR_EMPTY)?;
@@ -59,6 +60,37 @@ pub unsafe extern "C" fn stepv_render_png(
             STEPV_OK
         }
         Ok(Err(code)) => code,
+        Err(_) => STEPV_ERR_INTERNAL,
+    }
+}
+
+/// See `stepv.h`.
+///
+/// # Safety
+/// `mesh` must point to `mesh_len` readable bytes; `azimuth_deg` and
+/// `elevation_deg` must be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stepv_view_angles(
+    mesh: *const u8,
+    mesh_len: usize,
+    azimuth_deg: *mut f32,
+    elevation_deg: *mut f32,
+) -> i32 {
+    if mesh.is_null() || azimuth_deg.is_null() || elevation_deg.is_null() {
+        return STEPV_ERR_ARGS;
+    }
+    // SAFETY: caller contract above.
+    let bytes = unsafe { std::slice::from_raw_parts(mesh, mesh_len) };
+    match catch_unwind(|| occt::read_mesh(bytes).map(|s| render::Camera::for_scene(&s))) {
+        Ok(Ok(cam)) => {
+            // SAFETY: caller contract above.
+            unsafe {
+                *azimuth_deg = cam.azimuth_deg;
+                *elevation_deg = cam.elevation_deg;
+            }
+            STEPV_OK
+        }
+        Ok(Err(_)) => STEPV_ERR_DECODE,
         Err(_) => STEPV_ERR_INTERNAL,
     }
 }
@@ -155,6 +187,21 @@ mod tests {
         let png = unsafe { std::slice::from_raw_parts(out, len) };
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         unsafe { stepv_buffer_free(out, len) };
+    }
+
+    #[test]
+    fn view_angles_face_a_flat_mesh() {
+        // The one triangle lies in z = 0: seen face-on, from straight above.
+        let m = mesh();
+        let (mut az, mut el) = (0f32, 0f32);
+        let rc = unsafe { stepv_view_angles(m.as_ptr(), m.len(), &raw mut az, &raw mut el) };
+        assert_eq!(rc, STEPV_OK);
+        assert!((el - 90.0).abs() < 0.5, "elevation {el}");
+        let junk = [0u8; 4];
+        assert_eq!(
+            unsafe { stepv_view_angles(junk.as_ptr(), 4, &raw mut az, &raw mut el) },
+            STEPV_ERR_DECODE
+        );
     }
 
     #[test]

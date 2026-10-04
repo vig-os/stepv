@@ -33,10 +33,24 @@ pub enum Input {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Controls {
     pub camera: Camera,
+    /// Where Reset returns to: the view the window opened with.
+    pub home: Camera,
     pub show_construction: bool,
 }
 
 impl Controls {
+    /// Opening on `scene`'s own best view ([`Camera::for_scene`]): a flat
+    /// part face-on, anything else from the default angle.
+    #[must_use]
+    pub fn for_scene(scene: &crate::Scene) -> Self {
+        let home = Camera::for_scene(scene);
+        Self {
+            camera: home,
+            home,
+            show_construction: false,
+        }
+    }
+
     /// Degrees of orbit per pixel dragged.
     const ORBIT: f32 = 0.4;
     /// Zoom factor per scroll notch.
@@ -59,7 +73,7 @@ impl Controls {
             Input::Scroll(notches) => {
                 c.zoom = (c.zoom * Self::ZOOM.powf(notches)).clamp(0.05, 200.0);
             }
-            Input::Reset => *c = Camera::default(),
+            Input::Reset => *c = self.home,
             Input::Front => {
                 *c = Camera {
                     azimuth_deg: 0.0,
@@ -131,7 +145,7 @@ pub fn run(scene: &Scene, title: &str) -> Result<(), String> {
     .map_err(|e| format!("cannot open a window: {e}"))?;
     window.set_target_fps(60);
 
-    let mut controls = Controls::default();
+    let mut controls = Controls::for_scene(scene);
     let mut last_mouse: Option<(f32, f32)> = None;
     let mut dirty = true;
     let mut moving_frames = 0u32;
@@ -257,6 +271,12 @@ mod tests {
         assert_eq!(c.camera, Camera::default());
         c.apply(Input::Top, 500.0);
         assert_eq!(c.camera.elevation_deg, 89.0);
+        c.home = Camera {
+            elevation_deg: 90.0,
+            ..Camera::default()
+        };
+        c.apply(Input::Reset, 500.0);
+        assert_eq!(c.camera, c.home, "reset returns to the opening view");
         c.apply(Input::ToggleConstruction, 500.0);
         assert!(c.show_construction);
     }
