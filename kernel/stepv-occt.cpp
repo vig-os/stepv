@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -32,13 +33,26 @@ std::string canonical(const std::string& p) {
     return realpath(p.c_str(), r) ? r : "";
 }
 
+// The canonical path of an open file, "" if the OS will not say.
+std::string fd_path(int fd) {
+#if defined(__APPLE__)
+    char r[PATH_MAX];
+    return fcntl(fd, F_GETPATH, r) == 0 ? r : "";
+#else
+    char r[PATH_MAX];
+    const std::string link = "/proc/self/fd/" + std::to_string(fd);
+    const ssize_t n = readlink(link.c_str(), r, sizeof r - 1);
+    return n > 0 ? std::string(r, static_cast<std::size_t>(n)) : "";
+#endif
+}
+
 // Test hook for the sandbox (tests/sandbox.rs, #18). `spec` is one action,
 // tried from inside the sandbox; the outcome goes to stderr as
 // "stepv-occt escape <kind>: allowed" or "... refused (<why>)":
 //
 //   connect:<ipv4>:<port>   a TCP connection          udp:<ipv4>:<port>   one datagram
 //   exec:<path>             `<path> -c 'exit 7'`      write:<path>        create + write
-//   read:<path>             open + read one byte
+//   read:<path>             open + read one byte  kill:<pid>          SIGTERM to a process
 //
 // The run then carries on as normal, so one run proves both the refusal and
 // that the work the kernel is there for still happens.
@@ -88,6 +102,8 @@ void escape_attempt(const std::string& spec) {
         const int err = errno;
         close(fd);
         report(ok, err);
+    } else if (kind == "kill") {
+        report(kill(static_cast<pid_t>(std::atoi(arg.c_str())), SIGTERM) == 0, errno);
     } else if (kind == "read") {
         const int fd = open(arg.c_str(), O_RDONLY);
         if (fd < 0) { report(false, errno); return; }
@@ -151,12 +167,30 @@ int main(int argc, char** argv) {
     const std::string input_dir = slash == std::string::npos ? ""
                                   : slash == 0               ? "/"
                                                              : input_path.substr(0, slash);
+    // Siblings are readable for multi-file assemblies, but not when that
+    // means the whole of $HOME (~/.ssh among it), of an ancestor of it, or of
+    // "/": a file lying there gets read access to itself alone.
+    std::string read_root = input_dir;
+    const char* home_env = std::getenv("HOME");
+    const std::string home = home_env ? canonical(home_env) : "";
+    if (input_dir == "/" ||
+        (!home.empty() && !input_dir.empty() &&
+         (home == input_dir || home.rfind(input_dir + "/", 0) == 0)))
+        read_root = input_path;
+    // The one writable file, granted by the path its descriptor really has.
+    // O_NOFOLLOW: through a symlink, whatever it points at would become
+    // writable. Not created, not granted: the core then fails to open it.
+    std::string mesh_grant;
     if (!mesh_out.empty()) {
-        const int fd = open(mesh_out.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        if (fd >= 0) close(fd);
-        if (const std::string m = canonical(mesh_out); !m.empty()) mesh_out = m;
+        const int fd =
+            open(mesh_out.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (fd >= 0) {
+            mesh_grant = fd_path(fd);
+            close(fd);
+        }
+        if (!mesh_grant.empty()) mesh_out = mesh_grant;
     }
-    const std::string sandbox = stepv::enter_sandbox(input_dir, mesh_out);
+    const std::string sandbox = stepv::enter_sandbox(read_root, mesh_grant);
     // Unresolvable: the core reports it, in its own words.
     if (!input_path.empty()) input = input_path;
 

@@ -59,6 +59,12 @@ jobs:
       - name: nix flake check
         run: nix flake check --print-build-logs
 
+      - name: Sandbox tests, outside nix's build sandbox
+        # On macOS, flake check runs inside nix's own Seatbelt sandbox, which
+        # the kernel's cannot nest in: it reports `macos-outer` there and the
+        # sandbox tests step aside, saying so. Here they run for real (#18).
+        run: nix develop --command sh -c 'just kernel && cargo test --test sandbox --test cli'
+
       - name: cargo deny check advisories
         if: runner.os == 'Linux'
         # The one cargo-deny check the nix sandbox cannot run (it fetches the

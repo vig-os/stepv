@@ -61,13 +61,22 @@ impl KernelRun {
             .map(|rest| rest.starts_with("allowed"))
     }
 
+    /// Refused BY THE SANDBOX: EPERM (seccomp, Seatbelt) or EACCES
+    /// (Landlock), not some other failure that would pass vacuously.
     fn assert_refused(&self, kind: &str) {
-        assert_eq!(
-            self.escape(kind),
-            Some(false),
-            "{kind} must be refused inside the sandbox; kernel stderr:\n{}",
+        let prefix = format!("stepv-occt escape {kind}: refused (");
+        let why = self
+            .stderr
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()));
+        assert!(
+            why.is_some_and(
+                |w| w.starts_with("Operation not permitted") || w.starts_with("Permission denied")
+            ),
+            "{kind} must be refused by the sandbox; kernel stderr:\n{}",
             self.stderr
         );
+        assert_eq!(self.summary["sandbox"], SANDBOX, "{}", self.summary);
     }
 
     /// The sandbox must not cost the kernel its actual job.
@@ -83,7 +92,41 @@ impl KernelRun {
     }
 }
 
+/// Seatbelt does not nest, so inside nix's macOS build sandbox (`nix flake
+/// check`) the kernel cannot add its own and reports `macos-outer`. Only
+/// there may a test step aside, saying so: the Kernel workflow runs these
+/// tests again outside it. Anywhere else, `macos-outer` fails the test.
+pub fn nested_in_nix_build(summary: &Value) -> bool {
+    let nested = summary["sandbox"] == "macos-outer" && std::env::var_os("NIX_BUILD_TOP").is_some();
+    if nested {
+        eprintln!("SKIPPING: inside nix's build sandbox, which Seatbelt cannot nest in");
+    }
+    nested
+}
+
+/// The sandbox a complete run reports on this platform.
+const SANDBOX: &str = if cfg!(target_os = "macos") {
+    "macos-profile"
+} else {
+    "landlock+seccomp"
+};
+
 fn kernel(b: &Layout, escape: Option<&str>) -> Option<KernelRun> {
+    kernel_at(
+        &b.path("in/assembly.step"),
+        &b.path("out/assembly.msh"),
+        escape,
+        None,
+    )
+}
+
+/// A run on any input and mesh path, with `$HOME` set to `home` if given.
+fn kernel_at(
+    input: &Path,
+    mesh: &Path,
+    escape: Option<&str>,
+    home: Option<&Path>,
+) -> Option<KernelRun> {
     let k = stepv::occt::kernel_path();
     if !k.is_file() {
         if std::env::var_os("STEPV_SKIP_KERNEL_TESTS").is_some_and(|v| v == "1") {
@@ -93,14 +136,15 @@ fn kernel(b: &Layout, escape: Option<&str>) -> Option<KernelRun> {
         panic!("kernel not found at {} — run `just kernel`", k.display());
     }
     let mut cmd = Command::new(k);
-    cmd.arg(b.path("in/assembly.step"))
-        .arg("--mesh")
-        .arg(b.path("out/assembly.msh"));
+    cmd.arg(input).arg("--mesh").arg(mesh);
     if let Some(e) = escape {
         cmd.env("STEPV_OCCT_TEST_ESCAPE", e);
     }
+    if let Some(h) = home {
+        cmd.env("HOME", h);
+    }
     let out = cmd.output().expect("spawn kernel");
-    Some(KernelRun {
+    let run = KernelRun {
         code: out.status.code().unwrap_or(-1),
         summary: String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -108,7 +152,8 @@ fn kernel(b: &Layout, escape: Option<&str>) -> Option<KernelRun> {
             .and_then(|l| serde_json::from_str(l).ok())
             .unwrap_or(Value::Null),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
+    };
+    (!nested_in_nix_build(&run.summary)).then_some(run)
 }
 
 fn s(p: &Path) -> &str {
@@ -120,12 +165,7 @@ fn reports_the_sandbox_in_effect() {
     let b = Layout::new("report");
     let Some(r) = kernel(&b, None) else { return };
     r.assert_did_the_work(&b);
-    let expected = if cfg!(target_os = "macos") {
-        "macos-profile"
-    } else {
-        "landlock+seccomp"
-    };
-    assert_eq!(r.summary["sandbox"], expected, "{}", r.summary);
+    assert_eq!(r.summary["sandbox"], SANDBOX, "{}", r.summary);
 }
 
 #[test]
@@ -218,4 +258,66 @@ fn allows_the_input_directory_and_below() {
         assert_eq!(r.escape("read"), Some(true), "{target}: {}", r.stderr);
         r.assert_did_the_work(&b);
     }
+}
+
+#[test]
+fn refuses_signals_to_other_processes() {
+    let b = Layout::new("kill");
+    let mut victim = Command::new("sleep").arg("30").spawn().unwrap();
+    let r = kernel(&b, Some(&format!("kill:{}", victim.id())));
+    let alive = victim.try_wait().unwrap().is_none();
+    let _ = victim.kill();
+    let _ = victim.wait();
+    let Some(r) = r else { return };
+    r.assert_refused("kill");
+    assert!(alive, "the kernel killed another process");
+    r.assert_did_the_work(&b);
+}
+
+#[test]
+fn an_uncreatable_mesh_still_runs_sandboxed() {
+    // A grant that fails must cost that access, not the whole sandbox.
+    let b = Layout::new("no-mesh-dir");
+    let canary = b.path("elsewhere/canary");
+    let Some(r) = kernel_at(
+        &b.path("in/assembly.step"),
+        &b.path("missing-dir/assembly.msh"),
+        Some(&format!("read:{}", s(&canary))),
+        None,
+    ) else {
+        return;
+    };
+    r.assert_refused("read");
+    assert_eq!(r.code, 3, "no mesh can be written: {}", r.summary);
+}
+
+#[test]
+fn a_symlinked_mesh_is_not_followed() {
+    // Otherwise whatever the link points at becomes the writable file.
+    let b = Layout::new("mesh-symlink");
+    let canary = b.path("elsewhere/canary");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&canary, b.path("out/assembly.msh")).unwrap();
+    let Some(r) = kernel(&b, None) else { return };
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "secret\n");
+    assert_eq!(r.summary["sandbox"], SANDBOX, "{}", r.summary);
+    assert_eq!(r.code, 3, "{}", r.summary);
+}
+
+#[test]
+fn a_file_at_the_home_root_exposes_only_itself() {
+    // Siblings of ~/part.step are the whole of $HOME, ~/.ssh among it.
+    let b = Layout::new("home-root");
+    let home = b.path("in");
+    let sibling = b.path("in/sibling.step");
+    let Some(r) = kernel_at(
+        &b.path("in/assembly.step"),
+        &b.path("out/assembly.msh"),
+        Some(&format!("read:{}", s(&sibling))),
+        Some(&home),
+    ) else {
+        return;
+    };
+    r.assert_refused("read");
+    r.assert_did_the_work(&b);
 }

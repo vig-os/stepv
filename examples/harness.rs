@@ -184,16 +184,36 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The corpus source a file belongs to: its first directory under fixtures/.
+/// The corpus source a file belongs to: its first directory under a
+/// `fixtures/` directory, however the path was given (relative or absolute:
+/// a source mislabelled hides `malformed` from --strict and --min-pass).
 fn source_of(path: &Path) -> String {
-    let rel = path.strip_prefix(FIXTURES).unwrap_or(path);
-    rel.components()
-        .next()
-        .filter(|_| rel.components().count() > 1)
+    let parts: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    parts
+        .iter()
+        .position(|c| *c == "fixtures")
+        .filter(|&i| i + 2 < parts.len())
         .map_or_else(
             || "(other)".into(),
-            |c| c.as_os_str().to_string_lossy().into_owned(),
+            |i| parts[i + 1].to_string_lossy().into_owned(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_is_found_in_relative_and_absolute_paths() {
+        for p in [
+            "tests/fixtures/malformed/empty.step",
+            "/home/x/stepv/tests/fixtures/malformed/empty.step",
+        ] {
+            assert_eq!(source_of(Path::new(p)), "malformed", "{p}");
+        }
+        assert_eq!(source_of(Path::new("tests/fixtures/loose.step")), "(other)");
+        assert_eq!(source_of(Path::new("tests/data/box.igs")), "(other)");
+    }
 }
 
 fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Result<Record> {
