@@ -327,7 +327,19 @@ Swift Quick Look extension. Splitting earlier buys nothing and costs a workspace
 
 ## 5. The work
 
-Tracked as [`vig-os/stepv#1`](https://github.com/vig-os/stepv/issues/1).
+Every step and owed item has a GitHub issue; this file is the design record, the issues are the
+tracker.
+
+| Step | Issue | Owed / related | Issue |
+| --- | --- | --- | --- |
+| S1 kernel (done) | [#1](https://github.com/vig-os/stepv/issues/1) | Memory cap | [#4](https://github.com/vig-os/stepv/issues/4) |
+| S2 CLI | [#5](https://github.com/vig-os/stepv/issues/5) | Kernel + harness in CI | [#11](https://github.com/vig-os/stepv/issues/11) |
+| S3 limits | [#6](https://github.com/vig-os/stepv/issues/6) | Corpus gaps | [#12](https://github.com/vig-os/stepv/issues/12) |
+| S4 Linux | [#7](https://github.com/vig-os/stepv/issues/7) | `deny.toml` | [#13](https://github.com/vig-os/stepv/issues/13) |
+| S5 macOS | [#9](https://github.com/vig-os/stepv/issues/9) | LGPL NOTICE | [#8](https://github.com/vig-os/stepv/issues/8) |
+| S6 release | [#10](https://github.com/vig-os/stepv/issues/10) | Workflow credentials | [#3](https://github.com/vig-os/stepv/issues/3) |
+| | | occt-wasm upstream report | [#14](https://github.com/vig-os/stepv/issues/14) |
+| | | devkit `mkRustProject` gap | [devkit#1810](https://github.com/vig-os/devkit/issues/1810) |
 
 ### S1 — Prove the kernel (do this before anything else)
 
@@ -506,7 +518,7 @@ latency: p95 for files under 1 MB is 335 ms (was 337 ms). The two rungs that nev
 corpus, re-mesh and coarse, are kept as cheap first attempts; nothing here argues for them, and
 the next exporter might.
 
-### S2 — The CLI for real
+### S2 — The CLI for real (#5)
 
 Implement `--info` first (header metadata as JSON, exit 0) — it is the honest-degradation path and it
 cannot fail. Then `--glb`, then `--png` with the software rasteriser, then the cache wired through,
@@ -525,23 +537,23 @@ Carried in from S1:
 - Per-face colour: 81% of parts carry colour only per face (Onshape). `Mesh::face_ids` is
   already per-triangle; the kernel needs to emit a face-colour table next to it.
 
-### S3 — Limits and failure modes
+### S3 — Limits and failure modes (#6)
 
 Find the arena cliff. Confirm the timeout fires. Confirm exit 3 still prints valid metadata. Confirm
 a truncated/corrupt STEP file fails cleanly rather than panicking across the wasmtime boundary.
 
-### S4 — Linux front-ends
+### S4 — Linux front-ends (#7)
 
 The `.thumbnailer` (cheapest possible win — do it first and the project is useful), MIME registration,
 then the KF6 `ThumbnailCreator`.
 
-### S5 — macOS front-ends
+### S5 — macOS front-ends (#9)
 
 Swift host app plus `QLPreviewingController` and `QLThumbnailProvider`. Decide buffers-over-FFI
 versus USDZ at this point, with the §4 note in hand. This is the largest single step and it is last
 because it is the one that cannot be validated headlessly in CI.
 
-### S6 — Release
+### S6 — Release (#10)
 
 `crates.io` publish for `stepv`, and binaries for both platforms. The repo already has the devkit
 release train; §"Repo setup" below records what still has to be wired for it.
@@ -554,7 +566,7 @@ release train; §"Repo setup" below records what still has to be wired for it.
 - **Shipping OCCT.** New with Plan B. The Linux packages can depend on the distribution's OCCT,
   but a macOS Quick Look extension must bundle the OCCT dylibs inside the app and sign them.
   Measure the bundle size before S5 commits to it.
-- **LGPL compliance wording.** OCCT is dynamically linked into a separate executable (§3 "As
+- **LGPL compliance wording** (#8). OCCT is dynamically linked into a separate executable (§3 "As
   built"), so it is replaceable. Someone should write the actual `NOTICE` text before the first
   public binary, not after.
 - **`occt-import-js` for a web path.** Same kernel, browser-first, LGPL-2.1. Likely the right answer
@@ -565,7 +577,7 @@ release train; §"Repo setup" below records what still has to be wired for it.
 - **Perforated-face meshing.** BRepMesh's Watson triangulator needs 14.8 s and 7.2 GB on a plate
   with ~1,250 holes (ABC `00000046`, §4). The limits contain it. Whether a thumbnail should fall
   back to a coarser angle on timeout, rather than show nothing, is an S2/S3 product decision.
-- **Upstream report for `occt-wasm`.** The STEP-import-needs-a-filesystem gap (§3) is known
+- **Upstream report for `occt-wasm`** (#14). The STEP-import-needs-a-filesystem gap (§3) is known
   upstream (PR #371 "Known gap"), but no issue tracks it. Filing one is outward-facing, so it is
   left to a human.
 - **Shared cache with cxad.** `src/cache.rs` deliberately uses blake3, the same function cxad's node
@@ -603,20 +615,22 @@ release train; §"Repo setup" below records what still has to be wired for it.
 
 ### Owed
 
-- **The kernel is not built or exercised in CI.** `nix flake check` builds and tests the Rust crate
+- **The kernel is not built or exercised in CI** (#11). `nix flake check` builds and tests the Rust crate
   (the decoder tests run there), but not `kernel/`, and the harness needs the corpus, which CI does
   not fetch. Owed: a CI job that runs `just kernel` and the harness on a small checked-in-safe
   subset (the generated `malformed` set plus NIST, both redistributable).
-- **Hand-collected corpus sources** — `cax-if` (full rounds) and `exporter-matrix` — are still
+- **Hand-collected corpus sources** (#12) — `cax-if` (full rounds) and `exporter-matrix` — are still
   empty, and `just fixtures` reports them as MISSING on every run. Until they are filled, the S1
   pass rate covers only what §5 "Corpus caveats" says.
-- **`deny.toml`** — `mkRustProject` turns `cargo deny` on automatically once the file exists. Left
+- **`deny.toml`** (#13) — `mkRustProject` turns `cargo deny` on automatically once the file exists. Left
   out deliberately for now: the advisories check wants network access, and a nix build sandbox does
   not have it, so adding the file without checking that first turns every `nix flake check` red.
-- **`CARGO_REGISTRY_TOKEN`** and the `crates-io` environment for the S6 publish, mirroring
+- **`CARGO_REGISTRY_TOKEN`** and the `crates-io` environment for the S6 publish (#10), mirroring
   `vig-os/scitadel`'s shape. Not declared yet on purpose: declaring a repo secret whose live value
   does not exist is how otterdog plans go wrong.
-- **A devkit issue for the `mkRustProject` forwarding gap.** `mkRustProject` has no `branchTypes` /
+- **The devkit `mkRustProject` forwarding gap**: filed as
+  [vig-os/devkit#1810](https://github.com/vig-os/devkit/issues/1810), which also covers the Rust
+  scaffold failing its own deadnix/statix hooks (worked around here with `# deadnix: skip`). `mkRustProject` has no `branchTypes` /
   `commitTypes` / `refsPolicy` / `refsOptionalTypes` arguments, so those `.vig-os` knobs do not reach
   the flake-generated hooks the way they do through `mkProjectShell`. Inert here — all four keys are
   empty, so each resolves to its devkit default — but set one and it is silently ignored. The gap is
@@ -640,16 +654,21 @@ first, which is exactly the bypass that config warns about. `apply` never delete
 omits, so the consequence is that stepv shows up as an **inventory drift issue** until its
 declaration lands.
 
-The declaration is open as
-[`vig-os/org-config#316`](https://github.com/vig-os/org-config/pull/316) (content reproduced in §8).
-**Until it merges, stepv has no branch protection, no signed-commit rule and no tag protection, and
-its devkit workflows have no credentials** — the org secrets are `visibility: selected` and stepv is
-not in any of their repository lists until that PR applies. Expect the scaffolded workflows to fail
-with empty credentials and no error message before then; that is this gap, not a bug in the
-workflows.
+The declaration merged as [`vig-os/org-config#317`](https://github.com/vig-os/org-config/pull/317)
+on 2026-10-04 (content reproduced in §8). It superseded #316, which was closed by a branch rename,
+not deliberately. As of 2026-10-04 its `Apply` run is **waiting on the human-gated `production`
+environment**. Until someone approves that deployment, stepv has **no branch protection, no
+signed-commit rule and no tag protection** (`gh api repos/vig-os/stepv/rulesets` returns 0).
 
-`apply` runs only on merge to org-config's `main`, behind a human-gated `production` environment. So
-merging the PR is not the end of it — someone has to approve the deployment.
+**Approving the apply will not deliver the workflow credentials either** (stepv#3). This plan used
+to say the opposite. `otterdog apply` does not reconcile `selected_repositories` for org secrets
+whose declared value is a `'********'` dummy, and the #317 plan is "4 to add, 11 to change", with
+zero secret actions. `revkit` proves it: it was added to the same six lists in org-config#312 and
+is still absent from them days after a successful apply. That is tracked upstream as
+[`vig-os/org-config#318`](https://github.com/vig-os/org-config/issues/318). Until an org owner
+adds stepv to the six lists by hand (read-modify-write: the endpoint replaces the whole list; the
+commands are in stepv#3), the devkit workflows fail with an **empty credential and no error
+message**. That is this gap, not a bug in the workflows. Nothing in S2–S3 needs them.
 
 ---
 
