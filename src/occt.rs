@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::{BBox, Color, Deflection, Mesh, Part, Scene};
+use crate::{BBox, Color, Deflection, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
 
 /// The kernel's JSON summary, one line on its stdout. Present on success AND
 /// on a clean failure (exit 3) — the header-level facts survive a failed
@@ -44,10 +44,23 @@ pub struct Summary {
     pub prototypes: usize,
     pub prototypes_mesh_failed: usize,
     pub faces: usize,
-    /// Faces that produced no triangles: holes in the rendered part.
+    /// Unique faces the FIRST meshing pass left without triangles. Each then
+    /// went down the recovery ladder and landed in one of the seven below.
     pub faces_unmeshed: usize,
+    pub faces_remeshed: usize,
+    pub faces_healed: usize,
+    pub faces_refined: usize,
+    pub faces_coarse: usize,
+    pub faces_degenerate: usize,
+    pub faces_approx: usize,
+    pub faces_missing: usize,
+    /// Faceless parts in a file with no faces at all: drawn as curves.
+    pub sketch_parts: usize,
+    /// Faceless parts beside solids: construction geometry.
+    pub construction_parts: usize,
     pub vertices: usize,
     pub triangles: usize,
+    pub segments: usize,
     pub t_read_ms: f64,
     pub t_transfer_ms: f64,
     pub t_mesh_ms: f64,
@@ -178,6 +191,8 @@ pub fn run(
 pub enum MeshError {
     BadMagic,
     UnsupportedVersion(u32),
+    /// A face-status or line-kind byte outside the contract.
+    BadEnum(u8),
     Truncated,
     TrailingBytes(usize),
 }
@@ -187,6 +202,7 @@ impl std::fmt::Display for MeshError {
         match self {
             Self::BadMagic => write!(f, "not a STEPVMSH file"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported STEPVMSH version {v}"),
+            Self::BadEnum(b) => write!(f, "invalid face-status or line-kind byte {b}"),
             Self::Truncated => write!(f, "STEPVMSH file is truncated"),
             Self::TrailingBytes(n) => write!(f, "{n} unexpected trailing bytes"),
         }
@@ -209,6 +225,13 @@ impl<'a> Cursor<'a> {
 
     fn u8(&mut self) -> Result<u8, MeshError> {
         Ok(self.take(1)?[0])
+    }
+
+    fn enums<T>(&mut self, count: usize, f: fn(u8) -> Option<T>) -> Result<Vec<T>, MeshError> {
+        self.take(count)?
+            .iter()
+            .map(|&b| f(b).ok_or(MeshError::BadEnum(b)))
+            .collect()
     }
 
     fn u32(&mut self) -> Result<u32, MeshError> {
@@ -240,6 +263,15 @@ impl<'a> Cursor<'a> {
     }
 }
 
+const fn line_kind(b: u8) -> Option<LineKind> {
+    match b {
+        0 => Some(LineKind::Sketch),
+        1 => Some(LineKind::MissingOutline),
+        2 => Some(LineKind::Construction),
+        _ => None,
+    }
+}
+
 /// Decodes a `STEPVMSH` file into a [`Scene`].
 ///
 /// # Errors
@@ -250,7 +282,7 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         return Err(MeshError::BadMagic);
     }
     let version = c.u32()?;
-    if version != 1 {
+    if version != 2 {
         return Err(MeshError::UnsupportedVersion(version));
     }
     let mut b = [0.0; 6];
@@ -263,8 +295,8 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
     };
 
     let part_count = c.u32()? as usize;
-    // Every part is at least 25 bytes, so a count beyond that is corruption.
-    if part_count > c.0.len() / 25 {
+    // Every part is at least 33 bytes, so a count beyond that is corruption.
+    if part_count > c.0.len() / 33 {
         return Err(MeshError::Truncated);
     }
     let mut parts = Vec::with_capacity(part_count);
@@ -273,6 +305,8 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         let name = c.take(name_len)?;
         let has_color = c.u8()? != 0;
         let (r, g, b) = (c.f32()?, c.f32()?, c.f32()?);
+        let face_count = c.u32()? as usize;
+        let faces = c.enums(face_count, FaceStatus::from_u8)?;
         let vertices = c.u32()? as usize;
         let triangles = c.u32()? as usize;
         let mesh = Mesh {
@@ -281,10 +315,17 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
             indices: c.vec4(triangles * 3, u32::from_le_bytes)?,
             face_ids: c.vec4(triangles, u32::from_le_bytes)?,
         };
+        let segments = c.u32()? as usize;
+        let lines = Lines {
+            positions: c.vec4(segments * 6, f32::from_le_bytes)?,
+            kinds: c.enums(segments, line_kind)?,
+        };
         parts.push(Part {
             name: (name_len > 0).then(|| String::from_utf8_lossy(name).into_owned()),
             color: has_color.then_some(Color { r, g, b }),
             mesh,
+            faces,
+            lines,
         });
     }
     if !c.0.is_empty() {
@@ -297,10 +338,10 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
 mod tests {
     use super::*;
 
-    /// One-triangle file, built the way the kernel writes it.
+    /// One-triangle, one-segment file, built the way the kernel writes it.
     fn one_triangle(name: &str) -> Vec<u8> {
         let mut v = b"STEPVMSH".to_vec();
-        v.extend(1u32.to_le_bytes());
+        v.extend(2u32.to_le_bytes());
         for x in [0.0f64, 0.0, 0.0, 1.0, 1.0, 0.0] {
             v.extend(x.to_le_bytes());
         }
@@ -311,6 +352,8 @@ mod tests {
         for x in [0.5f32, 0.25, 1.0] {
             v.extend(x.to_le_bytes());
         }
+        v.extend(2u32.to_le_bytes()); // faces
+        v.extend([FaceStatus::Ok as u8, FaceStatus::Missing as u8]);
         v.extend(3u32.to_le_bytes());
         v.extend(1u32.to_le_bytes());
         for x in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -322,6 +365,11 @@ mod tests {
         for i in [0u32, 1, 2, 0] {
             v.extend(i.to_le_bytes());
         }
+        v.extend(1u32.to_le_bytes()); // segments
+        for x in [0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0] {
+            v.extend(x.to_le_bytes());
+        }
+        v.push(LineKind::MissingOutline as u8);
         v
     }
 
@@ -339,8 +387,12 @@ mod tests {
                 b: 1.0
             })
         );
-        assert!(p.mesh.is_well_formed());
+        assert!(p.is_well_formed());
+        assert_eq!(p.faces, [FaceStatus::Ok, FaceStatus::Missing]);
+        assert_eq!(p.lines.kinds, [LineKind::MissingOutline]);
+        assert_eq!(scene.worst_face(), Some(FaceStatus::Missing));
         assert_eq!(scene.triangle_count(), 1);
+        assert_eq!(scene.segment_count(), 1);
         assert!((scene.bbox.diagonal() - 2f64.sqrt()).abs() < 1e-12);
     }
 
@@ -358,6 +410,14 @@ mod tests {
                 "prefix of {n} bytes decoded"
             );
         }
+    }
+
+    #[test]
+    fn out_of_contract_status_byte_is_rejected() {
+        let mut v = one_triangle("bolt");
+        // magic 8 + version 4 + bbox 48 + count 4 + name 4+4 + colour 1+12 + faces 4
+        v[89] = 9;
+        assert_eq!(read_mesh(&v).unwrap_err(), MeshError::BadEnum(9));
     }
 
     #[test]

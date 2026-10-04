@@ -1,8 +1,9 @@
 # stepv — implementation plan and handoff
 
 **Status:** S1 done — **Plan A failed its gate, Plan B passed it** (§5 "S1 result"). The kernel is
-native OCCT 7.9.3 in a subprocess (`kernel/stepv-occt.cpp`, driven by `src/occt.rs`); 97.2% of a
-391-file corpus loads and tessellates cleanly with zero crashes. Next is S2.
+native OCCT 7.9.3 in a subprocess (`kernel/stepv-occt.cpp`, driven by `src/occt.rs`). With the
+per-face recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn
+with flagged approximations, and nothing crashes. Next is S2.
 **Audience:** the next agent or human picking this up cold. Read §1–§3 and §5 "S1 result", then
 start at S2.
 **Written:** 2026-10-04. **S1 recorded:** 2026-10-04.
@@ -444,6 +445,67 @@ therefore a lower bound on robustness against one exporter and a sample of the s
 claim about CATIA. Exact bytes are in `tests/fixtures/corpus.sha256`; per-file results are in
 `harness-out/results.jsonl` after a run.
 
+### S1 follow-up — recovery ladder, sketch handling, broken-face overlay (2026-10-04)
+
+Every one of the 2.8% non-passes above was looked at face by face, using the mesher's own status
+flags, `ShapeAnalysis_Wire` checks, `BRepCheck` and the face's area. There were four causes:
+
+| Cause | Files | What it was |
+| --- | ---: | --- |
+| No surfaces at all | 1 | ABC `00000092` is 3 trimmed curves and 2 B-splines: a sketch exported as STEP |
+| Recoverable by `ShapeFix` | 4 | Valid B-spline faces that mesh once healed. A clean re-mesh alone does **not** fix them |
+| Face far smaller than the model, or a self-intersecting discretized boundary | 4 | Tori and cones of ~0.0075 mm² (3×10⁻¹⁴ of diag²); planes flagged `SelfIntersectingWire` at the model-relative deflection |
+| Zero-area slivers | 3 | Zero parametric width or negative/vanishing area (e.g. 00000085's 23 cylinders, u-range exactly 0). The exporter's leftovers. **Not holes**: nothing a renderer could show |
+| Genuinely unmeshable, visible | 2 | 00000229: 2 planes still self-intersecting at fine deflection. `conical-surface`: a cone whose boundary has a 2-D gap and lacks its apex edge. Explicit `ShapeFix_Face` (degenerate/lacking/seam fixes) does not save it either |
+
+The kernel now runs a **ladder** on every face the first pass leaves without triangles. Each rung
+works on an isolated copy, so neighbours' shared edges are never disturbed:
+
+1. clean re-mesh
+2. `ShapeFix_Shape` + re-mesh
+3. re-mesh with deflection relative to the **face's** size
+4. degenerate check: zero parametric width, or |area| under 1e-8 of diag², which is less than one
+   pixel on a 10,000-pixel render. Runs *after* rung 3, so a tiny real fillet is meshed, not
+   discarded
+5. relaxed (10× deflection, 45°)
+6. **approximate**: a UV-grid sample of the surface, clipped to the face by `BRepClass_FaceClassifier`
+7. **missing**: outline only
+
+Each face records which rung produced it as a `FaceStatus` in the contract (`src/lib.rs`, mesh
+format `STEPVMSH` v2). That is what makes **a broken-face overlay** possible: a renderer draws
+`Approx` faces with a warning material and `Missing` faces as an outline (`LineKind::MissingOutline`),
+and badges the part. `FaceStatus::is_faithful()` is the line between drawing normally and drawing
+with a warning. A throwaway SVG prototype confirmed the data supports it: amber hatching on the
+approximated faces, plus a "⚠ N faces approximated" badge.
+
+Faceless parts are now drawn as curves. If the whole file has no faces, they are `LineKind::Sketch`
+(the file is a sketch: draw it). In a file that also has solids (43 files, 149 parts:
+construction geometry, axes, the NIST files' PMI-related curves), they are
+`LineKind::Construction`, which renderers hide by default. Drawing them would clutter every
+preview of a part that happens to carry its construction sketch.
+
+Result, same corpus, same settings:
+
+<!-- pyml disable-num-lines 9 line-length -->
+| Source | Files | Pass | Wireframe | Degraded | Partial | Clean fail | Bad mesh | Crash | Timeout | Pass rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| abc-dataset | 300 | 298 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 99.7% |
+| nist-pmi | 33 | 33 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% |
+| occt-import-js | 57 | 56 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 98.2% |
+| stress-assembly | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% |
+| **all but malformed** | **391** | **388** | **1** | **2** | **0** | 0 | 0 | **0** | **0** | **99.5%** |
+| malformed (want clean fail) | 10 | — | — | — | — | **10** | 0 | 0 | 0 | — |
+
+| Faces failing first pass | Remeshed | Healed | Refined | Coarse | Degenerate | Approx | Missing |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 54 | 0 | 5 | 18 | 0 | 28 | 3 | 0 |
+
+*Pass* = every face faithful. *Wireframe* = a sketch, fully drawn, counted as a pass. *Degraded*
+= drawn, but some faces approximated and flagged. Not a pass. The ladder costs no measurable
+latency: p95 for files under 1 MB is 335 ms (was 337 ms). The two rungs that never fired on this
+corpus, re-mesh and coarse, are kept as cheap first attempts; nothing here argues for them, and
+the next exporter might.
+
 ### S2 — The CLI for real
 
 Implement `--info` first (header metadata as JSON, exit 0) — it is the honest-degradation path and it
@@ -458,8 +520,8 @@ Carried in from S1:
   child's RSS from the parent and kill it).
 - `--info` must **not** go through the kernel's full transfer: transfer is the slow stage.
   Parse the Part 21 header directly in Rust.
-- Partial meshes (faces with no triangles) must be visible in the output, not just counted.
-  The JSON summary already carries `faces_unmeshed`.
+- Draw `FaceStatus::Approx` / `Missing` with the overlay treatment in `--png`, and hide
+  `LineKind::Construction` by default. The data is in place (S1 follow-up). The renderer is not.
 - Per-face colour: 81% of parts carry colour only per face (Onshape). `Mesh::face_ids` is
   already per-triangle; the kernel needs to emit a face-colour table next to it.
 
