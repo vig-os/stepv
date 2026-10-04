@@ -50,5 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Quick Look preview ([#20](https://github.com/vig-os/stepv/issues/20)): flat parts and sketches
   open face-on, not edge-on (also in thumbnails, `stepv --png` and `stepv view`); the scroll wheel
   zooms; the info text sits on a light panel and reads in dark mode
+- `harness --strict` passed a pass-rate collapse in which every file failed cleanly. `--min-pass`
+  now sets a floor, and CI uses it ([#22](https://github.com/vig-os/stepv/issues/22))
 
 ### Security
+
+- **The kernel CLI sandboxes itself** ([#18](https://github.com/vig-os/stepv/issues/18)): before
+  opening the input it can read only the input's directory and write only its mesh, with no
+  network and no exec. On Linux this is Landlock + seccomp, on macOS a Seatbelt profile. The
+  summary reports it (`"sandbox"`), and the CLI warns when the OS provides only part of it.

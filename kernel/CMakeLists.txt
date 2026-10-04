@@ -22,9 +22,10 @@ set(STEPV_OCCT_LIBS
   TKMesh TKShHealing TKTopAlgo TKBRep TKGeomAlgo TKGeomBase TKG3d TKG2d
   TKMath TKernel)
 
-# The kernel CLI: what the Rust side runs as a subprocess. Core compiled in,
-# so it carries no dependency on libstepvocct at run time.
-add_executable(stepv-occt stepv-occt.cpp stepv-occt-core.cpp)
+# The kernel CLI: what the Rust side runs as a subprocess, sandboxed
+# (sandbox.cpp). Core compiled in, so it carries no dependency on libstepvocct
+# at run time.
+add_executable(stepv-occt stepv-occt.cpp sandbox.cpp stepv-occt-core.cpp)
 target_include_directories(stepv-occt PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 target_compile_options(stepv-occt PRIVATE -Wall -Wextra)
 target_link_libraries(stepv-occt PRIVATE ${STEPV_OCCT_LIBS})

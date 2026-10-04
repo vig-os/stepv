@@ -200,6 +200,29 @@ fn glb_is_valid_and_keeps_part_names() {
 }
 
 #[test]
+fn the_kernel_runs_sandboxed() {
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("sandbox");
+    let png = t.path("a.png");
+    let (code, j, out) = stepv(&[s(&data("assembly.step")), "--png", s(&png)], &t.0);
+    assert_eq!(code, 0, "{j}");
+    // Seatbelt cannot nest in nix's macOS build sandbox: see tests/sandbox.rs.
+    if j["kernel"]["sandbox"] == "macos-outer" && std::env::var_os("NIX_BUILD_TOP").is_some() {
+        eprintln!("SKIPPING: inside nix's build sandbox, which Seatbelt cannot nest in");
+        return;
+    }
+    let expected = if cfg!(target_os = "macos") {
+        "macos-profile"
+    } else {
+        "landlock+seccomp"
+    };
+    assert_eq!(j["kernel"]["sandbox"], expected, "{j}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("warning"));
+}
+
+#[test]
 fn mesh_output_decodes_and_carries_face_colours() {
     if !kernel_available() {
         return;

@@ -25,8 +25,12 @@ kernel. [`plan.md`](plan.md) has the survey and the evidence.
   instead of silently.
 - **It degrades honestly.** If there's no geometry at all, the file's header metadata (originating
   system, schema, names) is still reported.
-- **It is contained.** On Linux the kernel runs as a child process under a wall-clock and memory
-  cap. On macOS the Quick Look extension process is the boundary.
+- **It is contained.** OCCT's readers are a large C++ parser, and a STEP file can come from
+  anywhere. So the kernel can read only the input's directory and write only its one output. It has
+  no network and cannot start programs. On Linux this is enforced by Landlock and seccomp, and on
+  macOS by a Seatbelt profile. In Quick Look, the App Sandbox enforces it. Every run reports the
+  sandbox it was in, and warns if the OS could only provide part of it. The CLI also runs the
+  kernel under a wall-clock and memory cap.
 
 On a 391-file robustness corpus (NIST PMI, 300 ABC models, CAx-IF rounds, a 221 MB assembly),
 99.5% of files show faithfully and none crash or hang. The details are in `plan.md` §5.

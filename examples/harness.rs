@@ -6,6 +6,7 @@
 //! just harness tests/fixtures/nist-pmi     # one source
 //! just harness --cold-start 30             # spawn-to-result latency only
 //! just harness --strict tests/fixtures/x   # CI gate: non-zero on any crash
+//! just harness --min-pass 95 ...           # ... or below a 95% pass rate
 //! ```
 //!
 //! For each file: import through XCAF, tessellate at bbox-relative
@@ -100,6 +101,8 @@ struct Args {
     cold_start: Option<usize>,
     memory: Option<u64>,
     strict: bool,
+    /// Fail below this pass rate (percent), over the non-malformed files.
+    min_pass: Option<f64>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -110,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
         cold_start: None,
         memory: None,
         strict: false,
+        min_pass: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -129,6 +133,13 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "--strict" => a.strict = true,
+            "--min-pass" => {
+                a.min_pass = Some(
+                    value("--min-pass")?
+                        .parse()
+                        .map_err(|e| format!("--min-pass: {e}"))?,
+                );
+            }
             "--memory-gb" => {
                 let gb: f64 = value("--memory-gb")?
                     .parse()
@@ -173,16 +184,36 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The corpus source a file belongs to: its first directory under fixtures/.
+/// The corpus source a file belongs to: its first directory under a
+/// `fixtures/` directory, however the path was given (relative or absolute:
+/// a source mislabelled hides `malformed` from --strict and --min-pass).
 fn source_of(path: &Path) -> String {
-    let rel = path.strip_prefix(FIXTURES).unwrap_or(path);
-    rel.components()
-        .next()
-        .filter(|_| rel.components().count() > 1)
+    let parts: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    parts
+        .iter()
+        .position(|c| *c == "fixtures")
+        .filter(|&i| i + 2 < parts.len())
         .map_or_else(
             || "(other)".into(),
-            |c| c.as_os_str().to_string_lossy().into_owned(),
+            |i| parts[i + 1].to_string_lossy().into_owned(),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_is_found_in_relative_and_absolute_paths() {
+        for p in [
+            "tests/fixtures/malformed/empty.step",
+            "/home/x/stepv/tests/fixtures/malformed/empty.step",
+        ] {
+            assert_eq!(source_of(Path::new(p)), "malformed", "{p}");
+        }
+        assert_eq!(source_of(Path::new("tests/fixtures/loose.step")), "(other)");
+        assert_eq!(source_of(Path::new("tests/data/box.igs")), "(other)");
+    }
 }
 
 fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Result<Record> {
@@ -502,6 +533,17 @@ fn main() -> ExitCode {
             );
         }
         if !bad.is_empty() {
+            return ExitCode::FAILURE;
+        }
+    }
+    // A collapse in which every file fails CLEANLY passes --strict (#22): the
+    // floor catches it.
+    if let Some(floor) = args.min_pass {
+        let real: Vec<_> = records.iter().filter(|r| r.source != "malformed").collect();
+        let passed = real.iter().filter(|r| r.verdict == Verdict::Pass).count();
+        let rate = 100.0 * passed as f64 / real.len().max(1) as f64;
+        if rate < floor {
+            eprintln!("harness --min-pass: {rate:.1}% passed, below the {floor}% floor");
             return ExitCode::FAILURE;
         }
     }
