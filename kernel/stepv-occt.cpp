@@ -4,8 +4,15 @@
 
 #include "stepv_occt.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <spawn.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +23,75 @@ constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 const char* const kUsage =
     "usage: stepv-occt <input> [--mesh <out>] [--linear-rel <f>] [--angular-deg <f>]\n";
+
+// Test hook for the sandbox (tests/sandbox.rs, #18). `spec` is one action,
+// tried from inside the sandbox; the outcome goes to stderr as
+// "stepv-occt escape <kind>: allowed" or "... refused (<why>)":
+//
+//   connect:<ipv4>:<port>   a TCP connection          udp:<ipv4>:<port>   one datagram
+//   exec:<path>             `<path> -c 'exit 7'`      write:<path>        create + write
+//   read:<path>             open + read one byte
+//
+// The run then carries on as normal, so one run proves both the refusal and
+// that the work the kernel is there for still happens.
+void escape_attempt(const std::string& spec) {
+    const auto colon = spec.find(':');
+    const std::string kind = spec.substr(0, colon);
+    const std::string arg = colon == std::string::npos ? "" : spec.substr(colon + 1);
+    auto report = [&](bool allowed, int err) {
+        std::fprintf(stderr, "stepv-occt escape %s: %s", kind.c_str(), allowed ? "allowed" : "refused");
+        if (!allowed) std::fprintf(stderr, " (%s)", err ? std::strerror(err) : "failed");
+        std::fputc('\n', stderr);
+    };
+    auto inet = [&](sockaddr_in& a) {
+        const auto c = arg.rfind(':');
+        a = {};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(static_cast<uint16_t>(std::atoi(arg.c_str() + c + 1)));
+        return c != std::string::npos && inet_pton(AF_INET, arg.substr(0, c).c_str(), &a.sin_addr) == 1;
+    };
+    if (kind == "connect" || kind == "udp") {
+        sockaddr_in a;
+        if (!inet(a)) { report(false, EINVAL); return; }
+        const bool tcp = kind == "connect";
+        const int fd = socket(AF_INET, tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
+        if (fd < 0) { report(false, errno); return; }
+        const auto* sa = reinterpret_cast<const sockaddr*>(&a);
+        const bool ok = tcp ? connect(fd, sa, sizeof a) == 0
+                            : sendto(fd, "x", 1, 0, sa, sizeof a) == 1;
+        const int err = errno;
+        close(fd);
+        report(ok, err);
+    } else if (kind == "exec") {
+        char* argv[] = {const_cast<char*>(arg.c_str()), const_cast<char*>("-c"),
+                        const_cast<char*>("exit 7"), nullptr};
+        pid_t pid;
+        if (const int err = posix_spawn(&pid, arg.c_str(), nullptr, nullptr, argv, nullptr)) {
+            report(false, err);
+            return;
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        report(WIFEXITED(status) && WEXITSTATUS(status) == 7, 0);
+    } else if (kind == "write") {
+        const int fd = open(arg.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) { report(false, errno); return; }
+        const bool ok = write(fd, "pwned\n", 6) == 6;
+        const int err = errno;
+        close(fd);
+        report(ok, err);
+    } else if (kind == "read") {
+        const int fd = open(arg.c_str(), O_RDONLY);
+        if (fd < 0) { report(false, errno); return; }
+        char c;
+        const bool ok = read(fd, &c, 1) == 1;
+        const int err = errno;
+        close(fd);
+        report(ok, err);
+    } else {
+        report(false, EINVAL);
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -53,6 +129,8 @@ int main(int argc, char** argv) {
         sleep(5);
         std::free(const_cast<char*>(p));
     }
+
+    if (const char* e = std::getenv("STEPV_OCCT_TEST_ESCAPE")) escape_attempt(e);
 
     // The JSON summary is the contract on stdout, and OCCT's readers print
     // progress chatter to stdout. Keep the real stdout for the summary alone
