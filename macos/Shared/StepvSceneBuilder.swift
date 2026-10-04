@@ -55,6 +55,17 @@ enum StepvSceneBuilder {
         return node
     }
 
+    /// Why a multi-file assembly is empty or incomplete here (#19): Quick
+    /// Look grants the extension the previewed file only, so the part files
+    /// it references beside it cannot be opened. Nil when nothing is missing.
+    static func externalNote(_ summary: [String: Any]?) -> String? {
+        let missing = summary?["external_missing"] as? Int ?? 0
+        guard missing > 0 else { return nil }
+        let total = summary?["external_files"] as? Int ?? missing
+        return "⚠ Multi-file assembly: \(missing) of \(total) part files are not shown. Quick Look "
+            + "can open only this file; `stepv view` shows the whole assembly."
+    }
+
     /// SceneKit scene from the buffers: one node per part, triangles grouped
     /// by (colour, faithful?) into elements, approximated faces amber,
     /// missing-face outlines and sketch curves as lines; construction hidden.

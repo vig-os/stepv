@@ -61,6 +61,13 @@ pub struct Summary {
     pub vertices: usize,
     pub triangles: usize,
     pub segments: usize,
+    /// Multi-file STEP assemblies (#19): the part files the top-level file
+    /// references, and how many could not be read (missing, or outside what
+    /// a sandbox lets the kernel open). Absent from older kernels.
+    #[serde(default)]
+    pub external_files: usize,
+    #[serde(default)]
+    pub external_missing: usize,
     pub t_read_ms: f64,
     pub t_transfer_ms: f64,
     pub t_mesh_ms: f64,

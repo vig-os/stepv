@@ -223,6 +223,42 @@ fn the_kernel_runs_sandboxed() {
 }
 
 #[test]
+fn multifile_assembly_loads_its_part_files() {
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("multifile");
+    let png = t.path("m.png");
+    let (code, j, _) = stepv(
+        &[s(&data("multifile/bracket.step")), "--png", s(&png)],
+        &t.0,
+    );
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["kernel"]["parts"], 3, "{j}");
+    assert_eq!(j["kernel"]["external_files"], 2, "{j}");
+    assert_eq!(j["kernel"]["external_missing"], 0, "{j}");
+}
+
+#[test]
+fn multifile_assembly_without_its_parts_says_why() {
+    // What a sandbox granting only the one file (Quick Look) sees (#19).
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("multifile-alone");
+    let top = t.path("bracket.step");
+    std::fs::copy(data("multifile/bracket.step"), &top).unwrap();
+    let (code, j, _) = stepv(&[s(&top), "--png", s(&t.path("m.png"))], &t.0);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["external_missing"], 2, "{j}");
+    let error = j["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("multi-file assembly: 2 of 2 part files"),
+        "the failure must name the cause: {j}"
+    );
+}
+
+#[test]
 fn mesh_output_decodes_and_carries_face_colours() {
     if !kernel_available() {
         return;

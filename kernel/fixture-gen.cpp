@@ -7,6 +7,9 @@
 //
 //   assembly.step  an assembly: a plate with a hole (blue, top face red) and
 //                  two instances of one pin (orange), all named
+//   multifile/     the same assembly as a multi-file STEP: bracket.step holds
+//                  the structure, and each part is a sibling file it
+//                  references (the CAx-IF s1-c5-214 / SolidWorks export style)
 //   sketch.step    curves only, no surfaces: the sketch path
 //   box.igs        IGES
 //   box.brep       OCCT native BREP
@@ -41,11 +44,12 @@
 #include <gp_Trsf.hxx>
 
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 namespace {
 
-bool step_assembly(const std::string& path) {
+Handle(TDocStd_Document) bracket() {
     Handle(TDocStd_Document) doc;
     XCAFApp_Application::GetApplication()->NewDocument("MDTV-XCAF", doc);
     Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
@@ -84,11 +88,32 @@ bool step_assembly(const std::string& path) {
         st->AddComponent(assy, pin_l, TopLoc_Location(t));
     }
     st->UpdateAssemblies();
+    return doc;
+}
 
+bool step_assembly(const std::string& path) {
     STEPCAFControl_Writer w;
     w.SetColorMode(true);
     w.SetNameMode(true);
-    return w.Transfer(doc, STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
+    return w.Transfer(bracket(), STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
+}
+
+// Multi-file mode: the parts go to sibling files named after their labels.
+bool step_multifile(const std::string& path) {
+    // The writer puts the part files in the working directory and references
+    // them by bare name: write from inside the target directory.
+    const std::filesystem::path p = std::filesystem::absolute(path);
+    std::filesystem::create_directories(p.parent_path());
+    const auto cwd = std::filesystem::current_path();
+    std::filesystem::current_path(p.parent_path());
+    STEPCAFControl_Writer w;
+    w.SetColorMode(true);
+    w.SetNameMode(true);
+    // A non-null `multi` prefix switches the writer to multi-file mode.
+    const bool ok = w.Transfer(bracket(), STEPControl_AsIs, "") &&
+                    w.Write(p.filename().c_str()) == IFSelect_RetDone;
+    std::filesystem::current_path(cwd);
+    return ok;
 }
 
 bool step_sketch(const std::string& path) {
@@ -124,6 +149,7 @@ int main(int argc, char** argv) {
         const char* name;
         bool (*make)(const std::string&);
     } jobs[] = {{"assembly.step", step_assembly},
+                {"multifile/bracket.step", step_multifile},
                 {"sketch.step", step_sketch},
                 {"box.igs", iges_box},
                 {"box.brep", brep_box}};
