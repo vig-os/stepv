@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key><string>ch.exoma.stepv.thumbnail</string>
+	<key>CFBundleName</key><string>StepvThumbnail</string>
+	<key>CFBundleDisplayName</key><string>stepv</string>
+	<key>CFBundleExecutable</key><string>StepvThumbnail</string>
+	<key>CFBundlePackageType</key><string>XPC!</string>
+	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+	<key>CFBundleVersion</key><string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key><string>com.apple.quicklook.thumbnail</string>
+		<key>NSExtensionPrincipalClass</key><string>StepvThumbnail.ThumbnailProvider</string>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>QLSupportedContentTypes</key>
+			<array>
+		<string>ch.exoma.stepv.step</string>
+		<string>ch.exoma.stepv.iges</string>
+		<string>ch.exoma.stepv.occt-brep</string>
+			</array>
+			<key>QLThumbnailMinimumDimension</key><integer>0</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>
