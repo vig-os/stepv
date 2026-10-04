@@ -13,7 +13,11 @@
 //! `occt-wasm` spike failed its gate, `plan.md` §5 "S1 result").
 
 pub mod cache;
+pub mod glb;
+pub mod header;
 pub mod occt;
+pub mod render;
+pub mod viewer;
 
 /// A triangle mesh for one part, in the file's own units.
 ///
@@ -160,6 +164,26 @@ impl Lines {
     }
 }
 
+/// One B-rep face: how its triangles were obtained, and its own colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Face {
+    pub status: FaceStatus,
+    /// The face's XCAF colour. Overrides [`Part::color`] when present: 81%
+    /// of parts in the S1 corpus carry colour only per face.
+    pub color: Option<Color>,
+}
+
+impl Face {
+    /// A face with no colour of its own.
+    #[must_use]
+    pub const fn plain(status: FaceStatus) -> Self {
+        Self {
+            status,
+            color: None,
+        }
+    }
+}
+
 /// One named, coloured part of an assembly.
 #[derive(Debug, Clone)]
 pub struct Part {
@@ -169,7 +193,7 @@ pub struct Part {
     pub color: Option<Color>,
     pub mesh: Mesh,
     /// One entry per B-rep face; `mesh.face_ids` indexes into it.
-    pub faces: Vec<FaceStatus>,
+    pub faces: Vec<Face>,
     pub lines: Lines,
 }
 
@@ -190,7 +214,16 @@ impl Part {
     /// The worst face status in the part, `None` for a part with no faces.
     #[must_use]
     pub fn worst_face(&self) -> Option<FaceStatus> {
-        self.faces.iter().copied().max()
+        self.faces.iter().map(|f| f.status).max()
+    }
+
+    /// The colour to draw face `face_id` in: its own, else the part's.
+    #[must_use]
+    pub fn face_color(&self, face_id: u32) -> Option<Color> {
+        self.faces
+            .get(face_id as usize)
+            .and_then(|f| f.color)
+            .or(self.color)
     }
 }
 
@@ -330,13 +363,29 @@ mod tests {
             name: None,
             color: None,
             mesh,
-            faces: vec![FaceStatus::Ok],
+            faces: vec![Face::plain(FaceStatus::Ok)],
             lines: Lines::default(),
         };
         assert!(!part.is_well_formed());
-        part.faces.push(FaceStatus::Approx);
+        part.faces.push(Face {
+            status: FaceStatus::Approx,
+            color: Some(Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            }),
+        });
         assert!(part.is_well_formed());
         assert_eq!(part.worst_face(), Some(FaceStatus::Approx));
+        assert_eq!(
+            part.face_color(1),
+            Some(Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0
+            })
+        );
+        assert_eq!(part.face_color(0), None);
     }
 
     #[test]

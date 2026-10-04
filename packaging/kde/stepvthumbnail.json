@@ -1,0 +1,7 @@
+{
+    "KPlugin": {
+        "MimeTypes": ["model/step", "model/iges", "model/x-brep"],
+        "Name": "CAD models (STEP, IGES, BREP)"
+    },
+    "CacheThumbnail": true
+}

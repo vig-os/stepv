@@ -1,0 +1,12 @@
+[Thumbnailer Entry]
+# GNOME (Nautilus), XFCE (Tumbler) and every other freedesktop thumbnailer
+# host read this. %i input path, %o output PNG, %s requested size.
+#
+# --no-cache: the host keeps its own thumbnail cache (~/.cache/thumbnails),
+# and GNOME runs thumbnailers in a bubblewrap sandbox where $HOME may be
+# read-only. --timeout 15: below GNOME's own thumbnailer kill so a slow file
+# ends as a reported failure, not a killed process. stepv exits 3/4 on
+# failure, which the host records as a failed thumbnail and does not retry.
+TryExec=stepv
+Exec=stepv %i --png %o --size %s --timeout 15 --no-cache
+MimeType=model/step;model/iges;model/x-brep;

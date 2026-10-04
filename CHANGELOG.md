@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Kernel harness and corpus** ([#1](https://github.com/vig-os/stepv/issues/1))
   - `just fixtures` fetches a sha256-pinned corpus (NIST PMI, ABC, occt-import-js) and generates
     stress and malformed files; `just harness` prints the acceptance table
+- **The `stepv` CLI** ([#5](https://github.com/vig-os/stepv/issues/5))
+  - `--info` from the file header alone (STEP Part 21, IGES, BREP); cannot fail
+  - `--png` via a CPU rasteriser with per-face colour and the broken-face overlay; `--glb` (glTF 2.0)
+  - One JSON line on stdout for every run; exit 3 keeps the metadata; results and failures cached
+  - Timeout (exit 4) and a memory cap by child footprint ([#4](https://github.com/vig-os/stepv/issues/4))
+  - `--mesh` writes the raw STEPVMSH buffers for front-ends
+- **`stepv view`**: an interactive orbit viewer over the same rasteriser ([#7](https://github.com/vig-os/stepv/issues/7))
+- **Linux front-ends** ([#7](https://github.com/vig-os/stepv/issues/7))
+  - freedesktop `.thumbnailer` (GNOME, XFCE), MIME types (with a new `model/x-brep`), desktop entry
+  - KF6 `ThumbnailCreator` for Dolphin; `packaging/linux/install.sh`
+- **macOS Quick Look** preview and thumbnail extensions ([#9](https://github.com/vig-os/stepv/issues/9))
+  - The kernel runs in-process (the extension sandbox forbids exec) via `libstepvocct` and the
+    `stepv-capi` C ABI; the interactive SceneKit preview uses per-face colour and the overlay
+  - Built without Xcode; one shared copy of OCCT (57 MB app)
+- **Release train** ([#10](https://github.com/vig-os/stepv/issues/10)): relocatable Linux tarball, Developer-ID
+  signed and notarised DMG, build-provenance attestations, crates.io publish (Trusted Publishing
+  after the first release)
+- **`NOTICE`** with OCCT's LGPL-2.1 and exception, shipped with every package ([#8](https://github.com/vig-os/stepv/issues/8))
+- **CI that runs the kernel** ([#11](https://github.com/vig-os/stepv/issues/11)) and `cargo deny`
+  ([#13](https://github.com/vig-os/stepv/issues/13))
 
 ### Changed
 

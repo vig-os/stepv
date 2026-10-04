@@ -8,12 +8,35 @@ repository = "https://github.com/vig-os/stepv"
 homepage = "https://github.com/vig-os/stepv"
 license = "Apache-2.0"
 keywords = ["cad", "step", "opencascade", "quicklook", "thumbnail"]
+readme = "README.md"
+# What crates.io gets: the CLI and library, the kernel's C++ sources (you build
+# the kernel against your own OCCT: cmake -S kernel -B build), the Linux desktop
+# files for packagers, the committed test corpus, and the licence texts. Not
+# the devkit scaffolding, the macOS app sources, or the C ABI crate.
+include = [
+  "/src",
+  "/kernel",
+  "/packaging/linux",
+  "/tests/cli.rs",
+  "/tests/data",
+  "/examples/harness.rs",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/licenses",
+]
 categories = ["command-line-utilities", "graphics"]
 
-# Single crate (lib + bin) on purpose while the kernel decision is being
-# validated — see plan.md §"Crate layout". Split into `stepv-core` +
-# `stepv` only when a SECOND consumer of the library appears (the C ABI for the
-# Swift Quick Look extension is the expected trigger).
+# The library + CLI crate. plan.md §"Crate layout" deferred any split until a
+# SECOND consumer of the library appeared; it has — the Swift Quick Look
+# extensions, which cannot exec the CLI — so the C ABI they link is its own
+# workspace member, capi/ (stepv-capi). The library stays here rather than in
+# a separate stepv-core: one crate on crates.io, no extra publish to keep
+# in step.
+[workspace]
+members = [".", "capi"]
+
 [lib]
 name = "stepv"
 path = "src/lib.rs"
@@ -32,7 +55,7 @@ path = "src/main.rs"
 # traps because the standalone WASI build has no filesystem. See plan.md §5
 # "S1 result" before re-adding it.
 
-# The kernel's JSON summary (and, from S2, `--info`).
+# The kernel's JSON summary, `--info`, and glTF's JSON chunk.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -40,7 +63,26 @@ serde_json = "1"
 # cxad uses for its node store, so a future shared cache needs no migration.
 blake3 = "1"
 
+# PNG encoding for `--png` (the rasteriser itself is src/render.rs).
+png = "0.18"
+
+# The `stepv view` window. Pure Rust; on Linux it dlopens X11/Wayland at run
+# time, so building it needs no system libraries.
+minifb = { version = "0.29", optional = true }
+
+[features]
+default = ["viewer"]
+# `stepv view`: an interactive window over the software rasteriser. Off for a
+# headless build (`--no-default-features`): thumbnails and --glb need no window.
+viewer = ["dep:minifb"]
+
+# proc_pid_rusage: the macOS half of the kernel memory cap (src/occt.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+# Validates `--glb` output against the glTF 2.0 schema in tests.
+gltf = "1"
 
 [profile.release]
 # A previewer is latency-bound, not throughput-bound: `lto = "thin"` is the

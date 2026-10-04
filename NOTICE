@@ -1,0 +1,71 @@
+stepv
+Copyright 2026 vigOS / Exoma AG
+
+stepv is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+=============================================================================
+Open CASCADE Technology
+=============================================================================
+
+This software makes use of facilities provided by the Open CASCADE
+Technology software (https://dev.opencascade.org).
+
+stepv's kernel (the `stepv-occt` program and the `libstepvocct` library) is
+built on Open CASCADE Technology (OCCT) 7.9.3, which is licensed under the
+GNU Lesser General Public License version 2.1 with the Open CASCADE
+exception version 1.0:
+
+  licenses/OCCT-LGPL-2.1.txt
+  licenses/OCCT-LGPL-EXCEPTION-1.0.txt
+
+Corresponding source: https://github.com/Open-Cascade-SAS/OCCT/tree/V7_9_3
+(stepv uses it unmodified, as packaged by nixpkgs).
+
+OCCT is always DYNAMICALLY linked and kept in separate, replaceable files —
+never compiled into the `stepv` binary:
+
+  - Linux tarball: the OCCT shared libraries are stepv/lib/libTK*.so.
+    Replace them with a build of the same OCCT version.
+  - macOS stepv.app: Contents/Frameworks/libTK*.dylib. Replace them with a
+    build of the same OCCT version, then re-sign the bundle
+    (`codesign --force --deep --sign - stepv.app` for local use).
+  - Building from source (crates.io, or this repository): you supply OCCT
+    yourself (`cmake -S kernel -B build`); nothing of OCCT is distributed.
+
+=============================================================================
+Other libraries bundled with the binary packages
+=============================================================================
+
+The Linux tarball and stepv.app also carry these libraries, which OCCT or stepv
+link against, unmodified and dynamically linked:
+
+  GNU libiconv / libcharset   LGPL-2.1-or-later   https://www.gnu.org/software/libiconv/
+                              (replaceable as described for OCCT above)
+  FreeType                    FreeType License    https://freetype.org
+                              Portions of this software are copyright
+                              (c) The FreeType Project (www.freetype.org).
+                              All rights reserved.
+  libpng                      PNG Reference Library License v2   http://www.libpng.org
+  zlib                        zlib License        https://zlib.net
+  bzip2                       bzip2 License (BSD-style)          https://sourceware.org/bzip2/
+  Brotli                      MIT                 https://github.com/google/brotli
+
+The Linux tarball additionally carries the C/C++ runtime it was built with,
+so that it runs independently of the host's:
+
+  GNU C Library (glibc,       LGPL-2.1-or-later   https://www.gnu.org/software/libc/
+  incl. the dynamic loader)   (replaceable: stepv/lib/ld.so and libc.so.6)
+  libstdc++, libgcc_s         GPL-3.0 with the GCC Runtime Library Exception
+                              https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html
+
+Their license texts are distributed with their upstream sources at the
+addresses above.
+
+=============================================================================
+Rust dependencies
+=============================================================================
+
+The `stepv` binary statically links Rust crates from crates.io, all under
+permissive licenses (MIT, Apache-2.0, BSD, zlib, or Unicode). The exact list
+with full license texts is produced from Cargo.lock by
+`cargo about generate about.hbs` (cargo-about is in the dev shell).

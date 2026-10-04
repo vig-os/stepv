@@ -28,3 +28,6 @@ mis = "mis"
 # surrounding prose stays spell-checked.
 CAF = "CAF"
 Caf = "Caf"
+# freedesktop term (stepv, packaging/linux): a "thumbnailer" is the program a
+# file manager runs to make thumbnails; plural "thumbnailers", not "thumbnails".
+thumbnailers = "thumbnailers"

@@ -1,0 +1,56 @@
+# Attach stepv's release artefacts to the GitHub Release (vig-os/stepv#10).
+# Project-owned.
+#
+# release-extension.yml builds, tests, signs and attests the Linux tarball and the
+# DMG before devkit publishes the Release, but that seam's token ceiling is
+# contents: read (DOWNSTREAM_RELEASE.md), so it cannot write the Release. This
+# workflow owns its own grant and runs after publication: it finds the
+# release run whose artefacts carry this version, downloads exactly those
+# (the attested bytes, not a rebuild), and uploads them to the Release.
+name: Release Assets
+
+"on":
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach artefacts to"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attach:
+    name: Attach artefacts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Find, download and attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          run=""
+          for id in $(gh run list -R "$REPO" --workflow release.yml --status success -L 50 --json databaseId --jq '.[].databaseId'); do
+            names=$(gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[].name')
+            if grep -qx "stepv-release-linux-$version" <<<"$names" && grep -qx "stepv-release-macos-$version" <<<"$names"; then
+              run=$id
+              break
+            fi
+          done
+          [ -n "$run" ] || { echo "::error::No successful release.yml run carries artefacts for $version."; exit 1; }
+          echo "Artefacts from release run $run"
+          mkdir -p dist
+          gh run download "$run" -R "$REPO" -n "stepv-release-linux-$version" -D dist
+          gh run download "$run" -R "$REPO" -n "stepv-release-macos-$version" -D dist
+          ls -la dist
+          gh release upload "$TAG" -R "$REPO" --clobber dist/*

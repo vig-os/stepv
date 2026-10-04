@@ -141,6 +141,21 @@
         # flake-generated hooks the way they do through mkProjectShell. Inert
         # here — all four keys are empty in .vig-os, so every one resolves to
         # its devkit default. Set one and it will be silently ignored.
+        # ────────────────────────────────────────────────────────────────────
+        # The Plan B kernel (plan.md §3): kernel/stepv-occt, native OCCT. Its
+        # own derivation, so the Rust checks below run the CLI tests against a
+        # REAL kernel (they fail rather than skip without one), and so the
+        # product package can ship it in libexec/stepv beside the CLI.
+        kernel = pkgs.stdenv.mkDerivation {
+          pname = "stepv-occt";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+          src = ./kernel;
+          nativeBuildInputs = [ pkgs.cmake ];
+          buildInputs = [ pkgs.opencascade-occt ];
+          cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
+          meta.description = "stepv's OCCT kernel: STEP/IGES/BREP to meshes, run as a subprocess";
+        };
+
         rust = vigos.lib.mkRustProject {
           inherit pkgs workflow;
           src = ./.;
@@ -153,16 +168,34 @@
 
           # Named rather than null so a break is attributed to `stepv` instead
           # of reported against "the workspace" (plan.md §"Crate layout").
-          crates = [ "stepv" ];
+          crates = [
+            "stepv"
+            "stepv-capi"
+          ];
 
-          # The harness corpus lives outside the cargo source filter; without
-          # this, fixture-driven tests see an empty directory under crane.
-          extraSrcFiles = [ "tests/fixtures" ];
+          # The harness corpus manifest and the committed CLI-test corpus live
+          # outside the cargo source filter; without this, crane drops them.
+          extraSrcFiles = [
+            "tests/fixtures"
+            "tests/data"
+          ];
+
+          # Every crane derivation (nextest included) sees the built kernel.
+          craneArgs.STEPV_OCCT = "${kernel}/libexec/stepv/stepv-occt";
 
           # Host-runner hooks (#1167): direnv CI runs on the bare host runner,
           # so the flake GENERATES .pre-commit-config.yaml from the shared base
           # hook set, resolved from the Nix store. Customize here.
           hooks = { };
+          # Generated CAD test data (kernel/fixture-gen): byte-for-byte what
+          # OCCT writes, so the whitespace fixers must not "correct" it, or
+          # every `just test-data` would re-dirty the tree.
+          # The licence texts in licenses/ are verbatim upstream copies: a
+          # whitespace "fix" would make them no longer the licence.
+          hooksExcludes = [
+            "^tests/data/"
+            "^licenses/"
+          ];
 
           tools = [
             "nextest"
@@ -184,7 +217,57 @@
         # per-module dev-shell builds. Assigning these is the consumer's job by
         # construction — dropping the line is a visible omission, which is why
         # mkRustProject hands all three back together.
-        inherit (rust) checks packages;
+        inherit (rust) checks;
+
+        # `stepv` is the CLI alone (what crates.io ships); `default` is the
+        # product: the CLI with the kernel in libexec/stepv, where
+        # occt::kernel_path() finds it relative to the binary.
+        packages =
+          rust.packages
+          // {
+            inherit kernel;
+            # Copied, not symlinked: on Linux current_exe() resolves symlinks,
+            # so a symlinked bin/stepv would look for libexec/ inside the
+            # CLI-only store path and never find the kernel.
+            default =
+              pkgs.runCommand "stepv-${kernel.version}"
+                {
+                  meta.mainProgram = "stepv";
+                  meta.description = "STEP/IGES/BREP previews and thumbnails: the CLI plus its OCCT kernel";
+                }
+                ''
+                    mkdir -p $out/bin $out/libexec/stepv
+                    cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
+                    cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
+                    # Linux desktop integration (S4): harmless elsewhere.
+                    install -Dm644 ${./packaging/linux/stepv.thumbnailer} $out/share/thumbnailers/stepv.thumbnailer
+                    install -Dm644 ${./packaging/linux/stepv-mime.xml} $out/share/mime/packages/stepv.xml
+                    install -Dm644 ${./packaging/linux/stepv.desktop} $out/share/applications/stepv.desktop
+                  # Licence obligations travel with the binary (NOTICE; OCCT's LGPL + exception).
+                  install -Dm644 ${./NOTICE} $out/share/doc/stepv/NOTICE
+                  install -Dm644 ${./LICENSE} $out/share/doc/stepv/LICENSE
+                  install -Dm644 ${./licenses/OCCT-LGPL-2.1.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-2.1.txt
+                  install -Dm644 ${./licenses/OCCT-LGPL-EXCEPTION-1.0.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-EXCEPTION-1.0.txt
+                '';
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Dolphin / KIO thumbnail plugin (S4). Linux only: KF6 does not
+            # build on darwin in nixpkgs. Runs the `stepv` CLI from PATH.
+            kde-thumbnailer = pkgs.stdenv.mkDerivation {
+              pname = "stepv-kde-thumbnailer";
+              inherit (kernel) version;
+              src = ./packaging/kde;
+              nativeBuildInputs = [
+                pkgs.cmake
+                pkgs.kdePackages.extra-cmake-modules
+              ];
+              buildInputs = [
+                pkgs.kdePackages.kio
+                pkgs.kdePackages.qtbase
+              ];
+              dontWrapQtApps = true;
+            };
+          };
 
         # Opt-in local dev services (#795): a daemonless process-compose stack
         # (Postgres, SeaweedFS/S3, Redis, …) with service versions from the

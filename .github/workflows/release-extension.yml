@@ -1,17 +1,34 @@
 # Seeded by vigOS devkit — yours to edit; upgrades never overwrite this file.
 # Bugs / missing tools: https://github.com/vig-os/devkit/issues
-
 #
-# Token ceiling (#1144): release.yml's `extension` caller job grants this seam a
-# ceiling of contents:read, packages:write, id-token:write, attestations:write —
-# the maximum a job here can reach (a called workflow can only downgrade the
-# caller's GITHUB_TOKEN, never elevate it). This default no-op stays read-only;
-# to publish/sign/attest, declare the scopes you need on YOUR job (up to that
-# ceiling), e.g. `permissions: { id-token: write, attestations: write }`. See
-# "Extension Hook" in docs/DOWNSTREAM_RELEASE.md.
-
+# stepv's release (vig-os/stepv#10). Runs BEFORE devkit publishes the GitHub
+# Release, and a failure here blocks publication (DOWNSTREAM_RELEASE.md
+# "Extension Hook"). So everything that can go wrong goes wrong here:
+#
+#   - linux:  a relocatable tarball (binaries, every library and nix's own
+#             loader; runs on any Linux without FUSE or user namespaces),
+#             proven in clean distro containers, with a provenance attestation;
+#   - macos:  stepv.app as a DMG: Developer-ID signed, notarised and stapled
+#             when the Apple secrets exist, and a FINAL release refuses to ship
+#             without them; a candidate falls back to ad-hoc and says so;
+#   - crates: `cargo publish -p stepv` for a final release, from the gated
+#             `crates-io` environment; a candidate runs --dry-run.
+#
+# The artefacts are uploaded as workflow artifacts; release-assets.yml attaches
+# them to the GitHub Release once it is published (this seam's token ceiling is
+# contents: read, so it cannot write the Release itself).
+#
+# Secrets the human provides (none exist yet; see plan.md §7 and #10):
+#   MACOS_SIGNING_P12           base64 of a "Developer ID Application" .p12
+#   MACOS_SIGNING_P12_PASSWORD  its password
+#   MACOS_SIGNING_IDENTITY      e.g. "Developer ID Application: Exoma AG (TEAMID)"
+#   APPLE_NOTARY_KEY_P8         base64 of an App Store Connect API key (.p8)
+#   APPLE_NOTARY_KEY_ID         its key ID
+#   APPLE_NOTARY_ISSUER         its issuer ID
+#   CARGO_REGISTRY_TOKEN        crates.io token, in the `crates-io` environment,
+#                               for the FIRST publish only; then configure a
+#                               trusted publisher on crates.io and delete it
 name: Release Extension
-
 on:  # yamllint disable-line rule:truthy
   workflow_call:
     inputs:
@@ -40,21 +57,173 @@ permissions:
   contents: read
 
 jobs:
-  extension:
-    name: Extension Hook (Default No-op)
+  linux:
+    name: Linux tarball
     runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - name: Default extension summary
+      - name: Checkout the finalized commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.finalize_sha }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
+
+      - name: Build the relocatable tarball
         env:
-          VERSION: ${{ inputs.version }}
-          FINALIZE_SHA: ${{ inputs.finalize_sha }}
-          RELEASE_DATE: ${{ inputs.release_date }}
-          RELEASE_KIND: ${{ inputs.release_kind }}
           PUBLISH_VERSION: ${{ inputs.publish_version }}
         run: |
-          echo "No release extension configured."
-          echo "Version: $VERSION"
-          echo "Release kind: $RELEASE_KIND"
-          echo "Publish version: $PUBLISH_VERSION"
-          echo "Finalize SHA: $FINALIZE_SHA"
-          echo "Release date: $RELEASE_DATE"
+          nix build .#default -o result
+          nix develop --command scripts/package-linux.sh result "$PUBLISH_VERSION"
+
+      - name: Prove it on distros without nix
+        run: scripts/test-linux-tarball.sh dist/stepv-*-linux.tar.gz
+
+      - name: Checksums
+        run: (cd dist && sha256sum ./*.tar.gz > SHA256SUMS-linux)
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: stepv-release-linux-${{ inputs.publish_version }}
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout the finalized commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.finalize_sha }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
+
+      - name: Import the Developer ID certificate
+        id: signing
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          RELEASE_KIND: ${{ inputs.release_kind }}
+        run: |
+          if [ -z "$P12" ] || [ -z "$IDENTITY" ] || [ -z "$NOTARY_KEY" ]; then
+            if [ "$RELEASE_KIND" = "final" ]; then
+              echo "::error::A final release must be Developer-ID signed and notarised, and the Apple secrets are not set (see the header of release-extension.yml)."
+              exit 1
+            fi
+            echo "::warning::Apple signing secrets not set: this candidate's DMG is ad-hoc signed and not notarised."
+            echo "identity=-" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/stepv-signing.keychain-db"
+          kc_pass=$(openssl rand -hex 16)
+          security create-keychain -p "$kc_pass" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kc_pass" "$kc"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kc_pass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" login.keychain-db
+          echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials stepv-notary --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --keychain "$kc"
+          rm -f "$RUNNER_TEMP/notary.p8"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Build, test and package stepv.app
+        env:
+          STEPV_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          PUBLISH_VERSION: ${{ inputs.publish_version }}
+        run: |
+          nix develop --command just macos-test
+          nix develop --command scripts/package-macos.sh
+          mkdir -p dist
+          cp target/macos/stepv-*.dmg "dist/stepv-${PUBLISH_VERSION}-macos-arm64.dmg"
+          (cd dist && shasum -a 256 ./*.dmg > SHA256SUMS-macos)
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: dist/*.dmg
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: stepv-release-macos-${{ inputs.publish_version }}
+          path: dist/
+          if-no-files-found: error
+
+  crates:
+    name: crates.io
+    needs: [linux, macos]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    # Gated: the environment can require a reviewer and holds the first-
+    # publish token. A candidate never publishes; it proves the package builds.
+    environment: ${{ inputs.release_kind == 'final' && 'crates-io' || '' }}
+    permissions:
+      contents: read
+      id-token: write  # crates.io Trusted Publishing (OIDC)
+    steps:
+      - name: Checkout the finalized commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.finalize_sha }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
+
+      - name: Choose the credential
+        id: cred
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_KIND: ${{ inputs.release_kind }}
+        # The FIRST publish needs a token: a trusted publisher can only be
+        # configured on crates.io once the crate exists. After that, delete the
+        # CARGO_REGISTRY_TOKEN secret and Trusted Publishing (OIDC, no
+        # long-lived secret) takes over.
+        run: |
+          if [ "$RELEASE_KIND" != "final" ]; then echo "mode=dry-run" >> "$GITHUB_OUTPUT"
+          elif [ -n "$TOKEN" ]; then echo "mode=token" >> "$GITHUB_OUTPUT"
+          else echo "mode=trusted" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trusted Publishing (OIDC)
+        id: oidc
+        if: steps.cred.outputs.mode == 'trusted'
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
+
+      - name: Publish (final) or dry-run (candidate)
+        env:
+          MODE: ${{ steps.cred.outputs.mode }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.oidc.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          case "$MODE" in
+            dry-run) nix develop --command cargo publish -p stepv --locked --dry-run ;;
+            *) nix develop --command cargo publish -p stepv --locked ;;  # zizmor: ignore[use-trusted-publishing]
+          esac

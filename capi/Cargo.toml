@@ -1,0 +1,20 @@
+[package]
+name = "stepv-capi"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+description = "C ABI over stepv's renderer and header reader, for the macOS Quick Look extensions"
+license = "Apache-2.0"
+repository = "https://github.com/vig-os/stepv"
+# Linked into the Swift extensions; never a crates.io artefact.
+publish = false
+
+# The second consumer of the stepv library that plan.md §"Crate layout" named as
+# the trigger for splitting it: the Swift Quick Look extensions, which cannot
+# run the CLI (their sandbox forbids exec) and so link this instead.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# No viewer window in an extension.
+stepv = { path = "..", default-features = false }

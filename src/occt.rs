@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::{BBox, Color, Deflection, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
+use crate::{BBox, Color, Deflection, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
 
 /// The kernel's JSON summary, one line on its stdout. Present on success AND
 /// on a clean failure (exit 3) — the header-level facts survive a failed
@@ -82,6 +82,8 @@ pub enum Outcome {
     },
     /// Exceeded the wall-clock cap and was killed.
     Timeout,
+    /// Exceeded the memory cap: killed, or refused an allocation (Linux).
+    MemoryCap,
 }
 
 /// One kernel invocation.
@@ -95,7 +97,8 @@ pub struct Run {
 }
 
 /// Where the kernel binary is: `$STEPV_OCCT`, else beside the current
-/// executable, else this checkout's `target/kernel/` (`just kernel`).
+/// executable, else `../libexec/stepv/` relative to it, else this
+/// checkout's `target/kernel/` (`just kernel`).
 #[must_use]
 pub fn kernel_path() -> PathBuf {
     if let Some(p) = std::env::var_os("STEPV_OCCT") {
@@ -105,12 +108,48 @@ pub fn kernel_path() -> PathBuf {
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
     {
-        let beside = dir.join("stepv-occt");
-        if beside.is_file() {
-            return beside;
+        // Beside the binary (a dev build, the macOS bundle's MacOS/), or in
+        // the FHS location a Linux package installs it to.
+        for candidate in [
+            dir.join("stepv-occt"),
+            dir.join("../libexec/stepv/stepv-occt"),
+        ] {
+            if candidate.is_file() {
+                return candidate;
+            }
         }
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("target/kernel/stepv-occt")
+}
+
+/// The limits a kernel run is held to. Both are enforced from outside the
+/// kernel, by killing it: OCCT has no cooperative cancellation, and a hung or
+/// ballooning previewer is a worse bug than one that shows an icon
+/// (`plan.md` §4).
+///
+/// The memory cap is the child's *footprint* (resident on Linux, physical
+/// footprint on macOS), sampled every 5 ms — not `RLIMIT_AS`. macOS does not
+/// enforce `RLIMIT_AS`, and on Linux it caps virtual address space, which
+/// OCCT plus glibc's per-thread malloc arenas reserve by the hundreds of MB:
+/// a cap meant for resident memory would kill the kernel at load time and
+/// look like a crash. The footprint excludes shared library pages, so it is
+/// far below the kernel's RSS: a small file never exceeds 5 MB of it, while
+/// its RSS is ~30 MB, nearly all of it OCCT's shared dylibs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Limits {
+    pub timeout: Duration,
+    /// Peak memory, in bytes. `None` = uncapped.
+    pub memory: Option<u64>,
+}
+
+impl Limits {
+    /// The CLI defaults: 20 s, and 4 GiB. S1 measured the perforated-plate
+    /// pathology at 7.2 GB and a 745 MB assembly at 5.5 GB; nothing a user
+    /// waits for in a preview needs more than this.
+    pub const DEFAULT: Self = Self {
+        timeout: Duration::from_secs(20),
+        memory: Some(4 << 30),
+    };
 }
 
 /// Runs the kernel on `input`, writing mesh buffers to `mesh_out` if given.
@@ -122,7 +161,7 @@ pub fn run(
     kernel: &Path,
     input: &Path,
     deflection: Deflection,
-    timeout: Duration,
+    limits: Limits,
     mesh_out: Option<&Path>,
 ) -> std::io::Result<Run> {
     let mut cmd = Command::new(kernel);
@@ -149,28 +188,52 @@ pub fn run(
         s
     });
 
+    let mut over_memory = false;
+    let mut last_probe = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
         }
-        if start.elapsed() >= timeout {
+        if start.elapsed() >= limits.timeout {
             let _ = child.kill();
             let _ = child.wait();
             break None;
+        }
+        if let Some(cap) = limits.memory
+            && last_probe.elapsed() >= Duration::from_millis(5)
+        {
+            last_probe = Instant::now();
+            if footprint(child.id()).is_some_and(|b| b > cap) {
+                over_memory = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
         }
         std::thread::sleep(Duration::from_millis(2));
     };
     let wall = start.elapsed();
     let text = reader.join().unwrap_or_default();
-    let summary = text
+    let summary: Option<Summary> = text
         .lines()
         .next()
         .and_then(|l| serde_json::from_str(l).ok());
 
     let outcome = match status {
+        None if over_memory => Outcome::MemoryCap,
         None => Outcome::Timeout,
         Some(s) => match s.code() {
             Some(0) => Outcome::Ok,
+            // The OS refusing an allocation (std::bad_alloc in the kernel)
+            // surfaces as a clean "out of memory" summary: a memory limit,
+            // just the machine's rather than ours.
+            Some(3)
+                if summary
+                    .as_ref()
+                    .is_some_and(|s| s.error.as_deref() == Some("out of memory")) =>
+            {
+                Outcome::MemoryCap
+            }
             Some(3) => Outcome::Failed,
             code => Outcome::Crashed {
                 signal: s.signal(),
@@ -183,6 +246,39 @@ pub fn run(
         summary,
         wall,
     })
+}
+
+/// A process's current memory footprint in bytes, as the OS accounts it for
+/// the user: `ri_phys_footprint` on macOS (what Activity Monitor shows), the
+/// resident set on Linux. `None` when it cannot be read (the process exited).
+#[must_use]
+pub fn footprint(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a correctly sized, writable rusage_info_v2, which
+        // is what flavor RUSAGE_INFO_V2 writes.
+        let rc = unsafe {
+            libc::proc_pid_rusage(
+                pid as libc::c_int,
+                libc::RUSAGE_INFO_V2,
+                (&raw mut info).cast(),
+            )
+        };
+        (rc == 0).then_some(info.ri_phys_footprint)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // /proc/<pid>/statm: size resident shared ... in pages.
+        let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        Some(pages * 4096)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// A malformed mesh file. The kernel wrote it, so any of these is a bug on
@@ -282,7 +378,7 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         return Err(MeshError::BadMagic);
     }
     let version = c.u32()?;
-    if version != 2 {
+    if version != 3 {
         return Err(MeshError::UnsupportedVersion(version));
     }
     let mut b = [0.0; 6];
@@ -306,7 +402,21 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         let has_color = c.u8()? != 0;
         let (r, g, b) = (c.f32()?, c.f32()?, c.f32()?);
         let face_count = c.u32()? as usize;
-        let faces = c.enums(face_count, FaceStatus::from_u8)?;
+        // Every face entry is 14 bytes; bound the count before allocating.
+        if face_count > c.0.len() / 14 {
+            return Err(MeshError::Truncated);
+        }
+        let mut faces = Vec::with_capacity(face_count);
+        for _ in 0..face_count {
+            let b = c.u8()?;
+            let status = FaceStatus::from_u8(b).ok_or(MeshError::BadEnum(b))?;
+            let has = c.u8()? != 0;
+            let (r, g, b) = (c.f32()?, c.f32()?, c.f32()?);
+            faces.push(Face {
+                status,
+                color: has.then_some(Color { r, g, b }),
+            });
+        }
         let vertices = c.u32()? as usize;
         let triangles = c.u32()? as usize;
         let mesh = Mesh {
@@ -341,7 +451,7 @@ mod tests {
     /// One-triangle, one-segment file, built the way the kernel writes it.
     fn one_triangle(name: &str) -> Vec<u8> {
         let mut v = b"STEPVMSH".to_vec();
-        v.extend(2u32.to_le_bytes());
+        v.extend(3u32.to_le_bytes());
         for x in [0.0f64, 0.0, 0.0, 1.0, 1.0, 0.0] {
             v.extend(x.to_le_bytes());
         }
@@ -353,7 +463,12 @@ mod tests {
             v.extend(x.to_le_bytes());
         }
         v.extend(2u32.to_le_bytes()); // faces
-        v.extend([FaceStatus::Ok as u8, FaceStatus::Missing as u8]);
+        v.extend([FaceStatus::Ok as u8, 0]);
+        v.extend([0u8; 12]);
+        v.extend([FaceStatus::Missing as u8, 1]);
+        for x in [0.0f32, 1.0, 0.0] {
+            v.extend(x.to_le_bytes());
+        }
         v.extend(3u32.to_le_bytes());
         v.extend(1u32.to_le_bytes());
         for x in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
@@ -388,7 +503,20 @@ mod tests {
             })
         );
         assert!(p.is_well_formed());
-        assert_eq!(p.faces, [FaceStatus::Ok, FaceStatus::Missing]);
+        assert_eq!(
+            p.faces,
+            [
+                Face::plain(FaceStatus::Ok),
+                Face {
+                    status: FaceStatus::Missing,
+                    color: Some(Color {
+                        r: 0.0,
+                        g: 1.0,
+                        b: 0.0
+                    })
+                }
+            ]
+        );
         assert_eq!(p.lines.kinds, [LineKind::MissingOutline]);
         assert_eq!(scene.worst_face(), Some(FaceStatus::Missing));
         assert_eq!(scene.triangle_count(), 1);

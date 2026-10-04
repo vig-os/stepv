@@ -1,12 +1,15 @@
 # stepv — implementation plan and handoff
 
-**Status:** S1 done — **Plan A failed its gate, Plan B passed it** (§5 "S1 result"). The kernel is
-native OCCT 7.9.3 in a subprocess (`kernel/stepv-occt.cpp`, driven by `src/occt.rs`). With the
-per-face recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn
-with flagged approximations, and nothing crashes. Next is S2.
-**Audience:** the next agent or human picking this up cold. Read §1–§3 and §5 "S1 result", then
-start at S2.
-**Written:** 2026-10-04. **S1 recorded:** 2026-10-04.
+**Status:** S1–S5 built and tested; S6 (release) wired and **waiting on human credentials**
+(§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and
+in-process inside the macOS Quick Look extensions, whose sandbox forbids exec. With the per-face
+recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn with a
+flagged overlay, and nothing crashes or hangs. The CLI, the Linux thumbnailer, MIME and KF6 plugin,
+the viewer window, and the macOS preview and thumbnail extensions all work. On macOS that was
+proven through Quick Look itself.
+**Audience:** the next agent or human picking this up cold. Read §1–§4, then §5 for what was
+built and why, then §7 "Owed" for what only a human can do.
+**Written:** 2026-10-04. **S1 recorded:** 2026-10-04. **S2–S6:** 2026-10-04.
 
 Everything in §1–§4 is a *settled decision with stated evidence*. §5 is the work. §6 is what is
 deliberately unresolved. If you disagree with a decision, §3 names the exact observation that would
@@ -518,65 +521,135 @@ latency: p95 for files under 1 MB is 335 ms (was 337 ms). The two rungs that nev
 corpus, re-mesh and coarse, are kept as cheap first attempts; nothing here argues for them, and
 the next exporter might.
 
-### S2 — The CLI for real (#5)
+### S2 — The CLI for real (#5): done
 
-Implement `--info` first (header metadata as JSON, exit 0) — it is the honest-degradation path and it
-cannot fail. Then `--glb`, then `--png` with the software rasteriser, then the cache wired through,
-then the timeout and memory cap. Keep the exit codes in `src/main.rs` exactly as documented.
+`stepv <file> --info | --png | --glb | --mesh`, and `stepv view`. Every run past argument parsing
+prints one JSON line (header metadata, outcome, kernel summary), including on failure. Exit codes
+are as documented: `0`; `2` usage; `3` no geometry (unreadable, tessellation failed, memory cap),
+with the metadata intact; `4` timeout.
 
-Carried in from S1:
+- **`--info`** (`src/header.rs`) parses the Part 21 header directly (with its string escapes), the
+  IGES Start/Global sections and the BREP banner, plus a bounded streaming PRODUCT count. It never
+  touches the kernel and cannot fail.
+- **`--png`** (`src/render.rs`) is a CPU rasteriser with per-face colour, a z-buffer and 2×
+  supersampling, and it draws the **broken-face overlay**: amber stripes for approximated faces, a
+  red outline for missing ones, and a badge. Construction curves are hidden.
+- **`--glb`** (`src/glb.rs`) writes glTF 2.0: a node per named part, primitives per (colour,
+  status), an `extras` face status and a `stepv:approximated` material. It is validated by the
+  `gltf` crate.
+- **`--mesh`** writes the validated STEPVMSH buffers, for front-ends that build their own scene.
+- **Cache:** hits and failures are cached, timeouts are not, and writes are atomic.
+- **Limits:** the timeout kills the child. The **memory cap is the child's footprint** (Linux RSS;
+  macOS `ri_phys_footprint`), sampled every 5 ms, with a 4 GiB default. `RLIMIT_AS` was tried and
+  rejected: macOS ignores it, and on Linux it caps virtual address space, which OCCT and glibc
+  arenas reserve by the hundreds of MB. A small file's footprint stays under 5 MB, because shared
+  dylib pages don't count.
+- **Kernel:** per-face XCAF colours (STEPVMSH v3); `kernel/fixture-gen` writes the committed test
+  corpus in `tests/data/`.
+- **`stepv view`** (`src/viewer.rs`, default-on `viewer` feature) is an orbit viewer over the same
+  rasteriser. `--no-default-features` builds a headless CLI.
 
-- `occt::run` already enforces the wall-clock cap by killing the child; the CLI maps
-  `Outcome::Timeout` to exit 4. The **memory cap** is not done. `RLIMIT_AS` is not enforced on
-  macOS, so it needs a per-platform answer (Linux: `RLIMIT_AS` in the child; macOS: watch the
-  child's RSS from the parent and kill it).
-- `--info` must **not** go through the kernel's full transfer: transfer is the slow stage.
-  Parse the Part 21 header directly in Rust.
-- Draw `FaceStatus::Approx` / `Missing` with the overlay treatment in `--png`, and hide
-  `LineKind::Construction` by default. The data is in place (S1 follow-up). The renderer is not.
-- Per-face colour: 81% of parts carry colour only per face (Onshape). `Mesh::face_ids` is
-  already per-triangle; the kernel needs to emit a face-colour table next to it.
+Tests: 66 in total. `tests/cli.rs` runs the real binary against the real kernel and *fails*, not
+skips, without it. On the 391-file corpus with default limits (`just cli-sweep`), every real file
+exits 0 and every malformed file exits 3 with metadata.
 
-### S3 — Limits and failure modes (#6)
+### S3 — Limits and failure modes (#6): done
 
-Find the arena cliff. Confirm the timeout fires. Confirm exit 3 still prints valid metadata. Confirm
-a truncated/corrupt STEP file fails cleanly rather than panicking across the wasmtime boundary.
+- **Timeout:** fires, exit 4 (tested; `--timeout 0.001`). The 221 MB stress assembly takes 19.5 s
+  against the 20 s default, and the `.thumbnailer` uses 15 s, so it fails there as a timeout. That
+  is the intended behaviour.
+- **Memory cap:** fires, `memory-cap`, exit 3. The test is deterministic, using a kernel test hook
+  that allocates 512 MiB against a 64 MiB cap. ABC `00000046` (7.2 GB uncapped) is killed at a
+  1 GB cap.
+- **Broken files:** empty, truncated, noise and wrong-format files all exit 3 with header metadata
+  (tested; plus the 10-file `malformed` set in the sweep).
+- **Decision (perforated-face pathology):** no automatic coarser retry. It would double worst-case
+  latency, and at thumbnail settings (30°) that file already fits the 4 GiB cap. The front-ends
+  show header metadata on failure instead.
 
-### S4 — Linux front-ends (#7)
+### S4 — Linux front-ends (#7): done
 
-The `.thumbnailer` (cheapest possible win — do it first and the project is useful), MIME registration,
-then the KF6 `ThumbnailCreator`.
+`packaging/linux/` contains:
 
-### S5 — macOS front-ends (#9)
+- a freedesktop `.thumbnailer` (GNOME, XFCE);
+- MIME XML with content magic for STEP and a new `model/x-brep` type;
+- a `.desktop` entry opening the formats in `stepv view`;
+- `install.sh` (`PREFIX`/`DESTDIR`, `--integration-only` for an AppImage user).
 
-Swift host app plus `QLPreviewingController` and `QLThumbnailProvider`. Decide buffers-over-FFI
-versus USDZ at this point, with the §4 note in hand. This is the largest single step and it is last
-because it is the one that cannot be validated headlessly in CI.
+`packaging/kde/` is a KF6 `ThumbnailCreator` that shells out to the same CLI, so the kernel's
+containment and limits apply in Dolphin. `scripts/test-linux-integration.sh` runs the thumbnailer
+exactly as the desktop does (4 formats, plus a clean failure with no image on a broken file), and
+checks the compiled MIME database and the desktop entry. CI builds the KF6 plugin and runs that
+test on Linux.
 
-### S6 — Release (#10)
+### S5 — macOS front-ends (#9): done
 
-`crates.io` publish for `stepv`, and binaries for both platforms. The repo already has the devkit
-release train; §"Repo setup" below records what still has to be wired for it.
+`macos/` contains a host app declaring the STEP/IGES/BREP types, a `QLThumbnailProvider` and a
+`QLPreviewingController`. `scripts/build-macos-app.sh` builds it **without Xcode**: the CLT's
+`swiftc` and SDK suffice, with the `_NSExtensionMain` entry point and hand-assembled bundles. It
+relocates OCCT out of `/nix/store` into one shared `Frameworks/` (57 MB) and signs inside-out.
+
+- **The extensions run the kernel IN-PROCESS.** The Quick Look extension sandbox forbids exec:
+  `posix_spawn` fails with EPERM, while `stat` of the same file succeeds. So the kernel gained a C
+  ABI (`kernel/stepv_occt.h`, libstepvocct, serialised because OCCT's readers share global state),
+  and the renderer and header reader gained one (`capi/`, `stepv-capi`). That was the "second
+  consumer" this plan named as the split trigger. Containment on macOS is the extension process,
+  which the system runs apart from Finder and kills on hang or memory pressure.
+- **Buffers, not USDZ:** the preview builds an `SCNGeometry` straight from STEPVMSH, with
+  per-face colour and the overlay. The thumbnail is pixel-identical to Linux's.
+- **Two traps, now in the code comments:**
+  - The types must not conform to `public.3d-content`: Apple's SceneKit thumbnailer claims it,
+    wins the dispatch for BREP, and fails.
+  - `ThumbnailsAgent` caches type graphs until logout. After changing a type declaration, change
+    its identifier or log out.
+
+`scripts/test-macos.sh` checks three things. The Swift reader agrees with Rust on parts and
+triangles. The preview scene renders offscreen with its colours. With `--quicklook`, Quick Look
+itself thumbnails all 4 formats through the installed app. All pass. CI runs the first two on
+macOS; the third needs a logged-in session.
+
+### S6 — Release (#10): wired, waiting on credentials
+
+- **`prepare-release-extension.yml`** sets the crate versions on the release branch
+  (`scripts/set-version.py`); devkit's freeze only covers CHANGELOG.md.
+- **`release-extension.yml`**, the seam that blocks publication on failure, builds and gates the
+  release artefacts:
+  - a relocatable Linux tarball: binaries, every library and nix's own loader. Not an AppImage:
+    nix-appimage needs unprivileged user namespaces, which Ubuntu 24.04+ forbids. It is proven in
+    debian:11, ubuntu:22.04/24.04 and fedora:41 containers without /nix;
+  - a DMG, Developer-ID signed, notarised and stapled when the Apple secrets exist (a *final*
+    release refuses to ship without them; a candidate falls back to ad-hoc);
+  - build-provenance attestations for both;
+  - `cargo publish -p stepv` from the gated `crates-io` environment, by token for the first
+    publish and by Trusted Publishing (OIDC) after.
+- **`release-assets.yml`** attaches the attested artefacts to the published Release. The seam's
+  token ceiling, `contents: read`, can't.
+- The Kernel CI builds the Linux tarball (proven in clean debian/ubuntu/fedora containers) and the macOS app on every PR, so neither is first built on
+  release day. The crate packages to 34 files (98 KB) and verifies from its own tarball.
+
+What only a human can do is listed in §7 "Owed".
 
 ---
 
 ## 6. Open questions
 
 - ~~**Precompiled `.cwasm` distribution.**~~ Moot: Plan B has no WASM module (S1).
-- **Shipping OCCT.** New with Plan B. The Linux packages can depend on the distribution's OCCT,
-  but a macOS Quick Look extension must bundle the OCCT dylibs inside the app and sign them.
-  Measure the bundle size before S5 commits to it.
-- **LGPL compliance wording** (#8). OCCT is dynamically linked into a separate executable (§3 "As
-  built"), so it is replaceable. Someone should write the actual `NOTICE` text before the first
-  public binary, not after.
+- ~~**Shipping OCCT.**~~ Answered in S5/S6. stepv.app bundles one shared copy, 57 MB in total. The
+  Linux release is an AppImage of the nix closure, which is distro-independent. Source builds
+  supply their own OCCT.
+- ~~**LGPL compliance wording** (#8).~~ Done: `NOTICE`, plus OCCT's LGPL-2.1 and exception
+  verbatim in `licenses/`, shipped in every package.
 - **`occt-import-js` for a web path.** Same kernel, browser-first, LGPL-2.1. Likely the right answer
   if a web preview is ever wanted; explicitly out of scope now.
 - ~~**Does `occt-wasm` expose `ShapeFix`?**~~ Answered in S1: yes (`fix_shape`, `heal_solid`,
   `heal_face`, …), and moot, since its STEP import does not work. Under Plan B the STEP reader
   applies OCCT's default shape processing during transfer.
-- **Perforated-face meshing.** BRepMesh's Watson triangulator needs 14.8 s and 7.2 GB on a plate
-  with ~1,250 holes (ABC `00000046`, §4). The limits contain it. Whether a thumbnail should fall
-  back to a coarser angle on timeout, rather than show nothing, is an S2/S3 product decision.
+- ~~**Perforated-face meshing.**~~ Decided in S3: the limits contain it, with no automatic coarser
+  retry.
+- **macOS containment.** In-process, the extension cannot cap one file's time or memory itself.
+  It relies on the system killing a hung or ballooning extension. If that proves too coarse in
+  practice, the next step is an XPC service inside the `.appex`: launchd may start one where exec
+  is forbidden, and it brings back per-file kill.
 - **Upstream report for `occt-wasm`** (#14). The STEP-import-needs-a-filesystem gap (§3) is known
   upstream (PR #371 "Known gap"), but no issue tracks it. Filing one is outward-facing, so it is
   left to a human.
@@ -613,28 +686,42 @@ release train; §"Repo setup" below records what still has to be wired for it.
   `tests/fixtures/corpus.sha256`; `flake.nix` with `pkgs.opencascade-occt` and the `native` module
   enabled.
 
-### Owed
+### Owed — only a human can do these
 
-- **The kernel is not built or exercised in CI** (#11). `nix flake check` builds and tests the Rust crate
-  (the decoder tests run there), but not `kernel/`, and the harness needs the corpus, which CI does
-  not fetch. Owed: a CI job that runs `just kernel` and the harness on a small checked-in-safe
-  subset (the generated `malformed` set plus NIST, both redistributable).
-- **Hand-collected corpus sources** (#12) — `cax-if` (full rounds) and `exporter-matrix` — are still
-  empty, and `just fixtures` reports them as MISSING on every run. Until they are filled, the S1
-  pass rate covers only what §5 "Corpus caveats" says.
-- **`deny.toml`** (#13) — `mkRustProject` turns `cargo deny` on automatically once the file exists. Left
-  out deliberately for now: the advisories check wants network access, and a nix build sandbox does
-  not have it, so adding the file without checking that first turns every `nix flake check` red.
-- **`CARGO_REGISTRY_TOKEN`** and the `crates-io` environment for the S6 publish (#10), mirroring
-  `vig-os/scitadel`'s shape. Not declared yet on purpose: declaring a repo secret whose live value
-  does not exist is how otterdog plans go wrong.
-- **The devkit `mkRustProject` forwarding gap**: filed as
-  [vig-os/devkit#1810](https://github.com/vig-os/devkit/issues/1810), which also covers the Rust
-  scaffold failing its own deadnix/statix hooks (worked around here with `# deadnix: skip`). `mkRustProject` has no `branchTypes` /
-  `commitTypes` / `refsPolicy` / `refsOptionalTypes` arguments, so those `.vig-os` knobs do not reach
-  the flake-generated hooks the way they do through `mkProjectShell`. Inert here — all four keys are
-  empty, so each resolves to its devkit default — but set one and it is silently ignored. The gap is
-  commented at the call site in `flake.nix`.
+Everything else is built and tested. Each item below needs a credential, an account or a click
+that an agent must not take. Each one is the last step before something ships.
+
+1. **Approve the org-config apply** (org-config#317's `Apply` run waits on the `production`
+   environment). It gives stepv its rulesets: branch and tag protection, signed commits.
+2. **Grant the workflow credentials** (#3): add `stepv` to the six org-secret repository lists by
+   hand. The apply does not do this (org-config#318), and devkit's sync, upgrade and release
+   workflows need it.
+3. **Enable the dependency graph** (#16): the repo-settings toggle, which has no API. Until then
+   Dependency Review is red on every PR.
+4. **Apple Developer ID** (#10), for a notarised macOS release. Store these as repo or org secrets:
+   `MACOS_SIGNING_P12`, `MACOS_SIGNING_P12_PASSWORD`, `MACOS_SIGNING_IDENTITY`,
+   `APPLE_NOTARY_KEY_P8`, `APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER`. The header of
+   `release-extension.yml` lists them. A final release refuses to ship without them.
+5. **crates.io** (#10):
+   - Create the `crates-io` environment, ideally with a required reviewer, and give it a
+     `CARGO_REGISTRY_TOKEN` for the **first** publish.
+   - After that release, configure stepv's trusted publisher on crates.io and delete the token.
+     The workflow then switches to OIDC by itself.
+   - Declare the environment in org-config if environments are governed there.
+6. **Corpus** (#12): the full CAx-IF rounds (registration) and real SolidWorks, NX, CATIA, Fusion
+   and FreeCAD exports, collected by hand. They're needed before the pass rate can be claimed for
+   those exporters.
+7. **Upstream report** (#14): file the occt-wasm STEP-import gap with andymai/occt-wasm, if wanted.
+8. **Devkit fixes** to watch, not do:
+   - vig-os/devkit#1810: `mkRustProject` drops hook knobs, and the scaffold fails its own lint. It's
+     worked around here with `# deadnix: skip`.
+   - vig-os/devkit#1811: the Rust pack's CI lanes ran no Rust. It's worked around in
+     `justfile.project` and `kernel.yml`.
+
+Done since S1, for the record: kernel CI (#11, `kernel.yml`: nix build, flake check, strict
+harness, CLI sweep, Linux tarball, macOS app, Linux integration, advisories) and `deny.toml` (#13:
+bans/licenses/sources inside flake check, advisories in CI).
+
 Checked and **not** owed, recorded so nobody re-investigates:
 
 - **CodeQL default setup** — the scaffold warns that its advanced config conflicts with GitHub's

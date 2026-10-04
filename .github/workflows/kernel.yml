@@ -1,0 +1,98 @@
+# Kernel and product CI (vig-os/stepv#11). Project-owned, not devkit-managed.
+#
+# devkit's ci.yml builds the dev shell and runs `just test`, but it never runs
+# `nix flake check` and its hook set has no rustfmt/clippy (vig-os/devkit#1811),
+# and nothing there builds the OCCT kernel or exercises it on real files. This
+# workflow does, on both shipping platforms:
+#
+#   1. nix build: the product (CLI + kernel + Linux integration), the kernel
+#      alone, and on Linux the KF6 Dolphin plugin;
+#   2. nix flake check: fmt, clippy, nextest (the CLI tests run the REAL
+#      kernel and fail without it), doctests, docs;
+#   3. the robustness gate on the REDISTRIBUTABLE corpus only (NIST PMI is US
+#      government work; `malformed` is generated): `harness --strict` fails
+#      on any crash/timeout/bad mesh or a malformed file that does not fail
+#      cleanly, and `cli-sweep` holds the CLI to its exit-code contract;
+#   4. on Linux, the desktop integration exactly as GNOME/XFCE invoke it.
+name: Kernel
+
+"on":
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    name: Kernel (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
+
+      - name: Build the product and the kernel
+        run: nix build --print-build-logs .#default .#kernel
+
+      - name: Build the Dolphin thumbnail plugin
+        if: runner.os == 'Linux'
+        run: nix build --print-build-logs .#kde-thumbnailer
+
+      - name: nix flake check
+        run: nix flake check --print-build-logs
+
+      - name: cargo deny check advisories
+        if: runner.os == 'Linux'
+        # The one cargo-deny check the nix sandbox cannot run (it fetches the
+        # RustSec database); bans/licenses/sources run inside flake check.
+        run: nix develop --command cargo deny check advisories
+
+      - name: Fetch the redistributable corpus
+        run: nix develop --command just fixtures nist-pmi malformed
+
+      - name: Robustness gate (harness --strict)
+        run: nix develop --command just harness --strict tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
+
+      - name: CLI contract sweep
+        run: nix develop --command just cli-sweep tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
+
+      - name: macOS app (Quick Look extensions) and its headless checks
+        if: runner.os == 'macOS'
+        # The Quick Look round trip (--quicklook) needs a logged-in session to
+        # register extensions; it runs locally via `just macos-test --quicklook`.
+        run: nix develop --command just macos-test
+
+      - name: Linux release tarball, proven on distros without nix
+        if: runner.os == 'Linux'
+        # The release artefact: binaries + every library + nix's own loader,
+        # started through it, so no FUSE, no user namespaces (Ubuntu 24.04+
+        # forbids those, which is why an AppImage was dropped), no glibc
+        # dependency. Unpacked and exercised in debian:11, ubuntu:22.04,
+        # ubuntu:24.04 and fedora:41 containers, none of which has /nix.
+        run: |
+          nix build .#default -o result
+          nix develop --command scripts/package-linux.sh result ci
+          scripts/test-linux-tarball.sh dist/stepv-ci-*-linux.tar.gz
+
+      - name: Linux desktop integration
+        if: runner.os == 'Linux'
+        run: |
+          nix shell .#default nixpkgs#shared-mime-info nixpkgs#desktop-file-utils nixpkgs#python3 \
+            --command scripts/test-linux-integration.sh

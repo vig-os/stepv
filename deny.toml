@@ -1,0 +1,38 @@
+# cargo-deny (vig-os/stepv#13). mkRustProject runs `cargo deny check` on this
+# in `nix flake check` with crane's default checks — bans, licenses, sources —
+# which need no network. `advisories` needs the RustSec database, which the
+# nix build sandbox cannot fetch, so it runs in .github/workflows/kernel.yml
+# instead, with network.
+
+[graph]
+all-features = true
+
+[advisories]
+# Unmaintained crates are reported, not fatal: a previewer depends on a few
+# small, stable crates, and an "unmaintained" flag is a prompt to look, not a
+# vulnerability.
+unmaintained = "workspace"
+
+[licenses]
+# Everything stepv links is permissive. Anything else must be a deliberate
+# decision recorded here, not a dependency bump that slipped through.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies (stepv-capi -> stepv) are not wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

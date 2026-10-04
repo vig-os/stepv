@@ -3,44 +3,92 @@
 
 # stepv
 
-Fast STEP/IGES/BREP preview and thumbnails for macOS Quick Look and Linux file managers.
+Fast STEP/IGES/BREP previews and thumbnails: macOS Quick Look, Linux file managers (GNOME, XFCE,
+KDE), and one CLI underneath both.
 
-Press space on a `.step` file in Finder and see the part. Get rendered thumbnails in icon view, in
-Nautilus, and in Dolphin. One CLI underneath both platforms.
+Press space on a `.step` file in Finder and you get an interactive 3D preview. Icon view, Nautilus
+and Dolphin show rendered thumbnails.
 
-> **Status: scaffolded, kernel unproven.** Nothing here has rendered a STEP file yet. The kernel has
-> been *chosen* — OCCT V8 via [`occt-wasm`](https://github.com/andymai/occt-wasm) on wasmtime — with
-> the survey, the rejected alternatives, the risks and the fallback all written down. The next step
-> is a robustness harness against a real corpus.
->
-> **Start at [`plan.md`](plan.md).** It is the handoff: §1–§3 are settled decisions with evidence,
-> §5 is the work, §6 is what is deliberately unresolved.
+![stepv thumbnails: a coloured assembly, an IGES part and a sketch](docs/images/thumbnails.png)
 
-## Why this is not just a renderer
+## What makes it different
 
-STEP is a boundary-representation format. Showing one means evaluating trimmed NURBS surfaces and
-their topology, then tessellating with tolerance-based healing of whatever the exporter produced.
-That evaluation is the whole problem — and it is why the kernel decision came before any UI.
+STEP is a boundary-representation format, so showing one means evaluating trimmed NURBS and
+tessellating them while tolerating whatever the exporter wrote. stepv uses
+[Open CASCADE Technology](https://dev.opencascade.org) for that, which is the only reliable open
+kernel. [`plan.md`](plan.md) has the survey and the evidence.
 
-The existing macOS previewer in this space builds on Foxtrot, whose own authors describe it as "a
-proof-of-concept demo, not an industrial-strength CAD kernel". `plan.md` §2 explains what was
-surveyed instead and why OCCT is the only reliable open answer today.
+- **It doesn't pass broken geometry off as the model.** Every face that fails to mesh goes
+  through a recovery ladder: re-mesh, heal, refine at the face's own scale, detect a zero-area
+  sliver, coarsen, approximate. Each face records which step produced it. Anything short of exact
+  is drawn with a warning overlay (amber stripes, a red outline for a missing face, and a badge)
+  instead of silently.
+- **It degrades honestly.** If there's no geometry at all, the file's header metadata (originating
+  system, schema, names) is still reported.
+- **It is contained.** On Linux the kernel runs as a child process under a wall-clock and memory
+  cap. On macOS the Quick Look extension process is the boundary.
 
-## Development
+On a 391-file robustness corpus (NIST PMI, 300 ABC models, CAx-IF rounds, a 221 MB assembly),
+99.5% of files show faithfully and none crash or hang. The details are in `plan.md` §5.
+
+## Install
+
+**macOS 14+.** Download the DMG from
+[Releases](https://github.com/vig-os/stepv/releases), drag `stepv.app` to Applications, and open
+it once. If previews don't appear, enable *stepv* under System Settings → General → Login Items &
+Extensions → Quick Look.
+
+**Linux.** Download `stepv-<version>-x86_64-linux.tar.gz` from Releases. It runs on any Linux
+distribution, with no dependencies and no root:
 
 ```bash
-direnv allow      # or: nix develop
-cargo test
-stepv --help
+tar -xzf stepv-*-linux.tar.gz -C ~/.local/opt
+~/.local/opt/stepv/install-integration.sh   # stepv on PATH + thumbnails, MIME, desktop entry
 ```
 
-The dev environment is [vigOS devkit](https://github.com/vig-os/devkit) in `direnv` mode with the
-Rust language pack (`vigos.lib.mkRustProject`). `nix flake check` runs fmt, clippy, nextest,
-doctests and `cargo doc`.
+With Nix:
+
+```bash
+nix profile install github:vig-os/stepv
+```
+
+**From source.** You'll need OCCT ≥ 7.8, CMake and Rust.
+
+```bash
+cargo install stepv
+cmake -S kernel -B build && cmake --build build   # the OCCT kernel
+export STEPV_OCCT=$PWD/build/stepv-occt           # or install it as <prefix>/libexec/stepv/stepv-occt
+```
+
+## Use
+
+```bash
+stepv part.step --png part.png --size 512   # thumbnail, with the broken-face overlay
+stepv part.step --glb part.glb              # glTF 2.0: named nodes, per-face colours
+stepv part.step --info                      # header metadata as JSON; never fails
+stepv view part.step                        # interactive viewer window
+```
+
+Every run prints one line of JSON on stdout, describing the outcome, the header metadata and the
+kernel summary. Exit codes are `0` ok, `2` usage error, `3` no geometry (the metadata is still
+valid), and `4` timeout. Results and failures are cached. `stepv --help` lists the limits and
+options.
+
+## Develop
+
+```bash
+direnv allow                 # or: nix develop
+just test                    # kernel + fmt + clippy + every test, against the real kernel
+just fixtures && just harness    # the robustness corpus and its pass-rate table
+just cli-sweep               # the real CLI over the corpus, held to its exit-code contract
+just macos-app && just macos-test --quicklook   # macOS app, through Quick Look itself
+```
+
+`plan.md` is the design record and the GitHub issues are the tracker.
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
-
-Note that the compiled OCCT WebAssembly module this tool will execute is LGPL-2.1-only and is
-shipped as a separate replaceable file rather than embedded — see `plan.md` §3.
+stepv is Apache-2.0 (see [`LICENSE`](LICENSE)). It makes use of facilities provided by the Open
+CASCADE Technology software, which is LGPL-2.1 with the Open CASCADE exception. OCCT is always
+dynamically linked and replaceable; [`NOTICE`](NOTICE) explains how, and lists the other bundled
+libraries.
