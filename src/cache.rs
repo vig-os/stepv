@@ -33,6 +33,10 @@ pub struct KeyInputs<'a> {
     pub angular_deg: f64,
     /// Discriminates `.png` from `.glb` from raw buffers.
     pub output: Output,
+    /// Every remaining output-affecting option, packed by the caller (PNG
+    /// edge length, construction-curve visibility, …). Opaque here on
+    /// purpose: the cache only needs "same options or not".
+    pub variant: u64,
 }
 
 /// What was produced, since it changes the cached bytes.
@@ -84,6 +88,7 @@ pub fn key(inputs: &KeyInputs<'_>) -> String {
     h.update(&inputs.quantised_linear().to_le_bytes());
     h.update(&inputs.quantised_angular().to_le_bytes());
     h.update(&[inputs.output.tag()]);
+    h.update(&inputs.variant.to_le_bytes());
     h.finalize().to_hex().to_string()
 }
 
@@ -115,6 +120,7 @@ mod tests {
             linear_rel: 0.001,
             angular_deg: 20.0,
             output: Output::ThumbnailPng,
+            variant: 512,
         }
     }
 
@@ -141,6 +147,13 @@ mod tests {
     fn output_kind_change_changes_key() {
         let mut b = base();
         b.output = Output::Glb;
+        assert_ne!(key(&base()), key(&b));
+    }
+
+    #[test]
+    fn variant_change_changes_key() {
+        let mut b = base();
+        b.variant = 256;
         assert_ne!(key(&base()), key(&b));
     }
 

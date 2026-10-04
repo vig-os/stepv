@@ -2,19 +2,28 @@
 //!
 //! The CLI is the product boundary (see `plan.md` §4): macOS Quick Look and
 //! the Linux `.thumbnailer` both invoke THIS, so anything it cannot do, the
-//! previewer cannot do. It is intentionally the first thing that exists.
+//! previewer cannot do.
 //!
-//! Current state: argument surface only. The kernel wiring is spike step S1
-//! (`plan.md` §5) and this binary reports honestly that it is not there yet
-//! rather than pretending with a placeholder image.
+//! Every run that gets past argument parsing prints ONE line of JSON on
+//! stdout — the file's header metadata plus what happened — including on
+//! failure. That is the exit-3 contract: a front-end that could not get
+//! geometry still has something honest to show.
 
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, UNIX_EPOCH};
+
+use serde_json::{Value, json};
+use stepv::occt::{self, Limits, Outcome};
+use stepv::{Deflection, cache, glb, header, render};
 
 const USAGE: &str = "\
 stepv — STEP/IGES/BREP preview and thumbnails
 
 USAGE:
     stepv <input> [--png <out> | --glb <out>] [options]
+    stepv <input> --info
 
 ARGS:
     <input>              .step / .stp / .iges / .igs / .brep
@@ -22,34 +31,421 @@ ARGS:
 OPTIONS:
     --png <path>         Render a PNG thumbnail
     --glb <path>         Write a binary glTF
-    --size <px>          PNG edge length (default 512)
+    --size <px>          PNG edge length, 16..=4096 (default 512)
     --quality <q>        thumbnail | preview (default thumbnail)
     --timeout <secs>     Hard wall-clock cap (default 20)
+    --memory-mb <n>      Kernel memory cap, 0 = none (default 4096)
+    --show-construction  Draw construction curves beside solids
+    --no-cache           Neither read nor write the cache
     --info               Print header metadata as JSON and exit
+    -V, --version        Print the version
     -h, --help           Print this help
+
+OUTPUT:
+    One JSON line on stdout for every run past argument parsing, success
+    or not: header metadata, the outcome, and the kernel's summary.
 
 EXIT CODES:
     0  success
     2  usage error
-    3  tessellation failed (metadata on stdout is still valid)
+    3  no geometry (unreadable, tessellation failed, memory cap); the
+       metadata on stdout is still valid
     4  timeout exceeded
 ";
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+const EXIT_OK: u8 = 0;
+const EXIT_USAGE: u8 = 2;
+const EXIT_FAILED: u8 = 3;
+const EXIT_TIMEOUT: u8 = 4;
 
-    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    Png,
+    Glb,
+}
+
+#[derive(Debug)]
+struct Args {
+    input: PathBuf,
+    output: Option<(Format, PathBuf)>,
+    info: bool,
+    size: u32,
+    deflection: Deflection,
+    limits: Limits,
+    show_construction: bool,
+    cache: bool,
+}
+
+fn parse_args(argv: &[String]) -> Result<Args, String> {
+    let mut a = Args {
+        input: PathBuf::new(),
+        output: None,
+        info: false,
+        size: 512,
+        deflection: Deflection::THUMBNAIL,
+        limits: Limits::DEFAULT,
+        show_construction: false,
+        cache: true,
+    };
+    let mut input = None;
+    let mut it = argv.iter();
+    while let Some(arg) = it.next() {
+        let mut value = |flag: &str| it.next().cloned().ok_or(format!("{flag} needs a value"));
+        match arg.as_str() {
+            "--png" | "--glb" => {
+                if a.output.is_some() {
+                    return Err("give one of --png or --glb, not both".into());
+                }
+                let f = if arg == "--png" {
+                    Format::Png
+                } else {
+                    Format::Glb
+                };
+                a.output = Some((f, PathBuf::from(value(arg)?)));
+            }
+            "--size" => {
+                let n: u32 = value(arg)?.parse().map_err(|_| "--size needs a number")?;
+                if !(16..=4096).contains(&n) {
+                    return Err("--size must be within 16..=4096".into());
+                }
+                a.size = n;
+            }
+            "--quality" => {
+                a.deflection = match value(arg)?.as_str() {
+                    "thumbnail" => Deflection::THUMBNAIL,
+                    "preview" => Deflection::PREVIEW,
+                    q => {
+                        return Err(format!(
+                            "--quality: expected thumbnail or preview, got {q:?}"
+                        ));
+                    }
+                };
+            }
+            "--timeout" => {
+                let s: f64 = value(arg)?.parse().map_err(|_| "--timeout needs seconds")?;
+                if !(s > 0.0 && s.is_finite()) {
+                    return Err("--timeout must be positive".into());
+                }
+                a.limits.timeout = Duration::from_secs_f64(s);
+            }
+            "--memory-mb" => {
+                let mb: u64 = value(arg)?
+                    .parse()
+                    .map_err(|_| "--memory-mb needs a number")?;
+                a.limits.memory = (mb > 0).then_some(mb << 20);
+            }
+            "--show-construction" => a.show_construction = true,
+            "--no-cache" => a.cache = false,
+            "--info" => a.info = true,
+            s if s.starts_with('-') => return Err(format!("unknown option {s}")),
+            _ if input.is_some() => return Err(format!("unexpected argument {arg:?}")),
+            _ => input = Some(PathBuf::from(arg)),
+        }
+    }
+    a.input = input.ok_or("no input file given")?;
+    if !a.info && a.output.is_none() {
+        return Err("nothing to do: give --png, --glb or --info".into());
+    }
+    Ok(a)
+}
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    if argv.iter().any(|a| a == "-V" || a == "--version") {
+        println!("stepv {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    let args = match parse_args(&argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("stepv: {e}\nRun `stepv --help` for usage.");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let (code, report) = run(&args);
+    // One line, always — the front-ends parse it.
+    let _ = writeln!(std::io::stdout(), "{report}");
+    ExitCode::from(code)
+}
 
-    eprintln!(
-        "stepv: not implemented yet — the kernel spike (plan.md §5, step S1) \
-         has not landed.\n\
-         \n\
-         This binary exists so the CLI contract is fixed before either \
-         front-end is written.\n\
-         Run `stepv --help` for the argument surface it will honour."
+/// The whole run, returning the exit code and the stdout report.
+fn run(args: &Args) -> (u8, Value) {
+    let info = header::read(&args.input);
+    let mut report = json!({ "stepv": env!("CARGO_PKG_VERSION"), "info": info });
+    if args.info {
+        report["status"] = json!("info");
+        return (EXIT_OK, report);
+    }
+    let (format, out) = args.output.clone().expect("checked in parse_args");
+
+    // ── Cache ──
+    let cache_path = args.cache.then(|| cache_path(args, format)).flatten();
+    if let Some(cp) = &cache_path
+        && let Some(code) = from_cache(cp, &out, &mut report)
+    {
+        return (code, report);
+    }
+
+    // ── Kernel ──
+    let kernel = occt::kernel_path();
+    if !kernel.is_file() {
+        return fail(
+            report,
+            EXIT_FAILED,
+            "error",
+            &format!("kernel not found at {}", kernel.display()),
+        );
+    }
+    let mesh = temp_path("msh");
+    let result = occt::run(
+        &kernel,
+        &args.input,
+        args.deflection,
+        args.limits,
+        Some(&mesh),
     );
-    ExitCode::from(3)
+    let run = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = std::fs::remove_file(&mesh);
+            return fail(
+                report,
+                EXIT_FAILED,
+                "error",
+                &format!("cannot start kernel: {e}"),
+            );
+        }
+    };
+    report["kernel"] = json!(run.summary.as_ref().map(|s| json!({
+        "stage": s.stage, "error": s.error, "parts": s.parts, "faces": s.faces,
+        "triangles": s.triangles, "segments": s.segments, "bbox": s.bbox,
+        "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
+        "peak_rss_bytes": s.peak_rss_bytes,
+    })));
+    report["wall_ms"] = json!((run.wall.as_secs_f64() * 1e3).round());
+
+    let outcome = match run.outcome {
+        Outcome::Ok => None,
+        Outcome::Timeout => Some((
+            EXIT_TIMEOUT,
+            "timeout",
+            "wall-clock cap exceeded".to_owned(),
+        )),
+        Outcome::MemoryCap => Some((EXIT_FAILED, "memory-cap", "memory cap exceeded".to_owned())),
+        Outcome::Failed => Some((
+            EXIT_FAILED,
+            "failed",
+            run.summary
+                .as_ref()
+                .and_then(|s| s.error.clone())
+                .unwrap_or_else(|| "kernel failed".into()),
+        )),
+        Outcome::Crashed { signal, code } => Some((
+            EXIT_FAILED,
+            "crashed",
+            format!("kernel crashed (signal {signal:?}, exit {code:?})"),
+        )),
+    };
+    if let Some((code, status, msg)) = outcome {
+        let _ = std::fs::remove_file(&mesh);
+        // Timeouts are not cached: a busy machine is not a property of the file.
+        if code == EXIT_FAILED
+            && status != "crashed"
+            && let Some(cp) = &cache_path
+        {
+            remember_failure(cp, status, &msg);
+        }
+        return fail(report, code, status, &msg);
+    }
+
+    let scene = std::fs::read(&mesh)
+        .map_err(|e| e.to_string())
+        .and_then(|b| occt::read_mesh(&b).map_err(|e| e.to_string()));
+    let _ = std::fs::remove_file(&mesh);
+    let scene = match scene {
+        Ok(s) => s,
+        // The kernel wrote it: a decode failure is a stepv bug, not user input.
+        Err(e) => {
+            return fail(
+                report,
+                EXIT_FAILED,
+                "error",
+                &format!("bad kernel output: {e}"),
+            );
+        }
+    };
+    report["worst_face"] = json!(scene.worst_face().map(|s| format!("{s:?}").to_lowercase()));
+
+    let bytes = match format {
+        Format::Png => {
+            let opts = render::Options {
+                size: args.size,
+                show_construction: args.show_construction,
+                ..render::Options::default()
+            };
+            match render::render(&scene, &opts).map(|img| img.to_png()) {
+                Ok(Ok(png)) => png,
+                Ok(Err(e)) => {
+                    return fail(report, EXIT_FAILED, "error", &format!("PNG encode: {e}"));
+                }
+                Err(e) => return fail(report, EXIT_FAILED, "failed", &e.to_string()),
+            }
+        }
+        Format::Glb => glb::to_glb(
+            &scene,
+            &glb::Options {
+                show_construction: args.show_construction,
+            },
+        ),
+    };
+    if let Err(e) = write_atomic(&out, &bytes) {
+        return fail(
+            report,
+            EXIT_FAILED,
+            "error",
+            &format!("cannot write {}: {e}", out.display()),
+        );
+    }
+    if let Some(cp) = &cache_path {
+        let _ = write_atomic(cp, &bytes);
+    }
+    report["status"] = json!("ok");
+    report["output"] = json!(out);
+    report["cached"] = json!(false);
+    (EXIT_OK, report)
+}
+
+fn fail(mut report: Value, code: u8, status: &str, msg: &str) -> (u8, Value) {
+    report["status"] = json!(status);
+    report["error"] = json!(msg);
+    (code, report)
+}
+
+/// The cache file for this input and these options; `None` if there is no
+/// cache directory or the input cannot be stat'ed.
+fn cache_path(args: &Args, format: Format) -> Option<PathBuf> {
+    let dir = cache::cache_dir()?;
+    let canon = std::fs::canonicalize(&args.input).ok()?;
+    let meta = std::fs::metadata(&canon).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    let (output, ext) = match format {
+        Format::Png => (cache::Output::ThumbnailPng, "png"),
+        Format::Glb => (cache::Output::Glb, "glb"),
+    };
+    let variant = u64::from(args.size) | (u64::from(args.show_construction) << 32);
+    let key = cache::key(&cache::KeyInputs {
+        path: canon.as_os_str().as_encoded_bytes(),
+        len: meta.len(),
+        mtime_nanos: i128::try_from(mtime.as_nanos()).ok()?,
+        linear_rel: args.deflection.linear_rel,
+        angular_deg: args.deflection.angular_deg,
+        output,
+        variant,
+    });
+    Some(dir.join(format!("{key}.{ext}")))
+}
+
+/// Serves a cache hit, or a cached failure, into `out`. `None` on a miss.
+fn from_cache(cp: &Path, out: &Path, report: &mut Value) -> Option<u8> {
+    if let Ok(bytes) = std::fs::read(cp) {
+        if write_atomic(out, &bytes).is_ok() {
+            report["status"] = json!("ok");
+            report["output"] = json!(out);
+            report["cached"] = json!(true);
+            return Some(EXIT_OK);
+        }
+        return None;
+    }
+    // A failure is as expensive to recompute as a success; Finder will ask
+    // again on every window that shows the folder.
+    let fail = std::fs::read(cp.with_extension("fail")).ok()?;
+    let v: Value = serde_json::from_slice(&fail).ok()?;
+    report["status"] = v["status"].clone();
+    report["error"] = v["error"].clone();
+    report["cached"] = json!(true);
+    Some(EXIT_FAILED)
+}
+
+fn remember_failure(cp: &Path, status: &str, msg: &str) {
+    let body = json!({ "status": status, "error": msg }).to_string();
+    let _ = write_atomic(&cp.with_extension("fail"), body.as_bytes());
+}
+
+/// Writes via a sibling temp file and a rename, so a reader (Finder, a
+/// concurrent stepv) never sees a half-written PNG.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+fn temp_path(ext: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!("stepv-{}-{nanos}.{ext}", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Result<Args, String> {
+        parse_args(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn parses_a_full_command_line() {
+        let a = args(&[
+            "m.step",
+            "--png",
+            "o.png",
+            "--size",
+            "256",
+            "--quality",
+            "preview",
+            "--timeout",
+            "5",
+            "--memory-mb",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(a.input, PathBuf::from("m.step"));
+        assert_eq!(a.output, Some((Format::Png, PathBuf::from("o.png"))));
+        assert_eq!(a.size, 256);
+        assert_eq!(a.deflection, Deflection::PREVIEW);
+        assert_eq!(a.limits.timeout, Duration::from_secs(5));
+        assert_eq!(a.limits.memory, None);
+    }
+
+    #[test]
+    fn rejects_bad_command_lines() {
+        for bad in [
+            &["m.step"][..],
+            &["--png", "o.png"],
+            &["m.step", "--png", "a.png", "--glb", "b.glb"],
+            &["m.step", "--png"],
+            &["m.step", "--png", "o.png", "--size", "8"],
+            &["m.step", "--png", "o.png", "--quality", "ultra"],
+            &["m.step", "--png", "o.png", "--timeout", "-1"],
+            &["m.step", "--png", "o.png", "--frobnicate"],
+            &["a.step", "b.step", "--info"],
+        ] {
+            assert!(args(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn info_needs_no_output() {
+        assert!(args(&["m.step", "--info"]).unwrap().info);
+    }
 }
