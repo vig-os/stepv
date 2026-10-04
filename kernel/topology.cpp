@@ -70,8 +70,12 @@
 namespace stepv {
 namespace {
 
+// Every number written goes through this: NaN or infinity would make the
+// file invalid JSON, and one bad face cost the whole topology.
+double num(double v) { return std::isfinite(v) ? v : 0.0; }
+
 void put(std::ostream& o, const gp_XYZ& v) {
-    o << '[' << v.X() << ',' << v.Y() << ',' << v.Z() << ']';
+    o << '[' << num(v.X()) << ',' << num(v.Y()) << ',' << num(v.Z()) << ']';
 }
 void put(std::ostream& o, const char* key, const gp_Pnt& p) {
     o << ",\"" << key << "\":";
@@ -82,7 +86,7 @@ void put(std::ostream& o, const char* key, const gp_Dir& d) {
     put(o, d.XYZ());
 }
 void put(std::ostream& o, const char* key, double v) {
-    o << ",\"" << key << "\":" << (std::isfinite(v) ? v : 0.0);
+    o << ",\"" << key << "\":" << num(v);
 }
 
 // Returns the face's area, which the prototype's is the sum of.
@@ -92,8 +96,11 @@ double face_json(std::ostream& o, const TopoDS_Face& face, const TopTools_Indexe
     o << "{\"surface\":";
     switch (s.GetType()) {
     case GeomAbs_Plane: {
+        // The surface normal is X x Y, which is Axis() only for right-handed
+        // axes; the face's orientation flips it again.
         const gp_Pln pl = s.Plane();
         gp_Dir n = pl.Axis().Direction();
+        if (!pl.Position().Direct()) n.Reverse();
         if (reversed) n.Reverse();
         o << "\"plane\"";
         put(o, "origin", pl.Location());
@@ -221,11 +228,12 @@ std::string prototype_json(const TopoDS_Shape& shape) {
         area += face_json(faces, TopoDS::Face(ex.Current()), edges);
         first = false;
     }
-    o << "{\"area\":" << area << ",\"volume\":";
+    o << "{\"area\":" << num(area) << ",\"volume\":";
     if (TopExp_Explorer(shape, TopAbs_SOLID).More()) {
+        // Closed shells only: an open one beside a solid has no volume.
         GProp_GProps vol;
-        BRepGProp::VolumeProperties(shape, vol);
-        o << vol.Mass();
+        BRepGProp::VolumeProperties(shape, vol, Standard_True);
+        o << num(vol.Mass());
     } else {
         o << "null";
     }
@@ -237,7 +245,8 @@ std::string prototype_json(const TopoDS_Shape& shape) {
     } else {
         double x0, y0, z0, x1, y1, z1;
         box.Get(x0, y0, z0, x1, y1, z1);
-        o << '[' << x0 << ',' << y0 << ',' << z0 << ',' << x1 << ',' << y1 << ',' << z1 << ']';
+        o << '[' << num(x0) << ',' << num(y0) << ',' << num(z0) << ',' << num(x1) << ','
+          << num(y1) << ',' << num(z1) << ']';
     }
     o << ",\"faces\":[" << faces.str() << "],\"edges\":[";
     for (int i = 1; i <= edges.Extent(); ++i) {
@@ -293,7 +302,7 @@ std::string write_topology(const std::string& path, const std::vector<TopoNode>&
         o << (i ? "," : "") << "{\"name\":\"" << json_escape(parts[i].name)
           << "\",\"prototype\":" << parts[i].prototype << ",\"transform\":[";
         for (int r = 1; r <= 3; ++r)
-            for (int c = 1; c <= 4; ++c) o << (r + c > 2 ? "," : "") << t.Value(r, c);
+            for (int c = 1; c <= 4; ++c) o << (r + c > 2 ? "," : "") << num(t.Value(r, c));
         o << "]}";
     }
     // Prototypes are independent: in parallel, each into its own string.

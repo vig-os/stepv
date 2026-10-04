@@ -168,6 +168,17 @@ int main(int argc, char** argv) {
     // Both paths are resolved here, outside it: inside, realpath() of a
     // relative path cannot read the working directory's ancestry (macOS).
     const std::string input_path = canonical(input);
+    // An output that IS the input, or two outputs on one path: creating the
+    // outputs truncates them, so refuse before touching anything.
+    {
+        const std::string m = mesh_out.empty() ? "" : canonical(mesh_out);
+        const std::string t = topology_out.empty() ? "" : canonical(topology_out);
+        if ((!m.empty() && m == input_path) || (!t.empty() && t == input_path) ||
+            (!mesh_out.empty() && (mesh_out == topology_out || (!m.empty() && m == t)))) {
+            std::fputs("stepv-occt: an output path is the input or the other output\n", stderr);
+            return kExitUsage;
+        }
+    }
     const auto slash = input_path.rfind('/');
     const std::string input_dir = slash == std::string::npos ? ""
                                   : slash == 0               ? "/"

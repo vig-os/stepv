@@ -305,11 +305,64 @@ fn topology_of_a_box_and_a_sketch() {
             .all(|f| matches!(f.surface, Surface::Plane { .. }) && f.edges.len() == 4)
     );
     assert_eq!((b.edges.len(), b.vertices.len()), (12, 8));
+    // Every normal points OUT of the box: a viewer's angle between faces,
+    // and which side a section caps, depend on it.
+    let centre = [10.0, 5.0, 2.5];
+    for f in &b.faces {
+        let Surface::Plane { origin, normal } = f.surface else {
+            unreachable!()
+        };
+        let out: f64 = (0..3).map(|i| normal[i] * (origin[i] - centre[i])).sum();
+        assert!(out > 0.0, "inward normal {normal:?} at {origin:?}");
+    }
 
     let sk = &topology_of("sketch.step", &t).prototypes[0];
     assert_eq!((sk.faces.len(), sk.volume), (0, None));
     assert!(
         matches!(sk.edges[..], [ref e] if matches!(e.curve, Curve::Circle { radius, .. } if radius == 25.0))
+    );
+}
+
+#[test]
+fn topology_normals_follow_the_surface_not_the_axis() {
+    // A plane with left-handed axes: Axis() is +z, but the surface, and so
+    // the face, faces -z (kernel/fixture-gen.cpp).
+    use stepv::topology::Surface;
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("topology-left-handed");
+    let topo = topology_of("left-handed-plane.brep", &t);
+    let Surface::Plane { normal, .. } = topo.prototypes[0].faces[0].surface else {
+        panic!("a plane")
+    };
+    assert_eq!(normal, [0.0, 0.0, -1.0]);
+}
+
+#[test]
+fn an_output_on_the_input_is_refused_untouched() {
+    // Creating an output truncates it: on the input, that would destroy the
+    // very file being previewed.
+    let k = stepv::occt::kernel_path();
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("output-is-input");
+    let input = t.path("a.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let before = std::fs::read(&input).unwrap();
+    for args in [
+        vec!["--mesh", s(&input)],
+        vec!["--topology", s(&input)],
+        vec!["--mesh", s(&t.path("x")), "--topology", s(&t.path("x"))],
+    ] {
+        let out = Command::new(&k).arg(&input).args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+    assert_eq!(
+        std::fs::read(&input).unwrap(),
+        before,
+        "the input was touched"
     );
 }
 

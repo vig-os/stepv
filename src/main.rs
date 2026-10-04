@@ -172,6 +172,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         }
     }
     a.input = input.ok_or("no input file given")?;
+    if a.info && (a.output.is_some() || a.topology.is_some()) {
+        return Err("--info writes no files: drop --png/--glb/--mesh/--topology".into());
+    }
     if a.view && (a.output.is_some() || a.topology.is_some()) {
         return Err("view takes no --png/--glb/--mesh/--topology".into());
     }
