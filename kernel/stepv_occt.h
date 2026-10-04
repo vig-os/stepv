@@ -15,6 +15,12 @@ extern "C" {
 char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
                      double angular_deg, int* exit_code);
 
+// stepv_occt_run, also writing the model's exact topology (assembly tree,
+// surface and curve types and parameters, areas, volumes; format at the top
+// of topology.cpp) to `topology_out` (NULL: none).
+char* stepv_occt_run_topology(const char* input, const char* mesh_out, const char* topology_out,
+                              double linear_rel, double angular_deg, int* exit_code);
+
 void stepv_occt_free(char* p);
 
 #ifdef __cplusplus

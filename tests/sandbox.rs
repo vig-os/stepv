@@ -321,3 +321,40 @@ fn a_file_at_the_home_root_exposes_only_itself() {
     r.assert_refused("read");
     r.assert_did_the_work(&b);
 }
+
+#[test]
+fn the_topology_is_the_one_other_writable_file() {
+    // --topology (#21) is a second output: granted like the mesh, by its
+    // descriptor's path, and nothing else becomes writable with it.
+    let b = Layout::new("topology");
+    let k = stepv::occt::kernel_path();
+    if !k.is_file() {
+        return;
+    }
+    let probe = b.path("out/beside-the-topology");
+    let out = Command::new(k)
+        .arg(b.path("in/assembly.step"))
+        .arg("--mesh")
+        .arg(b.path("out/assembly.msh"))
+        .arg("--topology")
+        .arg(b.path("out/topology.json"))
+        .env("STEPV_OCCT_TEST_ESCAPE", format!("write:{}", s(&probe)))
+        .output()
+        .expect("spawn kernel");
+    let r = KernelRun {
+        code: out.status.code().unwrap_or(-1),
+        summary: serde_json::from_slice(
+            out.stdout.split(|&c| c == b'\n').next().unwrap_or_default(),
+        )
+        .unwrap_or(Value::Null),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    if nested_in_nix_build(&r.summary) {
+        return;
+    }
+    r.assert_refused("write");
+    assert!(!probe.exists());
+    r.assert_did_the_work(&b);
+    let topo = std::fs::read(b.path("out/topology.json")).unwrap();
+    assert!(stepv::topology::Topology::parse(&topo).is_ok());
+}

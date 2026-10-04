@@ -67,7 +67,9 @@
 //
 // src/occt.rs is the reader; keep the two in step.
 
+#include "json.h"
 #include "stepv_occt.h"
+#include "topology.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -146,28 +148,7 @@ constexpr int kExitFailed = 3;
 
 // ── JSON output ─────────────────────────────────────────────────────────────
 
-std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 2);
-    for (unsigned char c : s) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (c < 0x20) {
-                char buf[8];
-                std::snprintf(buf, sizeof buf, "\\u%04x", c);
-                out += buf;
-            } else {
-                out += static_cast<char>(c);
-            }
-        }
-    }
-    return out;
-}
+using stepv::json_escape;
 
 struct Summary {
     std::string format;
@@ -196,7 +177,7 @@ struct Summary {
     // references, and how many of them could not be read (missing, or
     // outside what a sandbox lets this process open).
     std::size_t external_files = 0, external_missing = 0;
-    double t_read_ms = 0, t_transfer_ms = 0, t_mesh_ms = 0, t_extract_ms = 0;
+    double t_read_ms = 0, t_transfer_ms = 0, t_mesh_ms = 0, t_extract_ms = 0, t_topology_ms = 0;
 };
 
 std::size_t peak_rss_bytes() {
@@ -242,7 +223,8 @@ std::string to_json(const Summary& s) {
     o << ",\"external_files\":" << s.external_files
       << ",\"external_missing\":" << s.external_missing;
     o << ",\"t_read_ms\":" << s.t_read_ms << ",\"t_transfer_ms\":" << s.t_transfer_ms
-      << ",\"t_mesh_ms\":" << s.t_mesh_ms << ",\"t_extract_ms\":" << s.t_extract_ms;
+      << ",\"t_mesh_ms\":" << s.t_mesh_ms << ",\"t_extract_ms\":" << s.t_extract_ms
+      << ",\"t_topology_ms\":" << s.t_topology_ms;
     o << ",\"peak_rss_bytes\":" << peak_rss_bytes() << "}";
     return o.str();
 }
@@ -298,10 +280,13 @@ bool has_face_colors(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_C
     return false;
 }
 
+// Flattens the assembly under `label` into placed parts, and records its
+// structure in `tree` (stepv::TopoNode; `parent` is this subtree's parent).
 void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& ct,
           const TDF_Label& label, const TopLoc_Location& location,
           const std::string& instance_name, std::optional<Rgb> inherited,
-          std::vector<PartInstance>& out, int depth) {
+          std::vector<PartInstance>& out, std::vector<stepv::TopoNode>& tree, int parent,
+          int depth) {
     // A cyclic or absurdly deep assembly graph is malformed input, not a
     // reason to blow the stack.
     if (depth > 64) throw std::runtime_error("assembly nesting deeper than 64");
@@ -309,6 +294,9 @@ void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& 
     if (auto own = label_color(ct, label)) inherited = own;
 
     if (st->IsAssembly(label)) {
+        const int node = static_cast<int>(tree.size());
+        const std::string name = label_name(label);
+        tree.push_back({name.empty() ? instance_name : name, parent, -1});
         TDF_LabelSequence components;
         st->GetComponents(label, components, false);
         for (const TDF_Label& comp : components) {
@@ -319,7 +307,7 @@ void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& 
             // the instance has none.
             std::optional<Rgb> c = label_color(ct, comp);
             walk(st, ct, referred, location * st->GetLocation(comp), label_name(comp),
-                 c ? c : inherited, out, depth + 1);
+                 c ? c : inherited, out, tree, node, depth + 1);
         }
         return;
     }
@@ -333,6 +321,7 @@ void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& 
     if (part.name.empty()) part.name = instance_name;
     part.color = inherited;
     part.face_colored = !part.color && has_face_colors(st, ct, label);
+    tree.push_back({part.name, parent, static_cast<long>(out.size())});
     out.push_back(std::move(part));
 }
 
@@ -783,8 +772,9 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
     return true;
 }
 
-int run(const std::string& input_arg, const std::string& mesh_out, double linear_rel,
-        double angular_deg, bool parallel, Summary& s) {
+int run(const std::string& input_arg, const std::string& mesh_out,
+        const std::string& topology_out, double linear_rel, double angular_deg, bool parallel,
+        Summary& s) {
     // STEPCAFControl_Reader resolves multi-file assemblies' external
     // references against the main file's directory ONLY when the path is
     // absolute; given a relative one it silently yields an empty document.
@@ -814,10 +804,11 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     TDF_LabelSequence roots;
     st->GetFreeShapes(roots);
     std::vector<PartInstance> parts;
+    std::vector<stepv::TopoNode> tree;
     Bnd_Box bbox;
     for (const TDF_Label& root : roots) {
         BRepBndLib::Add(st->GetShape(root), bbox, false);
-        walk(st, ct, root, TopLoc_Location(), label_name(root), std::nullopt, parts, 0);
+        walk(st, ct, root, TopLoc_Location(), label_name(root), std::nullopt, parts, tree, -1, 0);
     }
     s.parts = parts.size();
     for (const auto& p : parts) {
@@ -948,6 +939,27 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
     }
     s.t_extract_ms = ms_since(t0);
 
+    // ── Exact topology, on request (#21) ──
+    if (!topology_out.empty()) {
+        s.stage = "topology";
+        t0 = Clock::now();
+        // Prototypes numbered by first use, the order a reader meets them.
+        std::map<std::string, std::size_t> index;
+        std::vector<TopoDS_Shape> shapes;
+        std::vector<stepv::TopoPart> placed;
+        for (const auto& p : parts) {
+            const auto [it, fresh] = index.emplace(entry(p.prototype), shapes.size());
+            if (fresh) shapes.push_back(prototypes.at(entry(p.prototype)));
+            placed.push_back({p.name, it->second, p.location.Transformation()});
+        }
+        if (const std::string err = stepv::write_topology(topology_out, tree, placed, shapes);
+            !err.empty()) {
+            s.error = err;
+            return kExitFailed;
+        }
+        s.t_topology_ms = ms_since(t0);
+    }
+
     s.stage = "done";
     if (s.triangles == 0 && s.segments == 0) {
         s.error = "file has neither surfaces nor curves to draw";
@@ -961,6 +973,12 @@ int run(const std::string& input_arg, const std::string& mesh_out, double linear
 
 extern "C" char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
                                 double angular_deg, int* exit_code) {
+    return stepv_occt_run_topology(input, mesh_out, nullptr, linear_rel, angular_deg, exit_code);
+}
+
+extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out,
+                                         const char* topology_out, double linear_rel,
+                                         double angular_deg, int* exit_code) {
     // OCCT's data-exchange layer keeps global state (Interface_Static, the
     // XSControl session): one file at a time per process. The CLI never
     // notices (one run per process); Quick Look issues concurrent requests.
@@ -977,7 +995,8 @@ extern "C" char* stepv_occt_run(const char* input, const char* mesh_out, double 
         s.error = "invalid arguments";
     } else {
         try {
-            code = run(input, mesh_out ? mesh_out : "", linear_rel, angular_deg, true, s);
+            code = run(input, mesh_out ? mesh_out : "", topology_out ? topology_out : "",
+                       linear_rel, angular_deg, true, s);
         } catch (const Standard_Failure& e) {
             s.error = std::string("OCCT: ") + e.GetMessageString();
         } catch (const std::bad_alloc&) {

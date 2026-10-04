@@ -222,6 +222,118 @@ fn the_kernel_runs_sandboxed() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("warning"));
 }
 
+/// `--topology` alone, parsed and validated (#21).
+fn topology_of(name: &str, t: &Scratch) -> stepv::topology::Topology {
+    let out = t.path("topology.json");
+    let (code, j, _) = stepv(&[s(&data(name)), "--topology", s(&out)], &t.0);
+    assert_eq!(code, 0, "{j}");
+    assert_eq!(j["topology"], s(&out), "{j}");
+    stepv::topology::Topology::parse(&std::fs::read(&out).unwrap()).unwrap()
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6 * b.abs().max(1.0)
+}
+
+#[test]
+fn topology_measures_the_assembly_exactly() {
+    use stepv::topology::{Curve, Node, Surface};
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("topology");
+    let topo = topology_of("assembly.step", &t);
+    let Node::Assembly { name, children } = &topo.tree[0] else {
+        panic!("the root is the assembly: {:?}", topo.tree)
+    };
+    assert_eq!(name, "bracket-assy");
+    let leaves: Vec<_> = children
+        .iter()
+        .map(|c| match c {
+            Node::Part { name, part } => (name.as_str(), *part),
+            Node::Assembly { .. } => panic!("no sub-assemblies here"),
+        })
+        .collect();
+    assert_eq!(leaves, [("plate", 0), ("pin", 1), ("pin", 2)]);
+    // Two pins, one prototype; placed at x = 6 and x = 34, y = 15.
+    let protos: Vec<_> = topo.parts.iter().map(|p| p.prototype).collect();
+    assert_eq!(protos, [0, 1, 1]);
+    let tx = |i: usize| [topo.parts[i].transform[3], topo.parts[i].transform[7]];
+    assert_eq!([tx(1), tx(2)], [[6.0, 15.0], [34.0, 15.0]]);
+
+    let pi = std::f64::consts::PI;
+    let plate = &topo.prototypes[0];
+    // 40 x 30 x 5, less a hole of radius 4.
+    assert!(close(plate.volume.unwrap(), 6000.0 - pi * 16.0 * 5.0));
+    assert!(close(
+        plate.area,
+        2.0 * (1200.0 + 200.0 + 150.0) - 2.0 * pi * 16.0 + 2.0 * pi * 4.0 * 5.0
+    ));
+    let holes: Vec<_> = plate
+        .faces
+        .iter()
+        .filter_map(|f| match f.surface {
+            Surface::Cylinder { radius, .. } => Some(radius),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(holes, [4.0]);
+    assert!(
+        plate
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, Curve::Circle { radius, .. } if radius == 4.0))
+    );
+    // A pin: radius 2, length 15.
+    assert!(close(topo.prototypes[1].volume.unwrap(), pi * 4.0 * 15.0));
+}
+
+#[test]
+fn topology_of_a_box_and_a_sketch() {
+    use stepv::topology::{Curve, Surface};
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("topology-box");
+    let b = &topology_of("box.brep", &t).prototypes[0];
+    assert!(close(b.volume.unwrap(), 20.0 * 10.0 * 5.0));
+    assert!(close(b.area, 2.0 * (200.0 + 100.0 + 50.0)));
+    assert_eq!(b.faces.len(), 6);
+    assert!(
+        b.faces
+            .iter()
+            .all(|f| matches!(f.surface, Surface::Plane { .. }) && f.edges.len() == 4)
+    );
+    assert_eq!((b.edges.len(), b.vertices.len()), (12, 8));
+
+    let sk = &topology_of("sketch.step", &t).prototypes[0];
+    assert_eq!((sk.faces.len(), sk.volume), (0, None));
+    assert!(
+        matches!(sk.edges[..], [ref e] if matches!(e.curve, Curve::Circle { radius, .. } if radius == 25.0))
+    );
+}
+
+#[test]
+fn topology_comes_beside_any_output() {
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("topology-png");
+    let (png, topo) = (t.path("a.png"), t.path("a.json"));
+    let (code, j, _) = stepv(
+        &[
+            s(&data("assembly.step")),
+            "--png",
+            s(&png),
+            "--topology",
+            s(&topo),
+        ],
+        &t.0,
+    );
+    assert_eq!(code, 0, "{j}");
+    assert!(png.is_file() && topo.is_file(), "{j}");
+}
+
 #[test]
 fn multifile_assembly_loads_its_part_files() {
     if !kernel_available() {

@@ -16,6 +16,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use stepv::occt::{self, Limits, Outcome};
+use stepv::topology::Topology;
 use stepv::{Deflection, Scene, cache, glb, header, render, viewer};
 
 const USAGE: &str = "\
@@ -33,6 +34,8 @@ OPTIONS:
     --png <path>         Render a PNG thumbnail
     --glb <path>         Write a binary glTF
     --mesh <path>        Write the raw STEPVMSH buffers (for front-ends)
+    --topology <path>    Also write the exact topology as JSON: assembly tree,
+                         surface/curve types and parameters, areas, volumes
     --size <px>          PNG edge length, 16..=4096 (default 512)
     --quality <q>        thumbnail | preview (default thumbnail)
     --timeout <secs>     Hard wall-clock cap (default 20)
@@ -78,6 +81,8 @@ enum Format {
 struct Args {
     input: PathBuf,
     output: Option<(Format, PathBuf)>,
+    /// `--topology`: written beside any output, or alone.
+    topology: Option<PathBuf>,
     info: bool,
     size: u32,
     deflection: Deflection,
@@ -91,6 +96,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut a = Args {
         input: PathBuf::new(),
         output: None,
+        topology: None,
         info: false,
         size: 512,
         deflection: Deflection::THUMBNAIL,
@@ -125,6 +131,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 };
                 a.output = Some((f, PathBuf::from(value(arg)?)));
             }
+            "--topology" => a.topology = Some(PathBuf::from(value(arg)?)),
             "--size" => {
                 let n: u32 = value(arg)?.parse().map_err(|_| "--size needs a number")?;
                 if !(16..=4096).contains(&n) {
@@ -165,11 +172,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         }
     }
     a.input = input.ok_or("no input file given")?;
-    if a.view && a.output.is_some() {
-        return Err("view takes no --png/--glb".into());
+    if a.view && (a.output.is_some() || a.topology.is_some()) {
+        return Err("view takes no --png/--glb/--mesh/--topology".into());
     }
-    if !a.info && !a.view && a.output.is_none() {
-        return Err("nothing to do: give --png, --glb or --info".into());
+    if !a.info && !a.view && a.output.is_none() && a.topology.is_none() {
+        return Err("nothing to do: give --png, --glb, --topology or --info".into());
     }
     Ok(a)
 }
@@ -206,7 +213,7 @@ fn run(args: &Args) -> (u8, Value) {
         return (EXIT_OK, report);
     }
     if args.view {
-        let scene = match tessellate(args, &mut report, None) {
+        let scene = match tessellate(args, &mut report, None, None) {
             Ok((s, _)) => s,
             Err(code) => return (code, report),
         };
@@ -228,21 +235,66 @@ fn run(args: &Args) -> (u8, Value) {
             Err(e) => fail(report, EXIT_FAILED, "error", &e),
         };
     }
-    let (format, out) = args.output.clone().expect("checked in parse_args");
-
-    // ── Cache ──
-    let cache_path = args.cache.then(|| cache_path(args, format)).flatten();
-    if let Some(cp) = &cache_path
-        && let Some(code) = from_cache(cp, &out, &mut report)
+    // ── Cache ── for an output alone: a topology needs the kernel anyway.
+    let cache_path = args
+        .output
+        .as_ref()
+        .filter(|_| args.cache && args.topology.is_none())
+        .and_then(|(format, _)| cache_path(args, *format));
+    if let (Some(cp), Some((_, out))) = (&cache_path, &args.output)
+        && let Some(code) = from_cache(cp, out, &mut report)
     {
         return (code, report);
     }
 
-    let (scene, raw) = match tessellate(args, &mut report, cache_path.as_deref()) {
+    let topology_tmp = args.topology.as_ref().map(|_| temp_path("json"));
+    let result = tessellate(
+        args,
+        &mut report,
+        cache_path.as_deref(),
+        topology_tmp.as_deref(),
+    );
+    let topology = topology_tmp.as_ref().map(|t| {
+        let bytes = std::fs::read(t);
+        let _ = std::fs::remove_file(t);
+        bytes
+    });
+    let (scene, raw) = match result {
         Ok(s) => s,
         Err(code) => return (code, report),
     };
     report["worst_face"] = json!(scene.worst_face().map(|s| format!("{s:?}").to_lowercase()));
+
+    if let (Some(bytes), Some(dest)) = (topology, &args.topology) {
+        // The kernel wrote it: a file that does not parse, or does not match
+        // the mesh it came with, is a stepv bug.
+        let checked = bytes.map_err(|e| e.to_string()).and_then(|b| {
+            Topology::parse(&b)
+                .and_then(|t| t.check_against(&scene))
+                .map(|()| b)
+                .map_err(|e| e.to_string())
+        });
+        let bytes = match checked {
+            Ok(b) => b,
+            Err(e) => {
+                return fail(
+                    report,
+                    EXIT_FAILED,
+                    "error",
+                    &format!("bad kernel output: {e}"),
+                );
+            }
+        };
+        if let Err(e) = write_atomic(dest, &bytes) {
+            let msg = format!("cannot write {}: {e}", dest.display());
+            return fail(report, EXIT_FAILED, "error", &msg);
+        }
+        report["topology"] = json!(dest);
+    }
+    let Some((format, out)) = args.output.clone() else {
+        report["status"] = json!("ok");
+        return (EXIT_OK, report);
+    };
 
     let bytes = match format {
         Format::Png => {
@@ -296,6 +348,7 @@ fn tessellate(
     args: &Args,
     report: &mut Value,
     cache_path: Option<&Path>,
+    topology_out: Option<&Path>,
 ) -> Result<(Scene, Vec<u8>), u8> {
     // ── Kernel ──
     let kernel = occt::kernel_path();
@@ -314,6 +367,7 @@ fn tessellate(
         args.deflection,
         args.limits,
         Some(&mesh),
+        topology_out,
     );
     let run = match result {
         Ok(r) => r,
