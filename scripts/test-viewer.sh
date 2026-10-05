@@ -12,6 +12,8 @@
 #      viewer falls back to the software window and says so on stderr.
 #   4. The same when the probe found one but the window's adapter selection
 #      fails (STEPV_VIEW_REJECT_ADAPTERS, a test hook).
+#   5. A click (STEPV_VIEW_PICK) in the window picks the plate's top face,
+#      and the inspector's topology names it a plane.
 #
 #   scripts/test-viewer.sh [path/to/stepv] [screenshot dir]
 #
@@ -132,6 +134,15 @@ read -r status backend error <<<"$(report <<<"$out")"
 grep -q "GPU viewer could not start" "$tmp/err" || fail "rejected adapter said nothing: $(cat "$tmp/err")"
 [ -s "$shot" ] || fail "rejected adapter: no screenshot"
 echo "ok: an adapter the window cannot use falls back to software, and says so"
+
+# 5. A click through the real window's id pass (#29).
+shot="$tmp/pick.png"
+out=$(STEPV_VIEW_PICK=0.55,0.57 STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --theme light 2>"$tmp/err") || true
+read -r status backend error <<<"$(report <<<"$out")"
+[ "$status" = ok ] || fail "pick: $status $backend ($error): $(cat "$tmp/err")"
+grep -q "STEPV_VIEW_PICK hit part 0 face [0-9]* (Plane)" "$tmp/err" \
+  || fail "the click did not pick the plate's top: $(cat "$tmp/err")"
+echo "ok: a click picks the plate's top face ($(grep -o 'face [0-9]* (Plane)' "$tmp/err"))"
 
 if [ -n "$keep" ]; then
   mkdir -p "$keep"

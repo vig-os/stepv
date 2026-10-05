@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use stepv::occt::{self, Limits, Outcome};
 use stepv::render::{self, Camera};
-use stepv::view::gpu::{Headless, Layout, View, require_gpu};
+use stepv::topology::Topology;
+use stepv::view::gpu::{Headless, Layout, Pick, View, clip_matrix, require_gpu};
 use stepv::{Deflection, Scene};
 
 const FILES: [&str; 5] = [
@@ -30,6 +31,11 @@ fn data(name: &str) -> PathBuf {
 
 /// The kernel's preview-quality mesh of `name`, as `stepv view` gets it.
 fn load(name: &str) -> Scene {
+    load_with_topology(name).0
+}
+
+/// The mesh and the exact topology, checked against each other.
+fn load_with_topology(name: &str) -> (Scene, Topology) {
     let kernel = occt::kernel_path();
     assert!(
         kernel.is_file(),
@@ -41,19 +47,27 @@ fn load(name: &str) -> Scene {
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mesh =
         std::env::temp_dir().join(format!("stepv-view-{}-{n}-{name}.msh", std::process::id()));
+    let topo = mesh.with_extension("json");
     let run = occt::run(
         &kernel,
         &data(name),
         Deflection::PREVIEW,
         Limits::DEFAULT,
         Some(&mesh),
-        None,
+        Some(&topo),
     )
     .expect("start the kernel");
     assert_eq!(run.outcome, Outcome::Ok, "{name}: {:?}", run.summary);
     let bytes = std::fs::read(&mesh).unwrap();
+    let json = std::fs::read(&topo).unwrap();
     let _ = std::fs::remove_file(&mesh);
-    occt::read_mesh(&bytes).expect("a valid STEPVMSH")
+    let _ = std::fs::remove_file(&topo);
+    let scene = occt::read_mesh(&bytes).expect("a valid STEPVMSH");
+    let topology = Topology::parse(&json).expect("valid topology");
+    topology
+        .check_against(&scene)
+        .expect("topology matches the mesh");
+    (scene, topology)
 }
 
 #[test]
@@ -81,12 +95,7 @@ fn the_gpu_frames_every_file_as_the_thumbnail_renderer_does() {
         let cam = Camera::for_scene(&scene);
         let gs = g.upload(&scene);
         let (w, h) = (192, 144);
-        let view = View {
-            camera: cam,
-            show_construction: false,
-            clear: [0.0; 4],
-            stripe: 6,
-        };
+        let view = View::new(cam);
         let gpu = g.render(&gs, &view, w, h);
         let cpu = render::render(
             &scene,
@@ -140,6 +149,62 @@ fn the_gpu_frames_every_file_as_the_thumbnail_renderer_does() {
     }
 }
 
+/// #29's acceptance: clicking the bracket plate's hole shows a cylinder of
+/// r = 4, and its top a plane with normal +z and area 1200 - 16π, driven
+/// headless at pixels computed from a known camera.
+#[test]
+fn picking_the_plate_names_its_exact_faces() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let (scene, topo) = load_with_topology("assembly.step");
+    let gs = g.upload(&scene);
+    let cam = Camera::default(); // azimuth -35, elevation 30
+    let (w, h) = (640, 480);
+    let pixel = |p: [f32; 3]| {
+        let m = clip_matrix(&cam, &gs.fits[0].unwrap(), w, h);
+        let c = [0, 1].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
+        (
+            ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+            ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+        )
+    };
+    let rows_at = |p: [f32; 3]| {
+        let (x, y) = pixel(p);
+        let Pick { part, face } = g
+            .pick(&gs, &View::new(cam), w, h, x, y)
+            .unwrap_or_else(|| panic!("nothing at {p:?} ({x}, {y})"));
+        let rows = stepv::view::inspect::face(&topo, part as usize, face as usize).unwrap();
+        move |k: &str| rows.iter().find(|r| r.key == k).map(|r| r.value.clone())
+    };
+    // The hole (centre (20, 15), r = 4, through z 0..5): its wall on the far
+    // side from the eye, which sits at +x, -y, +z, is visible from above.
+    let a = (-35f32).to_radians();
+    let away = [a.sin(), a.cos()]; // the eye's horizontal direction, negated
+    let wall = [
+        20.0 + 4.0 * away[0] * 0.98,
+        15.0 + 4.0 * away[1] * 0.98,
+        4.5,
+    ];
+    let hole = rows_at(wall);
+    assert_eq!(hole("Surface").as_deref(), Some("Cylinder"));
+    assert_eq!(hole("Radius").as_deref(), Some("4 mm"));
+    assert_eq!(hole("Part").as_deref(), Some("plate (#0)"));
+    // The top, away from the hole and the pins.
+    let top = rows_at([10.0, 5.0, 5.0]);
+    assert_eq!(top("Surface").as_deref(), Some("Plane"));
+    assert_eq!(top("Normal").as_deref(), Some("+z"));
+    let area: f64 = top("Face area")
+        .unwrap()
+        .trim_end_matches(" mm²")
+        .parse()
+        .unwrap();
+    assert!(
+        (area - (1200.0 - 16.0 * std::f64::consts::PI)).abs() < 1e-3,
+        "area {area}"
+    );
+}
+
 #[test]
 fn per_face_colours_reach_the_gpu() {
     let Some(g) = require_gpu(Headless::new()) else {
@@ -149,17 +214,7 @@ fn per_face_colours_reach_the_gpu() {
     // for them too): the GPU frame must show more than one hue.
     let scene = load("assembly.step");
     let gs = g.upload(&scene);
-    let img = g.render(
-        &gs,
-        &View {
-            camera: Camera::for_scene(&scene),
-            show_construction: false,
-            clear: [0.0; 4],
-            stripe: 6,
-        },
-        256,
-        192,
-    );
+    let img = g.render(&gs, &View::new(Camera::for_scene(&scene)), 256, 192);
     let mut hues = std::collections::BTreeSet::new();
     for p in img.rgba.chunks_exact(4).filter(|p| p[3] == 255) {
         // Coarse, so shading does not count as a new colour.
@@ -208,12 +263,7 @@ fn stress_assembly_draws_at_display_rate() {
     let mut ms = Vec::new();
     for _ in 0..60 {
         cam.azimuth_deg += 1.0;
-        let view = View {
-            camera: cam,
-            show_construction: false,
-            clear: [0.0; 4],
-            stripe: 6,
-        };
+        let view = View::new(cam);
         let t = std::time::Instant::now();
         let frame = renderer.render(&g.device, &g.queue, &gs, &target, &view);
         g.queue.submit([frame]);

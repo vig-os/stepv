@@ -770,6 +770,30 @@ and #34 (capping, fat lines).
 - **Licences:** egui embeds fonts under OFL-1.1 and the Ubuntu Font Licence. They are allowed in
   `deny.toml`, and their texts are in `licenses/`.
 
+### Picking (#29, 2026-10-05)
+
+- **The id pass:** a single-sample `Rg32Uint` target, cleared to 0, written as
+  `(part + 1, face)`. It uses the same vertex shader, visibility bitset and section plane as the
+  image, so a pick hits exactly what is drawn: nothing hidden, nothing through a cut.
+  - The issue allowed `part << 20 | face` in an `R32Uint`, which caps an assembly at 4096 parts. Two
+    channels cost 4 bytes more per pixel, and only on click.
+- **Readback:** a click renders the id pass at the viewport's size and copies one texel, mapped
+  asynchronously. The result lands on a later frame: no stall.
+- **The highlight** is a second pass over the picked face's part. Its fragment shader keeps only
+  that face. It is blended in the accent colour, with a negative depth bias and no depth write, so
+  it beats its own face and loses to anything in front. The material is untouched.
+- **The inspector** is `view::inspect`: rows from `--topology`, placed into model coordinates by
+  the part's transform (a pin's axis is where that pin stands).
+  - `stepv view` now runs the kernel with `--topology`. If the topology fails to parse or match, the
+    viewer still opens, says so, and shows mesh ids only.
+- **Section plane:** `Section { axis, offset, flip }` across the model box, applied in every pass:
+  image, ids, highlight, lines. #34 adds capping.
+- **Acceptance**, headless against the real kernel (`tests/view.rs`), at pixels projected through
+  the viewer's own matrix:
+  - the plate's hole wall reads Cylinder, r = 4 mm;
+  - its top reads Plane, normal +z, area 1200 − 16π.
+  - `scripts/test-viewer.sh` also clicks through a real window (`STEPV_VIEW_PICK`).
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -782,7 +806,7 @@ Agent work, in order:
    Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
-   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking → #30 tree → #31 overlay and edges →
+   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree → #31 overlay and edges →
    #32 CI and packaging → #33 measurements → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph

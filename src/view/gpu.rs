@@ -35,6 +35,10 @@ pub const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// MSAA samples. 4 is the one count WebGPU guarantees for every format.
 pub const SAMPLES: u32 = 4;
+/// The id pass's format: `(part + 1, face)` per pixel, 0 for nothing. Two
+/// channels, so neither count is squeezed into bits (#29 allowed
+/// `part << 20 | face`, which caps an assembly at 4096 parts).
+pub const ID: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
 
 /// One face's look, as the shader reads it.
 #[repr(C)]
@@ -53,9 +57,15 @@ struct Uniforms {
     clip: [[f32; 4]; 4],
     /// Model space to view space (rotation only), for normals.
     rot: [[f32; 4]; 4],
+    /// The section plane: keep points with `dot(p, xyz) <= w`.
+    section: [f32; 4],
+    /// The picked face's highlight, linear RGB and opacity.
+    highlight: [f32; 4],
     /// x: draw construction curves; y: the approximated-face stripe width
-    /// in physical pixels.
+    /// in physical pixels; z: the section is on.
     flags: [u32; 4],
+    /// The picked face: x = part + 1 (0 for none), y = face.
+    pick: [u32; 4],
 }
 
 /// The bounding sphere [`render::render`]'s `Fit::Sphere` frames: the centre
@@ -234,6 +244,9 @@ pub struct Layout {
     pub fits: [Option<Fit>; 2],
     /// Vertices duplicated because triangles of two faces shared them.
     pub split_vertices: usize,
+    /// The box around every mesh vertex and line point, for the section
+    /// plane's range.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 impl Layout {
@@ -325,6 +338,19 @@ impl Layout {
             mesh.chain(lines)
         };
         l.fits = [Fit::of(points(false)), Fit::of(points(true))];
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for p in l
+            .positions
+            .chunks_exact(3)
+            .chain(l.line_positions.chunks_exact(3))
+        {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        l.bounds = (lo[0] <= hi[0]).then_some((lo, hi));
         l
     }
 }
@@ -343,6 +369,67 @@ pub struct View {
     /// The approximated-face stripes' width in physical pixels: render.rs's
     /// 6, times the display scale.
     pub stripe: u32,
+    /// The section plane, as [`Section::plane`] gives it: everything with
+    /// `dot(p, xyz) > w` is cut away, in the image, the picks and the
+    /// highlight alike.
+    pub section: Option<[f32; 4]>,
+    /// The picked face (part, face), drawn highlighted.
+    pub picked: Option<Pick>,
+    /// The highlight's colour, linear RGB.
+    pub highlight: [f32; 3],
+}
+
+impl View {
+    /// `camera` with every toggle off, on a transparent background.
+    #[must_use]
+    pub fn new(camera: Camera) -> Self {
+        Self {
+            camera,
+            show_construction: false,
+            clear: [0.0; 4],
+            stripe: 6,
+            section: None,
+            picked: None,
+            highlight: [1.0, 0.75, 0.0],
+        }
+    }
+}
+
+/// What a pick hit: a B-rep face of a part, as the mesh and `--topology`
+/// number them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pick {
+    pub part: u32,
+    pub face: u32,
+}
+
+/// A section plane across the model's bounding box: perpendicular to `axis`
+/// (0 = x, 1 = y, 2 = z) at `offset` (0..1 of the box), keeping the side
+/// below it, or above it when `flip`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Section {
+    pub axis: usize,
+    pub offset: f32,
+    pub flip: bool,
+}
+
+impl Section {
+    /// The plane `(n, w)` for the model bounds `lo..hi`: kept is
+    /// `dot(p, n) <= w`.
+    #[must_use]
+    pub fn plane(&self, lo: [f32; 3], hi: [f32; 3]) -> [f32; 4] {
+        let k = self.axis.min(2);
+        let at = lo[k] + (hi[k] - lo[k]) * self.offset.clamp(0.0, 1.0);
+        let mut n = [0.0; 4];
+        if self.flip {
+            n[k] = -1.0;
+            n[3] = -at;
+        } else {
+            n[k] = 1.0;
+            n[3] = at;
+        }
+        n
+    }
 }
 
 /// The offscreen target the viewer owns.
@@ -398,7 +485,10 @@ impl Target {
 }
 
 const SHADER: &str = r"
-struct U { clip: mat4x4<f32>, rot: mat4x4<f32>, flags: vec4<u32> };
+struct U {
+  clip: mat4x4<f32>, rot: mat4x4<f32>, section: vec4<f32>, highlight: vec4<f32>,
+  flags: vec4<u32>, pick: vec4<u32>,
+};
 struct Material { color: vec3<f32>, status: u32 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> materials: array<Material>;
@@ -417,11 +507,18 @@ fn shown(part: u32) -> bool {
   return (visible[part >> 5u] & (1u << (part & 31u))) != 0u;
 }
 
+// Cut away by the section plane: every pass asks, so nothing is drawn,
+// picked or highlighted through a section.
+fn cut(world: vec3<f32>) -> bool {
+  return u.flags.z == 1u && dot(world, u.section.xyz) > u.section.w;
+}
+
 struct MeshOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) nrm: vec3<f32>,
   @location(1) vpos: vec3<f32>,
   @location(2) @interpolate(flat) id: vec2<u32>,
+  @location(3) world: vec3<f32>,
 };
 
 @vertex fn vs_mesh(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) face: u32,
@@ -431,6 +528,7 @@ struct MeshOut {
   o.nrm = (u.rot * vec4(n, 0.0)).xyz;
   o.vpos = (u.rot * vec4(p, 1.0)).xyz;
   o.id = vec2(part, face);
+  o.world = p;
   return o;
 }
 
@@ -438,7 +536,7 @@ struct MeshOut {
 @fragment fn fs_mesh(i: MeshOut) -> @location(0) vec4<f32> {
   // Before any discard: derivatives need uniform control flow.
   let flat_n = cross(dpdx(i.vpos), dpdy(i.vpos));
-  if (!shown(i.id.x)) { discard; }
+  if (!shown(i.id.x) || cut(i.world)) { discard; }
   // The kernel's smooth normal, or the facet's where it wrote none.
   var n = i.nrm;
   if (dot(n, n) < 1e-12) { n = flat_n; }
@@ -458,9 +556,26 @@ struct MeshOut {
   return encode(c);
 }
 
+// The id pass (#29): which face each pixel shows. Single-sample, so a pixel
+// is one face, never a blend of two.
+@fragment fn fs_id(i: MeshOut) -> @location(0) vec2<u32> {
+  if (!shown(i.id.x) || cut(i.world)) { discard; }
+  return vec2(i.id.x + 1u, i.id.y);
+}
+
+// The picked face, over the shaded one: a depth-biased second pass of just
+// that face's part, so it is a highlight and not a recolour.
+@fragment fn fs_highlight(i: MeshOut) -> @location(0) vec4<f32> {
+  if (!shown(i.id.x) || cut(i.world) || i.id.x + 1u != u.pick.x || i.id.y != u.pick.y) {
+    discard;
+  }
+  return vec4(encode(u.highlight.rgb).rgb, u.highlight.a);
+}
+
 struct LineOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) @interpolate(flat) kind_part: vec2<u32>,
+  @location(1) world: vec3<f32>,
 };
 
 @vertex fn vs_line(@location(0) p: vec3<f32>, @location(1) kind: u32,
@@ -472,11 +587,12 @@ struct LineOut {
   // Hidden construction curves: outside the clip volume.
   if (kind == 2u && u.flags.x == 0u) { o.pos = vec4(2.0, 2.0, 2.0, 1.0); }
   o.kind_part = vec2(kind, part);
+  o.world = p;
   return o;
 }
 
 @fragment fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
-  if (!shown(i.kind_part.y)) { discard; }
+  if (!shown(i.kind_part.y) || cut(i.world)) { discard; }
   switch i.kind_part.x {
     case 1u: { return encode(MISSING); }
     case 2u: { return encode(CONSTRUCTION); }
@@ -489,7 +605,28 @@ struct LineOut {
 pub struct Renderer {
     mesh: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    highlight: wgpu::RenderPipeline,
+    id: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+}
+
+/// How a pipeline writes: its colour target, sample count and depth state.
+struct Output {
+    target: wgpu::ColorTargetState,
+    samples: u32,
+    depth_write: bool,
+    bias: wgpu::DepthBiasState,
+}
+
+impl Output {
+    fn shaded() -> Self {
+        Self {
+            target: COLOR.into(),
+            samples: SAMPLES,
+            depth_write: true,
+            bias: Default::default(),
+        }
+    }
 }
 
 impl Renderer {
@@ -543,41 +680,42 @@ impl Renderer {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = |label, vs, fs, buffers: &[Option<wgpu::VertexBufferLayout>], topology| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers,
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(COLOR.into())],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: SAMPLES,
-                    ..Default::default()
-                },
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let pipeline =
+            |label, vs, fs, buffers: &[Option<wgpu::VertexBufferLayout>], topology, out: Output| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers,
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets: &[Some(out.target)],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH,
+                        depth_write_enabled: Some(out.depth_write),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: Default::default(),
+                        bias: out.bias,
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: out.samples,
+                        ..Default::default()
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
         let vec3 = |location| {
             Some(wgpu::VertexBufferLayout {
                 array_stride: 12,
@@ -604,6 +742,7 @@ impl Renderer {
             "fs_mesh",
             &[vec3(0), vec3(1), u32_at(2)],
             wgpu::PrimitiveTopology::TriangleList,
+            Output::shaded(),
         );
         let lines = pipeline(
             "stepv lines",
@@ -611,10 +750,50 @@ impl Renderer {
             "fs_line",
             &[vec3(0), u32_at(1)],
             wgpu::PrimitiveTopology::LineList,
+            Output::shaded(),
+        );
+        // Drawn over the shaded face at the same depth: pulled toward the
+        // eye, it wins the depth test against its own face and loses to
+        // anything genuinely in front.
+        let highlight = pipeline(
+            "stepv highlight",
+            "vs_mesh",
+            "fs_highlight",
+            &[vec3(0), vec3(1), u32_at(2)],
+            wgpu::PrimitiveTopology::TriangleList,
+            Output {
+                target: wgpu::ColorTargetState {
+                    format: COLOR,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                },
+                samples: SAMPLES,
+                depth_write: false,
+                bias: wgpu::DepthBiasState {
+                    constant: -4,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            },
+        );
+        let id = pipeline(
+            "stepv id",
+            "vs_mesh",
+            "fs_id",
+            &[vec3(0), vec3(1), u32_at(2)],
+            wgpu::PrimitiveTopology::TriangleList,
+            Output {
+                target: ID.into(),
+                samples: 1,
+                depth_write: true,
+                bias: Default::default(),
+            },
         );
         Self {
             mesh,
             lines,
+            highlight,
+            id,
             layout,
         }
     }
@@ -629,25 +808,11 @@ impl Renderer {
         target: &Target,
         view: &View,
     ) -> wgpu::CommandBuffer {
-        let fit = scene.fits[usize::from(view.show_construction)]
-            .or(scene.fits[1])
-            .unwrap_or(Fit {
-                mid: [0.0; 3],
-                radius: 1.0,
-            });
-        let r = rotation(&view.camera);
-        let rot = transpose([
-            [r[0][0], r[0][1], r[0][2], 0.0],
-            [r[1][0], r[1][1], r[1][2], 0.0],
-            [r[2][0], r[2][1], r[2][2], 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ]);
-        let u = Uniforms {
-            clip: clip_matrix(&view.camera, &fit, target.width, target.height),
-            rot,
-            flags: [u32::from(view.show_construction), view.stripe.max(1), 0, 0],
-        };
-        queue.write_buffer(&scene.uniforms, 0, bytemuck::bytes_of(&u));
+        queue.write_buffer(
+            &scene.uniforms,
+            0,
+            bytemuck::bytes_of(&uniforms(scene, view, target.width, target.height)),
+        );
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("stepv frame"),
         });
@@ -677,15 +842,10 @@ impl Renderer {
             pass.set_bind_group(0, &scene.bind, &[]);
             if scene.has_mesh {
                 pass.set_pipeline(&self.mesh);
-                pass.set_vertex_buffer(0, scene.positions.slice(..));
-                pass.set_vertex_buffer(1, scene.normals.slice(..));
-                pass.set_vertex_buffer(2, scene.faces.slice(..));
-                pass.set_index_buffer(scene.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for (i, p) in scene.parts.iter().enumerate() {
-                    if scene.visibility.get(i) && !p.indices.is_empty() {
-                        let i = i as u32;
-                        pass.draw_indexed(p.indices.clone(), p.base_vertex, i..i + 1);
-                    }
+                draw_mesh(&mut pass, scene, None);
+                if let Some(pick) = view.picked {
+                    pass.set_pipeline(&self.highlight);
+                    draw_mesh(&mut pass, scene, Some(pick.part as usize));
                 }
             }
             if scene.has_lines {
@@ -704,6 +864,224 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// Starts a pick at pixel `at` (x, y) of a `target`-sized view: renders
+    /// the id pass and copies that one texel out. The result arrives
+    /// asynchronously ([`PendingPick::poll`]), so a click never stalls a
+    /// frame on the GPU.
+    #[must_use]
+    pub fn pick(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &GpuScene,
+        target: &IdTarget,
+        view: &View,
+        at: (u32, u32),
+    ) -> PendingPick {
+        let (x, y) = (at.0.min(target.width - 1), at.1.min(target.height - 1));
+        queue.write_buffer(
+            &scene.uniforms,
+            0,
+            bytemuck::bytes_of(&uniforms(scene, view, target.width, target.height)),
+        );
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("stepv pick"),
+        });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("stepv id"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            if scene.has_mesh {
+                pass.set_bind_group(0, &scene.bind, &[]);
+                pass.set_pipeline(&self.id);
+                draw_mesh(&mut pass, scene, None);
+            }
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stepv pick"),
+            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let done = state.clone();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            done.store(
+                if r.is_ok() { 1 } else { 2 },
+                std::sync::atomic::Ordering::Release,
+            );
+        });
+        PendingPick { buffer, state }
+    }
+}
+
+/// The uniforms for drawing `scene` as `view` into a `w` x `h` target.
+fn uniforms(scene: &GpuScene, view: &View, w: u32, h: u32) -> Uniforms {
+    let fit = scene.fits[usize::from(view.show_construction)]
+        .or(scene.fits[1])
+        .unwrap_or(Fit {
+            mid: [0.0; 3],
+            radius: 1.0,
+        });
+    let r = rotation(&view.camera);
+    let rot = transpose([
+        [r[0][0], r[0][1], r[0][2], 0.0],
+        [r[1][0], r[1][1], r[1][2], 0.0],
+        [r[2][0], r[2][1], r[2][2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]);
+    let [hr, hg, hb] = view.highlight;
+    Uniforms {
+        clip: clip_matrix(&view.camera, &fit, w, h),
+        rot,
+        section: view.section.unwrap_or([0.0; 4]),
+        highlight: [hr, hg, hb, 0.55],
+        flags: [
+            u32::from(view.show_construction),
+            view.stripe.max(1),
+            u32::from(view.section.is_some()),
+            0,
+        ],
+        pick: view.picked.map_or([0; 4], |p| [p.part + 1, p.face, 0, 0]),
+    }
+}
+
+/// Draws every shown part's triangles, or only `only`'s.
+fn draw_mesh(pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene, only: Option<usize>) {
+    pass.set_vertex_buffer(0, scene.positions.slice(..));
+    pass.set_vertex_buffer(1, scene.normals.slice(..));
+    pass.set_vertex_buffer(2, scene.faces.slice(..));
+    pass.set_index_buffer(scene.indices.slice(..), wgpu::IndexFormat::Uint32);
+    for (i, p) in scene.parts.iter().enumerate() {
+        if only.is_some_and(|o| o != i) || !scene.visibility.get(i) || p.indices.is_empty() {
+            continue;
+        }
+        let i = i as u32;
+        pass.draw_indexed(p.indices.clone(), p.base_vertex, i..i + 1);
+    }
+}
+
+/// The id pass's target: single-sample ids and depth.
+pub struct IdTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl IdTarget {
+    #[must_use]
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
+        let tex = |label, format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let texture = tex("stepv ids", ID, attach | wgpu::TextureUsages::COPY_SRC);
+        let view = texture.create_view(&Default::default());
+        let depth = tex("stepv id depth", DEPTH, attach).create_view(&Default::default());
+        Self {
+            texture,
+            view,
+            depth,
+            width,
+            height,
+        }
+    }
+}
+
+/// A pick in flight.
+pub struct PendingPick {
+    buffer: wgpu::Buffer,
+    /// 0 pending, 1 mapped, 2 failed.
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl PendingPick {
+    /// `None` while the GPU is still busy; then what was hit, `Some(None)`
+    /// for the background (or a failed readback). Never blocks.
+    #[must_use]
+    pub fn poll(&self, device: &wgpu::Device) -> Option<Option<Pick>> {
+        let _ = device.poll(wgpu::PollType::Poll);
+        match self.state.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            1 => {
+                let data = self.buffer.slice(..).get_mapped_range().ok()?;
+                let word =
+                    |i: usize| u32::from_le_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
+                let (part, face) = (word(0), word(1));
+                Some((part != 0).then(|| Pick {
+                    part: part - 1,
+                    face,
+                }))
+            }
+            _ => Some(None),
+        }
+    }
+
+    /// Waits for the GPU: tests only, the viewer polls.
+    #[must_use]
+    pub fn wait(&self, device: &wgpu::Device) -> Option<Pick> {
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        self.poll(device).flatten()
+    }
+}
+
 /// A scene on the GPU.
 pub struct GpuScene {
     positions: wgpu::Buffer,
@@ -719,6 +1097,8 @@ pub struct GpuScene {
     has_lines: bool,
     pub parts: Vec<PartRange>,
     pub fits: [Option<Fit>; 2],
+    /// The model's box, for the section plane.
+    pub bounds: Option<([f32; 3], [f32; 3])>,
     /// The CPU mirror of the GPU bitset: hidden parts are not drawn at all.
     visibility: Visibility,
 }
@@ -818,6 +1198,7 @@ impl GpuScene {
             has_lines: !layout.line_kinds.is_empty(),
             parts: layout.parts,
             fits: layout.fits,
+            bounds: layout.bounds,
             visibility,
         }
     }
@@ -947,6 +1328,23 @@ impl Headless {
     #[must_use]
     pub fn upload(&self, scene: &Scene) -> GpuScene {
         GpuScene::upload(&self.device, &self.renderer, Layout::new(scene))
+    }
+
+    /// Picks pixel (`x`, `y`) of a `width` × `height` view, waiting for it.
+    #[must_use]
+    pub fn pick(
+        &self,
+        scene: &GpuScene,
+        view: &View,
+        width: u32,
+        height: u32,
+        x: u32,
+        y: u32,
+    ) -> Option<Pick> {
+        let target = IdTarget::new(&self.device, width, height);
+        self.renderer
+            .pick(&self.device, &self.queue, scene, &target, view, (x, y))
+            .wait(&self.device)
     }
 
     /// Renders `scene` at `width` × `height` and reads it back.
@@ -1082,12 +1480,7 @@ mod tests {
     }
 
     fn view(camera: Camera) -> View {
-        View {
-            camera,
-            show_construction: false,
-            clear: [0.0; 4],
-            stripe: 6,
-        }
+        View::new(camera)
     }
 
     fn gpu() -> Option<Headless> {
@@ -1410,6 +1803,159 @@ mod tests {
     #[test]
     fn no_adapter_is_selectable_from_none() {
         assert!(select(&[], None).is_err());
+    }
+
+    /// Where model point `p` lands in a `w` x `h` view of `gs` (pixels,
+    /// top-left origin), from the same matrix the shaders use.
+    fn pixel_of(gs: &GpuScene, cam: &Camera, w: u32, h: u32, p: [f32; 3]) -> (u32, u32) {
+        let m = clip_matrix(cam, &gs.fits[0].unwrap(), w, h);
+        let c = [0, 1].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
+        (
+            ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+            ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+        )
+    }
+
+    fn two_boxes() -> Scene {
+        scene(vec![
+            cuboid([0.0; 3], [1.0; 3], [None; 6]),
+            cuboid([3.0, 0.0, 0.0], [4.0, 1.0, 1.0], [None; 6]),
+        ])
+    }
+
+    const FRONT: Camera = Camera {
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        zoom: 1.0,
+        pan: [0.0, 0.0],
+    };
+
+    #[test]
+    fn a_pick_names_the_part_and_face_under_the_pixel() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&two_boxes());
+        let (w, h) = (160, 90);
+        // From the front (looking along +y) the visible sides are y = 0:
+        // face 2 of cuboid() (axis 1, low side).
+        for (part, x) in [(0, 0.5), (1, 3.5)] {
+            let (px, py) = pixel_of(&gs, &FRONT, w, h, [x, 0.0, 0.5]);
+            let hit = g.pick(&gs, &View::new(FRONT), w, h, px, py);
+            assert_eq!(hit, Some(Pick { part, face: 2 }), "at ({px}, {py})");
+        }
+        assert_eq!(
+            g.pick(&gs, &View::new(FRONT), w, h, 2, 2),
+            None,
+            "background"
+        );
+    }
+
+    #[test]
+    fn hidden_parts_cannot_be_picked() {
+        let Some(g) = gpu() else { return };
+        let mut gs = g.upload(&two_boxes());
+        let (w, h) = (160, 90);
+        let (px, py) = pixel_of(&gs, &FRONT, w, h, [3.5, 0.0, 0.5]);
+        let mut v = Visibility::all(2);
+        v.set(1, false);
+        gs.set_visibility(&g.queue, v);
+        assert_eq!(g.pick(&gs, &View::new(FRONT), w, h, px, py), None);
+    }
+
+    #[test]
+    fn the_section_plane_applies_to_picks() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&two_boxes());
+        let (w, h) = (160, 90);
+        let (px, py) = pixel_of(&gs, &FRONT, w, h, [0.5, 0.0, 0.5]);
+        // Cut away y > 0.5: the front of box 0 goes, and the pick goes
+        // through the cut to the inside of its back face (face 3, y = 1).
+        let view = View {
+            section: Some([0.0, 1.0, 0.0, 0.5]),
+            ..View::new(FRONT)
+        };
+        // dot(p, (0,1,0)) > 0.5 is cut: the front face (y = 0) stays, so
+        // flip the plane to cut y < 0.5 instead.
+        let flipped = View {
+            section: Some(
+                Section {
+                    axis: 1,
+                    offset: 0.5,
+                    flip: true,
+                }
+                .plane([0.0; 3], [1.0; 3]),
+            ),
+            ..View::new(FRONT)
+        };
+        assert_eq!(
+            g.pick(&gs, &view, w, h, px, py),
+            Some(Pick { part: 0, face: 2 })
+        );
+        assert_eq!(
+            g.pick(&gs, &flipped, w, h, px, py),
+            Some(Pick { part: 0, face: 3 })
+        );
+        // And the image agrees with the pick: through the cut, the (red)
+        // back face shows.
+        let red = Some(Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        });
+        let coloured = g.upload(&scene(vec![cuboid(
+            [0.0; 3],
+            [1.0; 3],
+            [None, None, None, red, None, None],
+        )]));
+        let (px, py) = pixel_of(&coloured, &FRONT, w, h, [0.5, 0.0, 0.5]);
+        let a = g.render(&coloured, &View::new(FRONT), w, h).pixel(px, py);
+        let b = g.render(&coloured, &flipped, w, h).pixel(px, py);
+        assert!(
+            a[0] < 200 && b[0] > 150 && b[1] < 60,
+            "front {a:?}, through the cut {b:?}"
+        );
+    }
+
+    #[test]
+    fn section_planes_span_the_box() {
+        let s = Section {
+            axis: 2,
+            offset: 0.25,
+            flip: false,
+        };
+        assert_eq!(s.plane([0.0; 3], [4.0, 4.0, 8.0]), [0.0, 0.0, 1.0, 2.0]);
+        let f = Section { flip: true, ..s };
+        // Kept: dot(p, (0,0,-1)) <= -2, i.e. z >= 2.
+        assert_eq!(f.plane([0.0; 3], [4.0, 4.0, 8.0]), [0.0, 0.0, -1.0, -2.0]);
+    }
+
+    #[test]
+    fn the_highlight_marks_only_the_picked_face() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&two_boxes());
+        let (w, h) = (160, 90);
+        let (ax, ay) = pixel_of(&gs, &FRONT, w, h, [0.5, 0.0, 0.5]);
+        let (bx, by) = pixel_of(&gs, &FRONT, w, h, [3.5, 0.0, 0.5]);
+        let plain = g.render(&gs, &View::new(FRONT), w, h);
+        let lit = g.render(
+            &gs,
+            &View {
+                picked: Some(Pick { part: 0, face: 2 }),
+                highlight: [1.0, 0.0, 0.0],
+                ..View::new(FRONT)
+            },
+            w,
+            h,
+        );
+        let (p, q) = (plain.pixel(ax, ay), lit.pixel(ax, ay));
+        assert!(
+            q[0] > p[0] + 40 && q[2] + 40 < p[2],
+            "not highlighted: {p:?} -> {q:?}"
+        );
+        assert_eq!(
+            plain.pixel(bx, by),
+            lit.pixel(bx, by),
+            "the other box changed"
+        );
     }
 
     #[test]
