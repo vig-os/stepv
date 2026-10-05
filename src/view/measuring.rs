@@ -209,7 +209,7 @@ impl ExactCut {
         if have
             || self.off.is_some()
             || self.asked.is_some_and(|(_, a)| a == p)
-            || self.refused.is_some()
+            || self.refused.as_ref().is_some_and(|(r, _)| *r == p)
         {
             return Due::Nothing;
         }
@@ -289,7 +289,10 @@ impl ExactCut {
 /// killed for its time or memory will be again.
 #[must_use]
 pub fn sticky(e: &Error) -> bool {
-    matches!(e, Error::Timeout | Error::MemoryCap | Error::Load(_))
+    matches!(
+        e,
+        Error::Timeout | Error::MemoryCap | Error::TooLong | Error::Load(_)
+    )
 }
 
 #[cfg(test)]
@@ -387,6 +390,29 @@ mod tests {
         x.due(Some(q), false, ms(900));
         assert_eq!(x.due(Some(q), false, ms(1200)), Due::Nothing);
         assert!(x.settled(Some(q), false));
+    }
+
+    #[test]
+    fn a_late_refusal_for_an_old_plane_does_not_block_the_new_one() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let (p, q) = ([0.0, 1.0, 0.0, 15.0], [0.0, 1.0, 0.0, 14.0]);
+        let mut x = ExactCut::default();
+        x.due(Some(p), false, ms(0));
+        assert_eq!(x.due(Some(p), false, ms(200)), Due::Ask(p));
+        x.sent(1, p);
+        // The slider moves on while p's query is out; then p is refused.
+        x.due(Some(q), false, ms(300));
+        let Taken::Section(plane, Err(e)) = x.take(1, Err(Error::Crashed("x".into()))) else {
+            panic!("the section's answer");
+        };
+        x.refuse(plane, e.to_string(), sticky(&e));
+        assert_eq!(
+            x.due(Some(q), false, ms(500)),
+            Due::Ask(q),
+            "q is still asked"
+        );
+        assert!(!x.settled(Some(q), false));
     }
 
     #[test]

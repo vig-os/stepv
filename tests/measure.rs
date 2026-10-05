@@ -421,7 +421,7 @@ fn a_degenerate_section_plane_is_refused() {
 }
 
 /// An answer line past `MAX_LINE` (a hostile file's section, say) is not
-/// read into memory whole: the kernel is dropped as crashed, and restarted.
+/// read into memory whole: the kernel is dropped, and restarted.
 #[test]
 fn an_endless_answer_line_is_cut_off() {
     let mut s =
@@ -430,7 +430,7 @@ fn an_endless_answer_line_is_cut_off() {
     let e = s
         .raw(&json!({"id": 1, "op": "test_long", "mb": mb}))
         .unwrap_err();
-    assert!(matches!(e, Error::Crashed(_)), "{e:?}");
+    assert_eq!(e, Error::TooLong);
     s.raw(&json!({"id": 2, "op": "test_long", "mb": 1}))
         .expect("a 1 MiB line is fine, from a new kernel");
     assert_eq!(s.starts, 2);

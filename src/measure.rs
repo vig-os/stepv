@@ -96,6 +96,9 @@ pub enum Error {
     MemoryCap,
     /// The kernel died or spoke nonsense: restarted on the next query.
     Crashed(String),
+    /// The answer was longer than [`MAX_LINE`]: killed; the next query
+    /// restarts it.
+    TooLong,
 }
 
 impl std::fmt::Display for Error {
@@ -109,15 +112,24 @@ impl std::fmt::Display for Error {
                 "the measurement used too much memory; the kernel was restarted"
             ),
             Self::Crashed(e) => write!(f, "the kernel crashed ({e}); it will be restarted"),
+            Self::TooLong => write!(
+                f,
+                "the kernel's answer was too long; the kernel was restarted"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-/// The longest answer line read (a section's caps are the big ones): past
-/// it, the kernel is taken to have gone wrong, as if it crashed.
-pub const MAX_LINE: u64 = 64 << 20;
+/// The longest answer line read (a section's caps are the big ones; 900
+/// parts' are 24 KiB): past it, the kernel is dropped ([`Error::TooLong`]).
+/// Parsed, a line takes several times its size.
+pub const MAX_LINE: u64 = 16 << 20;
+
+/// What the reader passes on for a line past [`MAX_LINE`]: no kernel's
+/// line, which is JSON, can be it.
+const TOO_LONG: &str = "\0too long";
 
 /// One running kernel.
 struct Process {
@@ -222,13 +234,18 @@ impl Server {
                     // An endless line must not take the caller's memory: no
                     // answer, then the reader ends, which reads as a crash.
                     Ok(_) if !buf.ends_with(b"\n") && buf.len() as u64 >= MAX_LINE => {
-                        let _ = tx.send(String::new());
+                        let _ = tx.send(TOO_LONG.to_owned());
                         break;
                     }
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
                         if tx.send(line).is_err() {
                             break;
+                        }
+                        // One big answer must not pin its buffer for the
+                        // kernel's life.
+                        if buf.capacity() > 1 << 20 {
+                            buf = Vec::new();
                         }
                     }
                 }
@@ -297,6 +314,10 @@ impl Server {
             return Err(Error::Crashed(format!("cannot write the query: {e}")));
         }
         let reply = match wait(p, self.limits) {
+            Ok(r) if r == TOO_LONG => {
+                self.process = None;
+                return Err(Error::TooLong);
+            }
             Ok(r) => r,
             Err(e) => {
                 // Killed or dead: drop it (Drop kills and reaps).

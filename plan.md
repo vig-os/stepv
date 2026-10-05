@@ -983,8 +983,9 @@ exactly, and the viewer draws one cap per part in that part's colour.
   - A refusal holds for its plane until the plane moves. A timeout, the memory cap, or caps larger
     than the GPU's buffers turn exact caps off for the session. Otherwise every stop of the slider
     would cost another kernel restart.
-  - The kernel is untrusted: the server reads at most `MAX_LINE` (64 MiB) per answer line, and
-    kills a kernel that writes more.
+  - The kernel is untrusted: the server reads at most `MAX_LINE` (16 MiB) per answer line. A
+    kernel that writes more is killed (`Error::TooLong`), and that also turns exact caps off. The
+    caps' total size is checked against the device before anything is built.
   - Each cap is hatched in its part's colour (fill ×0.6, hatch ×0.22).
   - Each cap is drawn `CAP_STEP` (2⁻¹⁸ of NDC depth) nearer the eye than the earlier caps whose
     boxes it overlaps, and no others. Ranks stop at 63, so the offset stays under 0.05% of the

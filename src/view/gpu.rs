@@ -1956,6 +1956,18 @@ impl GpuScene {
         plane: [f32; 4],
         caps: &[Cap],
     ) -> Result<(), String> {
+        // Sized before anything is built: the kernel is untrusted.
+        let (nv, ni) = caps.iter().fold((0u64, 0u64), |(v, i), c| {
+            (v + c.positions.len() as u64 / 3, i + c.indices.len() as u64)
+        });
+        let max = device.limits().max_buffer_size;
+        if nv.saturating_mul(std::mem::size_of::<CapVertex>() as u64) > max
+            || ni.saturating_mul(4) > max
+        {
+            return Err(format!(
+                "the section has {nv} vertices, more than the GPU's buffers hold"
+            ));
+        }
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut ranks = Ranks::default();
@@ -1988,16 +2000,6 @@ impl GpuScene {
                 rank,
             }));
             indices.extend(tris.into_iter().flatten().map(|&i| base + i));
-        }
-        let max = device.limits().max_buffer_size;
-        let bytes = |n: usize, each: usize| (n as u64).saturating_mul(each as u64);
-        if bytes(vertices.len(), std::mem::size_of::<CapVertex>()) > max
-            || bytes(indices.len(), 4) > max
-        {
-            return Err(format!(
-                "the section has {} vertices, more than the GPU's buffers hold",
-                vertices.len()
-            ));
         }
         // wgpu refuses empty buffers; nothing is drawn from these then.
         let init = |label, contents: &[u8], usage| {
