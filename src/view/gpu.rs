@@ -1126,12 +1126,7 @@ impl Renderer {
 
 /// The uniforms for drawing `scene` as `view` into a `w` x `h` target.
 fn uniforms(scene: &GpuScene, view: &View, w: u32, h: u32) -> Uniforms {
-    let fit = scene.fits[usize::from(view.show_construction)]
-        .or(scene.fits[1])
-        .unwrap_or(Fit {
-            mid: [0.0; 3],
-            radius: 1.0,
-        });
+    let fit = scene.fit(view.show_construction);
     let r = rotation(&view.camera);
     let rot = transpose([
         [r[0][0], r[0][1], r[0][2], 0.0],
@@ -1450,6 +1445,17 @@ impl GpuScene {
             bounds: layout.bounds,
             visibility,
         }
+    }
+
+    /// The sphere a view frames: without, or with, construction curves.
+    #[must_use]
+    pub fn fit(&self, show_construction: bool) -> Fit {
+        self.fits[usize::from(show_construction)]
+            .or(self.fits[1])
+            .unwrap_or(Fit {
+                mid: [0.0; 3],
+                radius: 1.0,
+            })
     }
 
     #[must_use]

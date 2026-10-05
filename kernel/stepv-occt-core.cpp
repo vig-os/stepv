@@ -75,6 +75,7 @@
 // src/occt.rs is the reader; keep the two in step.
 
 #include "json.h"
+#include "measure.h"
 #include "stepv_occt.h"
 #include "topology.h"
 
@@ -1077,3 +1078,144 @@ extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
 }
 
 extern "C" void stepv_occt_free(char* p) { std::free(p); }
+
+// ── --serve (#33) ───────────────────────────────────────────────────────────
+
+namespace {
+
+bool write_line(int fd, std::string line) {
+    line += '\n';
+    for (std::size_t at = 0; at < line.size();) {
+        const ssize_t n = write(fd, line.data() + at, line.size() - at);
+        if (n <= 0) return false;
+        at += static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+}  // namespace
+
+extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int in_fd,
+                                int out_fd) {
+    std::call_once(*new std::once_flag, [] {
+        Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+    });
+    const std::string sb = stepv::json_escape(sandbox ? sandbox : "");
+    Summary s;
+    // The model, as run() reads it, but not meshed: a query needs the exact
+    // shapes only. Placed prototypes, in the mesh's part order.
+    // (prototype shape, placement, the prototype label's entry): keyed by
+    // label as run() keys prototypes, not by TShape, which two labels can
+    // share with different locations or orientations (#33 review).
+    struct Placed {
+        TopoDS_Shape shape;
+        TopLoc_Location location;
+        std::string key;
+    };
+    std::vector<Placed> placed;
+    try {
+        char resolved[PATH_MAX];
+        if (!input_arg || !realpath(input_arg, resolved)) {
+            s.error = "cannot resolve input path";
+        } else {
+            XCAFDoc_ShapeTool::SetAutoNaming(false);
+            Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+            Handle(TDocStd_Document) doc;
+            app->NewDocument("BinXCAF", doc);
+            if (read_into(resolved, doc, s)) {
+                Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+                Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+                TDF_LabelSequence roots;
+                st->GetFreeShapes(roots);
+                std::vector<PartInstance> parts;
+                std::vector<stepv::TopoNode> tree;
+                for (const TDF_Label& root : roots)
+                    walk(st, ct, root, TopLoc_Location(), label_name(root), std::nullopt, parts,
+                         tree, -1, 0);
+                for (const auto& p : parts) {
+                    TCollection_AsciiString entry;
+                    TDF_Tool::Entry(p.prototype, entry);
+                    placed.push_back({st->GetShape(p.prototype), p.location, entry.ToCString()});
+                }
+                // As run() says it (#19): a multi-file assembly whose part
+                // files could not be read is not just "empty".
+                if (placed.empty())
+                    s.error = s.external_missing
+                                  ? "multi-file assembly: " + std::to_string(s.external_missing) +
+                                        " of " + std::to_string(s.external_files) +
+                                        " part files it references could not be read"
+                                  : "no geometry in file";
+            }
+        }
+    } catch (const Standard_Failure& e) {
+        s.error = std::string("OCCT: ") + e.GetMessageString();
+    } catch (const std::bad_alloc&) {
+        s.error = "out of memory";
+    } catch (const std::exception& e) {
+        s.error = e.what();
+    }
+    if (placed.empty()) {
+        write_line(out_fd, "{\"ready\":false,\"sandbox\":\"" + sb + "\",\"error\":\"" +
+                               stepv::json_escape(s.error.value_or("no geometry")) + "\"}");
+        return kExitFailed;
+    }
+    // A prototype's faces and edges, numbered as --topology numbers them,
+    // built on first use.
+    std::map<std::string, std::pair<std::vector<TopoDS_Shape>, TopTools_IndexedMapOfShape>> numbered;
+    const stepv::Resolve resolve = [&](long part, bool edge, long index) -> std::optional<TopoDS_Shape> {
+        if (part < 0 || static_cast<std::size_t>(part) >= placed.size()) return std::nullopt;
+        const Placed& p = placed[static_cast<std::size_t>(part)];
+        const TopoDS_Shape& proto = p.shape;
+        const TopLoc_Location& loc = p.location;
+        auto [it, fresh] = numbered.try_emplace(p.key);
+        if (fresh) {
+            for (TopExp_Explorer ex(proto, TopAbs_FACE); ex.More(); ex.Next())
+                it->second.first.push_back(ex.Current());
+            it->second.second = stepv::topology_edges(proto);
+        }
+        const auto& [faces, edges] = it->second;
+        if (edge) {
+            if (index < 0 || index >= edges.Extent()) return std::nullopt;
+            return edges(static_cast<int>(index) + 1).Moved(loc);
+        }
+        if (index < 0 || static_cast<std::size_t>(index) >= faces.size()) return std::nullopt;
+        return faces[static_cast<std::size_t>(index)].Moved(loc);
+    };
+    if (!write_line(out_fd, "{\"ready\":true,\"sandbox\":\"" + sb + "\",\"parts\":" +
+                                std::to_string(placed.size()) + "}"))
+        return kExitFailed;
+    // One query per line, until stdin closes.
+    std::string buf;
+    char chunk[4096];
+    // After refusing an over-long line: drop its rest, up to its newline,
+    // so it gets one answer, not two (#33 review).
+    bool discarding = false;
+    for (;;) {
+        const ssize_t n = read(in_fd, chunk, sizeof chunk);
+        if (n <= 0) break;
+        buf.append(chunk, static_cast<std::size_t>(n));
+        if (discarding) {
+            const std::size_t nl = buf.find('\n');
+            if (nl == std::string::npos) {
+                buf.clear();
+                continue;
+            }
+            buf.erase(0, nl + 1);
+            discarding = false;
+        }
+        for (std::size_t nl; (nl = buf.find('\n')) != std::string::npos;) {
+            const std::string line = buf.substr(0, nl);
+            buf.erase(0, nl + 1);
+            if (line.empty()) continue;
+            if (!write_line(out_fd, stepv::answer_query(line, resolve))) return kExitOk;
+        }
+        // A line longer than any query is not one: refuse it and move on.
+        if (buf.size() > (1 << 16)) {
+            buf.clear();
+            discarding = true;
+            if (!write_line(out_fd, "{\"id\":null,\"ok\":false,\"error\":\"line too long\"}"))
+                return kExitOk;
+        }
+    }
+    return kExitOk;
+}

@@ -52,7 +52,8 @@ OPTIONS:
 
 VIEWER:
     Drag to orbit, right- or shift-drag to pan, scroll to zoom; click a face
-    to inspect its exact surface (Esc clears it); R reset, F front, T top,
+    to inspect its exact surface (Esc clears it); M measures between two
+    clicks (distance, axis distance, angle); R reset, F front, T top,
     C construction curves, E edges, Q or Esc to quit. The Section panel cuts the
     model along X, Y or Z. Defaults to
     --quality preview and --timeout 120. Draws on the GPU (Metal, Vulkan
@@ -308,9 +309,12 @@ fn run(args: &Args) -> (u8, Value) {
                 })
                 .map(PathBuf::from),
             frames: args.frames,
+            input: Some(args.input.clone()),
+            limits: Some(args.limits),
             pick_at: std::env::var("STEPV_VIEW_PICK")
-                .ok()
-                .and_then(|s| view::parse_pick_at(&s)),
+                .map(|s| view::parse_pick_at(&s))
+                .unwrap_or_default(),
+            measure: std::env::var_os("STEPV_VIEW_MEASURE").is_some_and(|v| v == "1"),
         };
         return match view::run(scene, topology, &title, &opts) {
             Ok(ran) => {

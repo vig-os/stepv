@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod glb;
 pub mod header;
+pub mod measure;
 pub mod occt;
 pub mod render;
 pub mod topology;

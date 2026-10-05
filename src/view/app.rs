@@ -19,6 +19,7 @@ use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
 use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
+use super::measuring::{Measurement, Measurer};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, FrameStats, Options, Ran, ThemePref, theme};
@@ -137,7 +138,9 @@ struct Viewer {
     cut: bool,
     section: Section,
     /// `STEPV_VIEW_PICK`: a click to make once the first frame is drawn.
-    pick_at: Option<(f32, f32)>,
+    pick_at: std::collections::VecDeque<super::PickAt>,
+    /// STEPV_VIEW_MEASURE: report the measurement on stderr when it lands.
+    report_measure: bool,
     /// That click is in flight: report what it hits on stderr.
     report_pick: bool,
     /// Draw the B-rep edges (#31).
@@ -146,6 +149,15 @@ struct Viewer {
     bench: Option<(u32, Vec<f64>, std::time::Instant)>,
     /// What the bench measured, for `run` to report.
     measured: Arc<Mutex<Option<FrameStats>>>,
+    /// Measure mode (#33): two picks, the kernel's answer about them.
+    measuring: bool,
+    measurement: Measurement,
+    /// The server's worker, started on the first measurement.
+    measurer: Option<Measurer>,
+    next_query: u64,
+    /// The file and limits it is started with.
+    input: Option<PathBuf>,
+    limits: Option<crate::occt::Limits>,
     /// The model tree (#30).
     tree: Tree,
     /// The tree generation the GPU's visibility matches.
@@ -216,13 +228,20 @@ impl Viewer {
             picked: None,
             pending: None,
             ids: None,
-            pick_at: opts.pick_at,
+            pick_at: opts.pick_at.iter().copied().collect(),
+            report_measure: opts.measure,
             report_pick: false,
             show_edges: true,
             bench: opts
                 .frames
                 .map(|n| (n, Vec::with_capacity(n as usize), std::time::Instant::now())),
             measured,
+            measuring: opts.measure,
+            measurement: Measurement::default(),
+            measurer: None,
+            next_query: 1,
+            input: opts.input.clone(),
+            limits: opts.limits,
             tree,
             uploaded: 0,
             reveal: false,
@@ -257,8 +276,13 @@ impl Viewer {
         if pressed(Key::E) {
             self.show_edges = !self.show_edges;
         }
+        if pressed(Key::M) {
+            self.toggle_measuring();
+        }
         // Esc clears a selection (or one being picked) first, then quits.
-        if pressed(Key::Escape) && (self.picked.is_some() || self.pending.is_some()) {
+        if pressed(Key::Escape) && self.measurement.a.is_some() {
+            self.measurement.clear();
+        } else if pressed(Key::Escape) && (self.picked.is_some() || self.pending.is_some()) {
             self.picked = None;
             self.pending = None;
         } else if pressed(Key::Q) || pressed(Key::Escape) {
@@ -285,7 +309,8 @@ impl Viewer {
             }
             ui.separator();
             let on = self.controls.show_construction;
-            if widgets::icon_button(ui, icon::RULER, None, "Construction curves (C)", on).clicked()
+            if widgets::icon_button(ui, icon::COMPASS_TOOL, None, "Construction curves (C)", on)
+                .clicked()
             {
                 self.apply(Input::ToggleConstruction, short);
             }
@@ -293,6 +318,12 @@ impl Viewer {
             if widgets::icon_button(ui, icon::LINE_SEGMENTS, None, "B-rep edges (E)", on).clicked()
             {
                 self.show_edges = !on;
+            }
+            ui.separator();
+            let on = self.measuring;
+            let tip = "Measure (M): click two faces or edges";
+            if widgets::icon_button(ui, icon::RULER, Some("Measure"), tip, on).clicked() {
+                self.toggle_measuring();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let dark = ui.visuals().dark_mode;
@@ -358,6 +389,11 @@ impl Viewer {
             );
         }
         ui.separator();
+        // Measuring, the measurement first: it is what the clicks are for.
+        if self.measuring {
+            self.measure_panel(ui);
+            ui.separator();
+        }
         self.selection(ui);
         ui.separator();
         self.section_controls(ui);
@@ -439,6 +475,154 @@ impl Viewer {
                         .color(t.muted_foreground),
                 );
             }
+        }
+    }
+
+    fn toggle_measuring(&mut self) {
+        self.measuring = !self.measuring;
+        self.measurement.clear();
+    }
+
+    /// An entity's name for the measure panel: "pin #1, Cylinder face #0".
+    fn entity_label(&self, p: Pick) -> String {
+        let topo = self.topology.as_ref();
+        let part = topo
+            .and_then(|t| t.parts.get(p.part as usize).map(|x| x.name.clone()))
+            .unwrap_or_default();
+        let proto = topo.and_then(|t| t.prototypes.get(t.parts.get(p.part as usize)?.prototype));
+        let what = if let Some(e) = p.edge_id() {
+            let kind = proto
+                .and_then(|pr| pr.edges.get(e as usize))
+                .map_or("", |c| super::inspect::curve_name(&c.curve));
+            format!("{kind} edge #{e}")
+        } else {
+            let kind = proto
+                .and_then(|pr| pr.faces.get(p.face as usize))
+                .map_or("", |f| super::inspect::surface_name(&f.surface));
+            format!("{kind} face #{}", p.face)
+        };
+        format!("{part} #{}, {what}", p.part)
+    }
+
+    /// The measure panel: the two entities and what lies between them.
+    fn measure_panel(&self, ui: &mut egui::Ui) {
+        widgets::section_header(ui, "Measure");
+        let t = widgets::tokens(ui);
+        let muted = |ui: &mut egui::Ui, s: &str| {
+            ui.label(egui::RichText::new(s).color(t.muted_foreground));
+        };
+        let m = &self.measurement;
+        match (m.a, m.b) {
+            (None, _) => return muted(ui, "Click a face or an edge"),
+            (Some(a), None) => {
+                widgets::property_row(ui, "From", &self.entity_label(a));
+                return muted(ui, "Click a second one");
+            }
+            (Some(a), Some(b)) => {
+                widgets::property_row(ui, "From", &self.entity_label(a));
+                widgets::property_row(ui, "To", &self.entity_label(b));
+            }
+        }
+        let n = super::inspect::num;
+        match &m.distance {
+            None => muted(ui, "Measuring…"),
+            Some(Err(e)) => {
+                ui.label(egui::RichText::new(e).color(t.destructive));
+            }
+            Some(Ok(d)) => {
+                if let Some(v) = d.distance {
+                    widgets::property_row(ui, "Distance", &format!("{} mm", n(v)));
+                }
+                if let Some(v) = d.axis_distance {
+                    widgets::property_row(ui, "Axis distance", &format!("{} mm", n(v)));
+                }
+            }
+        }
+        if let Some(Ok(a)) = &m.angle
+            && let Some(v) = a.angle_deg
+        {
+            widgets::property_row(ui, "Angle", &format!("{}°", n(v)));
+        }
+    }
+
+    /// Sends a measurement's queries, starting the server on first use.
+    fn measure_pick(&mut self, hit: Pick) {
+        let queries = self.measurement.pick(hit, &mut self.next_query);
+        if queries.is_empty() {
+            return;
+        }
+        if self.measurer.is_none() {
+            let (Some(input), Some(limits)) = (&self.input, self.limits) else {
+                self.measurement.distance = Some(Err("no file to measure".into()));
+                self.measurement.waiting = None;
+                return;
+            };
+            self.measurer = Some(Measurer::spawn(&crate::occt::kernel_path(), input, limits));
+        }
+        let m = self.measurer.as_ref().expect("started above");
+        for (id, q) in queries {
+            m.send(id, q);
+        }
+    }
+
+    /// Collects measurement answers; asks for frames while one is out.
+    fn poll_measurer(&mut self, ctx: &egui::Context) {
+        if let Some(m) = &self.measurer {
+            while let Some((id, r)) = m.try_recv() {
+                let complete = self.measurement.answer(id, r);
+                if self.report_measure && complete {
+                    let show = |r: &Option<Result<crate::measure::Answer, String>>| match r {
+                        Some(Ok(a)) => {
+                            format!("{:?} {:?} {:?}", a.distance, a.axis_distance, a.angle_deg)
+                        }
+                        Some(Err(e)) => format!("error: {e}"),
+                        None => "none".into(),
+                    };
+                    eprintln!(
+                        "stepv: STEPV_VIEW_MEASURE distance {} angle {}",
+                        show(&self.measurement.distance),
+                        show(&self.measurement.angle)
+                    );
+                }
+            }
+        }
+        if self.measurement.waiting.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    }
+
+    /// Where model point `p` is in the viewport `rect`, as last rendered.
+    fn project(&self, rect: egui::Rect, p: [f64; 3]) -> egui::Pos2 {
+        let Some(key) = self.last else {
+            return rect.center();
+        };
+        let fit = self.scene.fit(key.show_construction);
+        let m = super::gpu::clip_matrix(&key.camera, &fit, key.size[0], key.size[1]);
+        let v = p.map(|c| c as f32);
+        let c = [0, 1].map(|r| m[0][r] * v[0] + m[1][r] * v[1] + m[2][r] * v[2] + m[3][r]);
+        egui::pos2(
+            rect.min.x + (c[0] + 1.0) / 2.0 * rect.width(),
+            rect.min.y + (1.0 - c[1]) / 2.0 * rect.height(),
+        )
+    }
+
+    /// The witness segment of a measured distance, over the viewport.
+    fn draw_witness(&self, ui: &egui::Ui, rect: egui::Rect) {
+        let (Some(key), Some(Ok(d))) = (self.last, &self.measurement.distance) else {
+            return;
+        };
+        let Some([p, q]) = d.points else { return };
+        let t = theme::tokens(key.dark);
+        let (a, b) = (self.project(rect, p), self.project(rect, q));
+        let painter = ui.painter_at(rect);
+        painter.line_segment([a, b], egui::Stroke::new(2.0, t.accent));
+        for c in [a, b] {
+            painter.circle(
+                c,
+                4.0,
+                t.accent,
+                egui::Stroke::new(1.5, t.accent_foreground),
+            );
         }
     }
 
@@ -576,6 +760,11 @@ impl Viewer {
                 self.picked = hit;
                 self.pending = None;
                 self.reveal = hit.is_some();
+                if self.measuring
+                    && let Some(p) = hit
+                {
+                    self.measure_pick(p);
+                }
                 // The tree drew this frame before the pick landed: one more
                 // frame reveals it and draws the highlight, without waiting
                 // for the pointer to move.
@@ -700,9 +889,17 @@ impl Viewer {
         {
             self.start_pick(rs, rect, at);
         }
-        if let Some((x, y)) = self.pick_at.take() {
+        // The next scripted click once the last has landed (and been drawn).
+        if self.pending.is_none()
+            && self.last.is_some_and(|k| k.picked == self.picked)
+            && let Some(at) = self.pick_at.pop_front()
+        {
             self.report_pick = true;
-            self.start_pick(rs, rect, rect.min + egui::vec2(x, y) * rect.size());
+            let at = match at {
+                super::PickAt::Viewport(x, y) => rect.min + egui::vec2(x, y) * rect.size(),
+                super::PickAt::Model(p) => self.project(rect, p.map(f64::from)),
+            };
+            self.start_pick(rs, rect, at);
             ui.ctx().request_repaint();
         }
         self.finish_pick(ui.ctx(), rs);
@@ -713,6 +910,10 @@ impl Viewer {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+        }
+        self.poll_measurer(ui.ctx());
+        if self.measuring {
+            self.draw_witness(ui, rect);
         }
     }
 
@@ -765,7 +966,8 @@ impl Viewer {
         }
         // A few frames first: fonts, the theme and the first render land,
         // and a STEPV_VIEW_PICK click with its highlight.
-        let settled = self.pick_at.is_none()
+        let settled = self.pick_at.is_empty()
+            && self.measurement.waiting.is_none()
             && self.pending.is_none()
             && self.last.is_some_and(|k| k.picked == self.picked);
         if self.requested.is_none() && self.frames >= 3 && settled {
@@ -819,7 +1021,7 @@ impl eframe::App for Viewer {
         egui::Panel::bottom("status").frame(bar(t.panel)).show(root, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · Esc clears · R reset · F front · T top · C construction · E edges",
+                    "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · M measure · Esc clears · R reset · F front · T top · C construction · E edges",
                 )
                 .size(theme::size::SMALL)
                 .color(t.muted_foreground),

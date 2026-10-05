@@ -120,7 +120,7 @@ pub fn face(topo: &Topology, part: usize, face: usize) -> Option<Vec<Row>> {
             radius,
         } => {
             rows.push(row("Radius", len(radius)));
-            rows.push(row("Diameter", format!("⌀ {}", len(2.0 * radius))));
+            rows.push(row("Diameter", format!("Ø {}", len(2.0 * radius))));
             rows.push(row("Axis", dir(at.dir(axis))));
             rows.push(row("Through", point(at.point(origin))));
         }
@@ -195,7 +195,7 @@ pub fn edge(topo: &Topology, part: usize, edge: usize) -> Option<Vec<Row>> {
             radius,
         } => {
             rows.push(row("Radius", len(radius)));
-            rows.push(row("Diameter", format!("⌀ {}", len(2.0 * radius))));
+            rows.push(row("Diameter", format!("Ø {}", len(2.0 * radius))));
             rows.push(row("Centre", point(at.point(center))));
             rows.push(row("Normal", dir(at.dir(normal))));
         }
@@ -318,7 +318,7 @@ mod tests {
         let get = |k| rows.iter().find(|r| r.key == k).unwrap().value.clone();
         assert_eq!(get("Surface"), "Cylinder");
         assert_eq!(get("Radius"), "4 mm");
-        assert_eq!(get("Diameter"), "⌀ 8 mm");
+        assert_eq!(get("Diameter"), "Ø 8 mm");
         assert_eq!(get("Axis"), "+z");
     }
 

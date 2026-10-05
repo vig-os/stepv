@@ -46,6 +46,8 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
     cargo build -q --release --bin stepv
     cargo test -q --release --lib view::
     cargo test -q --release --test view
+    # The measurement server (#33) under Landlock + seccomp.
+    cargo test -q --release --test measure
     xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-viewer.sh /build/target/release/stepv \
       "$([ -d /shots ] && echo /shots/linux)"
     scripts/check-size.sh /build/target/release/stepv 24

@@ -878,6 +878,38 @@ and #34 (capping, fat lines).
   `bin/`, so the kernel is still found at `../libexec`. CI prints the closure size and holds it to
   1.5 GiB.
 
+### Measurements (#33, 2026-10-05)
+
+- **`stepv-occt --serve`** reads the file once, without meshing, and answers newline-JSON on
+  stdin/stdout. The protocol is in `kernel/measure.h`:
+  - `distance`: `BRepExtrema_DistShapeShape`'s value and witness points, plus `axis_distance`
+    when both entities have an axis line;
+  - `angle`: between outward plane normals (0–180°), a line and a plane (0–90°), or two lines
+    (acute);
+  - `point`: the nearest point on an entity, and a face's normal there.
+- **Numbering:** entities are (part, face) or (part, edge), numbered as `--topology` numbers them.
+  Faces are in `TopExp_Explorer` order, and edges come from `topology_edges`. The planar normal
+  is the shared `outward_normal`, so the inspector and the measurements agree on "outward".
+- **Sandbox:** the server runs in the run's sandbox, with nothing writable: the same read root,
+  with answers going to the stdout it was given. The test checks it reports the full sandbox.
+- **`measure::Server`** (Rust) keeps one kernel per file and holds every query, and the initial
+  load, to the run's `Limits`: the wall clock, and the footprint polled every 5 ms.
+  - Past either, or when the kernel dies or speaks nonsense, it is killed. The query reports
+    `Timeout`, `MemoryCap` or `Crashed`, and the next query starts a new kernel.
+  - A refusal ("no such entity") keeps the kernel.
+  - Tested against the real kernel: a SIGKILL, and a hung query (`test_sleep`, which only runs
+    with `STEPV_OCCT_TEST_HOOKS`).
+- **The viewer:** a worker thread owns the server, so neither a query nor the kernel's first load
+  blocks a frame.
+  - Measure mode (M) takes two picks, faces or edges, asks for distance and angle, and draws the
+    witness segment over the view.
+  - `STEPV_VIEW_PICK` now takes several clicks, and model points (`@x,y,z`) projected through the
+    live camera. With `STEPV_VIEW_MEASURE`, that drives the window test.
+- **Acceptance**, against the real kernel (`tests/measure.rs`):
+  - the pins' cylinders are 28 mm apart axis to axis, and 24 mm surface to surface;
+  - two adjacent faces of the box meet at 90°, and opposite ones at 180°;
+  - `test-viewer.sh` gets 28 mm through two clicks in a real window.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -891,7 +923,7 @@ Agent work, in order:
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
    #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges (done: "Edges and the overlay" above) →
-   #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements → #34 capping.
+   #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements (done: "Measurements" above) → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
 toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.

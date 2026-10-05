@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Measurements** ([#33](https://github.com/vig-os/stepv/issues/33)): in `stepv view`, M (or
+  Measure) and two clicks on faces or edges give the distance between them, the distance between
+  their axes (cylinders, cones, lines, circles), and their angle, with the witness points drawn
+  - Measured on the exact B-rep by a long-lived kernel, `stepv-occt --serve`
+  - The server is sandboxed as a run is, and held to the run's time and memory limits per query.
+    A hang, a balloon or a crash is killed, restarted and reported, never taking the viewer down
 - **Viewer CI and packaging** ([#32](https://github.com/vig-os/stepv/issues/32))
   - `stepv view --frames N`: orbit for N frames, exit, and report the frame intervals in the JSON
     line
