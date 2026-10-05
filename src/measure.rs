@@ -96,8 +96,9 @@ pub enum Error {
     MemoryCap,
     /// The kernel died or spoke nonsense: restarted on the next query.
     Crashed(String),
-    /// The answer was longer than [`MAX_LINE`]: killed; the next query
-    /// restarts it.
+    /// An answer (or the ready line) was longer than [`MAX_LINE`]:
+    /// killed; the next query restarts it. The viewer stops asking for
+    /// exact caps after one.
     TooLong,
 }
 
@@ -114,7 +115,7 @@ impl std::fmt::Display for Error {
             Self::Crashed(e) => write!(f, "the kernel crashed ({e}); it will be restarted"),
             Self::TooLong => write!(
                 f,
-                "the kernel's answer was too long; the kernel was restarted"
+                "the kernel's answer was too long; the kernel was stopped"
             ),
         }
     }
@@ -127,15 +128,18 @@ impl std::error::Error for Error {}
 /// Parsed, a line takes several times its size.
 pub const MAX_LINE: u64 = 16 << 20;
 
-/// What the reader passes on for a line past [`MAX_LINE`]: no kernel's
-/// line, which is JSON, can be it.
-const TOO_LONG: &str = "\0too long";
+/// What the reader thread passes on.
+enum Line {
+    Text(String),
+    /// A line past [`MAX_LINE`]: the reader stopped there.
+    TooLong,
+}
 
 /// One running kernel.
 struct Process {
     child: Child,
     stdin: ChildStdin,
-    lines: Receiver<String>,
+    lines: Receiver<Line>,
     /// The sandbox it reported.
     sandbox: String,
 }
@@ -234,12 +238,12 @@ impl Server {
                     // An endless line must not take the caller's memory: no
                     // answer, then the reader ends, which reads as a crash.
                     Ok(_) if !buf.ends_with(b"\n") && buf.len() as u64 >= MAX_LINE => {
-                        let _ = tx.send(TOO_LONG.to_owned());
+                        let _ = tx.send(Line::TooLong);
                         break;
                     }
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
-                        if tx.send(line).is_err() {
+                        if tx.send(Line::Text(line)).is_err() {
                             break;
                         }
                         // One big answer must not pin its buffer for the
@@ -314,10 +318,6 @@ impl Server {
             return Err(Error::Crashed(format!("cannot write the query: {e}")));
         }
         let reply = match wait(p, self.limits) {
-            Ok(r) if r == TOO_LONG => {
-                self.process = None;
-                return Err(Error::TooLong);
-            }
             Ok(r) => r,
             Err(e) => {
                 // Killed or dead: drop it (Drop kills and reaps).
@@ -360,7 +360,12 @@ fn wait(p: &mut Process, limits: Limits) -> Result<String, Error> {
     let start = Instant::now();
     loop {
         match p.lines.recv_timeout(Duration::from_millis(5)) {
-            Ok(line) => return Ok(line),
+            Ok(Line::Text(line)) => return Ok(line),
+            // Ready line or answer alike: killed, as for a time limit.
+            Ok(Line::TooLong) => {
+                let _ = p.child.kill();
+                return Err(Error::TooLong);
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 // The output closed; the process may live on (blocked on
                 // stdin): kill it before reaping, or this waits forever.
