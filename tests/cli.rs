@@ -612,6 +612,8 @@ fn a_failed_topology_keeps_the_png() {
     }
     let t = Scratch::new("topology-fails-png");
     let (png, topo) = (t.path("a.png"), t.path("a.json"));
+    // A topology from an earlier run must not pass for this one's.
+    std::fs::write(&topo, b"{}").unwrap();
     let (code, j, o) = stepv_topology_fails(
         &[
             s(&data("assembly.step")),
@@ -632,7 +634,7 @@ fn a_failed_topology_keeps_the_png() {
     let err = j["topology_error"].as_str().unwrap_or_default();
     assert!(err.contains("test hook"), "{j}");
     assert!(j["topology"].is_null(), "{j}");
-    assert!(!topo.exists(), "no topology file, not even an empty one");
+    assert!(!topo.exists(), "no topology file, not even the old one");
 }
 
 #[test]
@@ -652,6 +654,33 @@ fn a_failed_topology_alone_fails() {
             .unwrap_or_default()
             .contains("test hook"),
         "{j}"
+    );
+    assert!(!topo.exists());
+}
+
+/// The kernel itself, when the topology cannot be written (#38): the mesh
+/// is, and the run succeeds with `topology_error` set.
+#[test]
+fn an_unwritable_topology_keeps_the_mesh() {
+    if !kernel_available() {
+        return;
+    }
+    let t = Scratch::new("topology-unwritable");
+    let mesh = t.path("a.msh");
+    let topo = t.path("missing/a.json");
+    let out = Command::new(stepv::occt::kernel_path())
+        .arg(data("assembly.step"))
+        .args(["--mesh", s(&mesh), "--topology", s(&topo)])
+        .output()
+        .unwrap();
+    let j: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    assert_eq!(out.status.code(), Some(0), "{j}");
+    assert_eq!(j["ok"], true, "{j}");
+    let err = j["topology_error"].as_str().unwrap_or_default();
+    assert!(err.contains("cannot open topology output"), "{j}");
+    assert!(
+        std::fs::metadata(&mesh).unwrap().len() > 0,
+        "the mesh is written"
     );
     assert!(!topo.exists());
 }

@@ -239,6 +239,7 @@ case " \$* " in *" --serve "*) ;; *) echo run >>"$tmp/kernel-runs" ;; esac
 exec "$kernel" "\$@"
 SH
 chmod +x "$tmp/count-kernel"
+: >"$tmp/kernel-runs"
 out=$(STEPV_OCCT="$tmp/count-kernel" STEPV_OCCT_TEST_TOPOLOGY_FAIL=1 \
   STEPV_VIEW_SCREENSHOT="$tmp/no-topology.png" "$stepv" view "$input" 2>"$tmp/err") || true
 read -r status backend error <<<"$(report <<<"$out")"

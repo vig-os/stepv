@@ -689,8 +689,8 @@ exception in one prototype, an unwritable file), the kernel reports `topology_er
 it wrote, and the run still succeeds with its mesh. `stepv --png o.png --topology t.json` writes
 the PNG and reports `topology_error` instead of `topology`; `--topology` alone fails. `stepv view`
 opens without the inspector after one kernel run. The stage shares the run's `--timeout` and
-memory cap: they protect the machine, and a kill cannot keep half a run. A file that fits its
-limits only without the topology fails with it.
+memory cap, and running out of memory stays fatal: the limits protect the machine, and a kill
+cannot keep half a run. A file that fits its limits only without the topology fails with it.
 
 Not in v1: edge polylines, which a viewer needs in order to pick edges on screen. They belong
 with the mesh (a STEPVMSH v4) once the viewer exists. Point-to-point distances between shapes

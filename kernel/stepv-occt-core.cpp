@@ -1052,25 +1052,20 @@ int run(const std::string& input_arg, const std::string& mesh_out,
             if (fresh) shapes.push_back(prototypes.at(entry(p.prototype)));
             placed.push_back({p.name, it->second, p.location.Transformation()});
         }
-        // A failure here costs the topology alone: the mesh is written.
-        // What was written of the topology goes, so no reader takes a
-        // partial file for one. Inside the CLI's sandbox the file cannot be
-        // removed, only emptied; its parent removes it.
+        // A failure here costs the topology alone: the mesh is written, and
+        // write_topology leaves no partial file. Out of memory is the run's
+        // memory cap, as anywhere else: it stays fatal.
         std::string err;
         try {
             err = stepv::write_topology(topology_out, tree, placed, shapes);
+        } catch (const std::bad_alloc&) {
+            throw;
         } catch (const Standard_Failure& e) {
             err = std::string("OCCT: ") + e.GetMessageString();
-        } catch (const std::bad_alloc&) {
-            err = "out of memory";
         } catch (const std::exception& e) {
             err = e.what();
         }
-        if (!err.empty()) {
-            s.topology_error = err;
-            std::ofstream(topology_out, std::ios::binary | std::ios::trunc).close();
-            std::remove(topology_out.c_str());
-        }
+        if (!err.empty()) s.topology_error = err;
         s.t_topology_ms = ms_since(t0);
     }
 

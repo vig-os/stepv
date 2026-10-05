@@ -362,6 +362,10 @@ fn run(args: &Args) -> (u8, Value) {
             return fail(report, EXIT_FAILED, "error", &format!("topology: {e}"));
         }
         report["topology_error"] = json!(e);
+        // An older topology at the destination would pass for this model's.
+        if let Some(dest) = &args.topology {
+            let _ = std::fs::remove_file(dest);
+        }
     }
     if topology_error.is_none()
         && let (Some(bytes), Some(dest)) = (topology, &args.topology)
