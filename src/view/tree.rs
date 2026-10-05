@@ -10,6 +10,9 @@
 //! - an assembly's checkbox state comes from a shown-leaf count per row,
 //!   recomputed only when visibility changes;
 //! - `ScrollArea::show_rows` lays out only the visible slice.
+//!
+//! Parts no leaf names (a topology that omits some) are hidden by Isolate
+//! like any other part, and come back with Show all.
 
 use crate::topology::{Node, Topology};
 
@@ -55,6 +58,9 @@ pub struct Tree {
     stale: bool,
     /// Bumped on every visibility change: the viewer re-uploads on a new one.
     pub generation: u64,
+    /// Per part: its leaf's row, `u32::MAX` for none. Built once: the
+    /// selection is looked up every frame.
+    row_of: Vec<u32>,
 }
 
 impl Tree {
@@ -117,6 +123,14 @@ impl Tree {
         // starts short.
         let open = rows.iter().map(|r| r.depth == 0).collect();
         let lower = rows.iter().map(|r| r.name.to_lowercase()).collect();
+        let mut row_of = vec![u32::MAX; parts];
+        for (i, r) in rows.iter().enumerate() {
+            if let Some(slot) = r.part.and_then(|p| row_of.get_mut(p as usize))
+                && *slot == u32::MAX
+            {
+                *slot = i as u32;
+            }
+        }
         let mut t = Self {
             rows,
             open,
@@ -129,6 +143,7 @@ impl Tree {
             display: Vec::new(),
             stale: true,
             generation: 0,
+            row_of,
         };
         t.recount();
         t.refresh();
@@ -225,10 +240,17 @@ impl Tree {
     /// The row of `part`'s leaf.
     #[must_use]
     pub fn row_of(&self, part: u32) -> Option<u32> {
-        self.rows
-            .iter()
-            .position(|r| r.part == Some(part))
-            .map(|i| i as u32)
+        self.row_of
+            .get(part as usize)
+            .copied()
+            .filter(|&r| r != u32::MAX)
+    }
+
+    /// A checkbox click on `row`: a fully shown node hides, a hidden or
+    /// mixed one shows everything below it.
+    pub fn toggle(&mut self, row: u32) {
+        let show = self.shown(row) != Shown::All;
+        self.set_shown(row, show);
     }
 
     /// Opens every ancestor of `row`, so it is displayed.
@@ -302,19 +324,24 @@ impl Tree {
 }
 
 /// What the panel did this frame.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Response {
     /// A part was clicked: select it.
     pub selected: Option<u32>,
     /// Rows laid out: only the visible slice, however big the tree.
     pub laid_out: usize,
+    /// The selected part's row was among them.
+    pub selected_laid_out: bool,
+    /// The tallest row laid out, in points: virtualisation places row `k`
+    /// at `k` row steps, so a taller row would drift the list.
+    pub tallest: f32,
 }
 
 #[cfg(feature = "viewer")]
 impl Tree {
     /// Draws the tree into `ui`: a search field, Show all and Isolate, and
     /// the rows. `selected` is the selected part, highlighted;
-    /// `scroll_to` brings its row into view once.
+    /// `scroll_to` opens its ancestors and brings its row into view.
     pub fn panel(
         &mut self,
         ui: &mut eframe::egui::Ui,
@@ -335,11 +362,11 @@ impl Tree {
         );
         self.set_filter(&query);
         self.query = query;
+        let sel_row = selected.and_then(|p| self.row_of(p));
         ui.horizontal(|ui| {
             if ui.button("Show all").clicked() {
                 self.show_all();
             }
-            let sel_row = selected.and_then(|p| self.row_of(p));
             if ui
                 .add_enabled(sel_row.is_some(), egui::Button::new("Isolate"))
                 .on_hover_text("Show only the selected part")
@@ -350,28 +377,34 @@ impl Tree {
             }
         });
         ui.add_space(theme::space(1));
-        let sel_row = selected.and_then(|p| self.row_of(p));
         if scroll_to && let Some(r) = sel_row {
             self.reveal(r);
         }
         self.refresh();
 
         let row_h = ui.spacing().interact_size.y;
+        // show_rows places row k at k * (row height + item spacing).
+        let step = row_h + ui.spacing().item_spacing.y;
         let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if scroll_to
             && let Some(r) = sel_row
             && let Some(pos) = self.display.iter().position(|&d| d == r)
         {
-            // Centre-ish: two rows above it stay visible.
-            area = area.vertical_scroll_offset((pos.saturating_sub(2)) as f32 * row_h);
+            // Two rows of context above it.
+            area = area.vertical_scroll_offset(pos.saturating_sub(2) as f32 * step);
         }
-        let display = std::mem::take(&mut self.display);
-        area.show_rows(ui, row_h, display.len(), |ui, range| {
-            for &i in &display[range] {
+        let total = self.display.len();
+        area.show_rows(ui, row_h, total, |ui, range| {
+            // The visible slice, copied: a click below may change the tree
+            // (the list is rebuilt next frame, when `stale` says so).
+            let visible: Vec<u32> = self.display[range].to_vec();
+            for i in visible {
                 out.laid_out += 1;
                 let row = self.rows[i as usize].clone();
-                ui.horizontal(|ui| {
-                    ui.set_min_height(row_h);
+                let is_sel = row.part.is_some() && row.part == selected;
+                out.selected_laid_out |= is_sel;
+                let line = ui.horizontal(|ui| {
+                    ui.set_height(row_h);
                     ui.add_space(f32::from(row.depth) * theme::space(4));
                     if row.part.is_none() && self.filter.is_empty() {
                         let caret = if self.open[i as usize] {
@@ -399,14 +432,15 @@ impl Tree {
                         .on_hover_text("Show or hide")
                         .clicked()
                     {
-                        self.set_shown(i, state != Shown::All);
+                        self.toggle(i);
                     }
-                    let is_sel = row.part.is_some() && row.part == selected;
                     let label = RichText::new(&row.name).color(if row.part.is_some() {
                         t.foreground
                     } else {
                         t.muted_foreground
                     });
+                    // A hidden part can be selected on purpose (it gives
+                    // Isolate a target); its highlight shows once it is.
                     let resp = ui.selectable_label(is_sel, label);
                     if resp.clicked()
                         && let Some(p) = row.part
@@ -428,11 +462,9 @@ impl Tree {
                         }
                     });
                 });
+                out.tallest = out.tallest.max(line.response.rect.height());
             }
         });
-        if self.display.is_empty() {
-            self.display = display;
-        }
         out
     }
 }
@@ -550,6 +582,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_mixed_checkbox_shows_everything_below() {
+        let mut t = synthetic(1, 2);
+        t.set_shown(2, false); // one of assembly 0's two parts
+        assert_eq!(t.shown(1), Shown::Some);
+        t.toggle(1);
+        assert_eq!(t.shown(1), Shown::All, "mixed -> all shown");
+        t.toggle(1);
+        assert_eq!(t.shown(1), Shown::None, "all -> hidden");
+    }
+
+    #[test]
     fn a_flat_tree_names_unnamed_parts() {
         let t = Tree::flat(&[Some("plate".into()), None]);
         assert_eq!(names(&t), ["plate", "part 1"]);
@@ -572,6 +615,16 @@ pub(crate) mod tests {
     /// frame does).
     #[cfg(feature = "viewer")]
     fn frame(t: &mut Tree, ctx: &eframe::egui::Context) -> (Response, std::time::Duration) {
+        frame_with(t, ctx, Some(7), false)
+    }
+
+    #[cfg(feature = "viewer")]
+    fn frame_with(
+        t: &mut Tree,
+        ctx: &eframe::egui::Context,
+        selected: Option<u32>,
+        scroll_to: bool,
+    ) -> (Response, std::time::Duration) {
         use eframe::egui;
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -583,7 +636,7 @@ pub(crate) mod tests {
         let mut r = Response::default();
         let t0 = std::time::Instant::now();
         let mut out = ctx.run_ui(input, |ui| {
-            r = t.panel(ui, Some(7), false);
+            r = t.panel(ui, selected, scroll_to);
         });
         let _ = ctx.tessellate(std::mem::take(&mut out.shapes), out.pixels_per_point);
         out.textures_delta.clear();
@@ -622,6 +675,38 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn rows_are_exactly_one_row_tall() {
+        let mut t = synthetic(4, 50);
+        open_all(&mut t);
+        let ctx = eframe::egui::Context::default();
+        super::super::theme::install(&ctx, super::super::ThemePref::Light);
+        let row_h = ctx.global_style().spacing.interact_size.y;
+        let (r, _) = frame(&mut t, &ctx);
+        assert!(
+            r.tallest <= row_h + 0.01,
+            "a row is {} tall, rows step {row_h}",
+            r.tallest
+        );
+    }
+
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn revealing_a_deep_part_scrolls_to_it() {
+        // #30 review: part 30,000 of 40,000, its group closed, picked in
+        // the view: the tree opens it and scrolls it on screen.
+        let mut t = synthetic(400, 100);
+        let ctx = eframe::egui::Context::default();
+        super::super::theme::install(&ctx, super::super::ThemePref::Light);
+        let (r, _) = frame_with(&mut t, &ctx, Some(30_000), false);
+        assert!(!r.selected_laid_out);
+        frame_with(&mut t, &ctx, Some(30_000), true);
+        // The scroll applies on the frame it is asked for or the next.
+        let (r, _) = frame_with(&mut t, &ctx, Some(30_000), false);
+        assert!(r.selected_laid_out, "part 30,000's row is not on screen");
+    }
+
     /// #30's acceptance: a 40k-node tree under 4 ms a frame. Release only
     /// (debug egui is many times slower):
     ///   cargo test --release --lib tree -- --ignored --nocapture
@@ -633,11 +718,13 @@ pub(crate) mod tests {
         open_all(&mut t);
         let ctx = eframe::egui::Context::default();
         super::super::theme::install(&ctx, super::super::ThemePref::Light);
+        // The selection deep in the tree: its lookup is part of every frame.
+        let deep = Some(39_999);
         for _ in 0..10 {
-            frame(&mut t, &ctx);
+            frame_with(&mut t, &ctx, deep, false);
         }
         let mut ms: Vec<f64> = (0..120)
-            .map(|_| frame(&mut t, &ctx).1.as_secs_f64() * 1e3)
+            .map(|_| frame_with(&mut t, &ctx, deep, false).1.as_secs_f64() * 1e3)
             .collect();
         ms.sort_by(f64::total_cmp);
         let (p50, p95) = (ms[60], ms[114]);

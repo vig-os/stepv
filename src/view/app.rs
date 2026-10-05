@@ -506,9 +506,17 @@ impl Viewer {
         let Some(p) = &self.pending else { return };
         match p.poll(&rs.device) {
             Some(hit) => {
+                // A part hidden while the pick was in flight is not picked:
+                // the id pass saw the old visibility (#30 review).
+                let shown = self.tree.shown_parts();
+                let hit = hit.filter(|p| shown.get(p.part as usize).copied().unwrap_or(false));
                 self.picked = hit;
                 self.pending = None;
                 self.reveal = hit.is_some();
+                // The tree drew this frame before the pick landed: one more
+                // frame reveals it and draws the highlight, without waiting
+                // for the pointer to move.
+                ctx.request_repaint();
                 if std::mem::take(&mut self.report_pick) {
                     let what = hit.map_or("nothing".into(), |p| {
                         let surface = self.topology.as_ref().and_then(|t| {
