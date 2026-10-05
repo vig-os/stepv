@@ -56,6 +56,11 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
       tests/data/assembly.step --frames 5 2>/tmp/err) || true
     echo "$out" | grep -q "\"backend\":\"software\"" \
       || { echo "FAIL: no GPU: $out $(cat /tmp/err)" >&2; exit 1; }
-    grep -q "no usable GPU adapter" /tmp/err || { echo "FAIL: no GPU, and no note: $(cat /tmp/err)" >&2; exit 1; }
+    # The probe found nothing (not: found one the window then refused).
+    grep -q "no usable GPU adapter; using the software viewer" /tmp/err \
+      || { echo "FAIL: no GPU, and no note: $(cat /tmp/err)" >&2; exit 1; }
+    if grep -q "could not start" /tmp/err; then
+      echo "FAIL: a GPU adapter was still found: $(cat /tmp/err)" >&2; exit 1
+    fi
     echo "ok: without GPU drivers, stepv view falls back to software and says so"
   '

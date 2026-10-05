@@ -12,9 +12,9 @@ trap 'rm -f "$tmp"' EXIT
 cp "$bin" "$tmp"
 strip "$tmp" 2>/dev/null || strip -x "$tmp"
 bytes=$(wc -c <"$tmp" | tr -d ' ')
-mb=$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1048576 }')
+mb=$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1048576 }')  # MiB, as the budget
 if [ "$bytes" -gt $((budget_mb * 1048576)) ]; then
-  echo "FAIL: $bin is $mb MB stripped, over its $budget_mb MB budget" >&2
+  echo "FAIL: $bin is $mb MiB stripped, over its $budget_mb MiB budget" >&2
   exit 1
 fi
-echo "ok: $bin is $mb MB stripped (budget $budget_mb MB)"
+echo "ok: $bin is $mb MiB stripped (budget $budget_mb MiB)"

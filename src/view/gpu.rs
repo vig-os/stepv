@@ -1609,8 +1609,8 @@ impl Headless {
 }
 
 /// The GPU tests' gate: a missing adapter skips them, loudly, unless
-/// `STEPV_REQUIRE_GPU=1` says this machine has one (macOS CI; Linux CI once
-/// #32 brings lavapipe), where it fails them. A suite that quietly skips its
+/// `STEPV_REQUIRE_GPU=1` says this machine has one (macOS CI, and Linux
+/// CI on lavapipe), where it fails them. A suite that quietly skips its
 /// subject is how a broken renderer stays green.
 ///
 /// # Panics

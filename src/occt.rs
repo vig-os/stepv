@@ -194,6 +194,9 @@ pub fn run(
     edges: bool,
 ) -> std::io::Result<Run> {
     let mut cmd = Command::new(kernel);
+    // The nix product's wrapper sets it for the viewer's window and GPU
+    // libraries; the sandboxed kernel needs none of them (#32 review).
+    cmd.env_remove("LD_LIBRARY_PATH");
     cmd.arg(input)
         .arg("--linear-rel")
         .arg(deflection.linear_rel.to_string())

@@ -131,7 +131,10 @@ pub fn run(
             return Ok(super::FrameStats::of(times.split_off(1.min(times.len()))));
         }
     }
-    Ok(bench.and_then(|(_, times, _)| super::FrameStats::of(times)))
+    // Closed early: the frames so far, the first (opening) interval dropped
+    // as on the full run.
+    Ok(bench
+        .and_then(|(_, mut times, _)| super::FrameStats::of(times.split_off(1.min(times.len())))))
 }
 
 /// Writes a 0RGB frame as an opaque PNG.

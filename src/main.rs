@@ -296,7 +296,17 @@ fn run(args: &Args) -> (u8, Value) {
             sandboxed: sandbox.as_deref().is_some_and(occt::full_sandbox),
             sandbox,
             file: name,
-            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT").map(PathBuf::from),
+            // --frames closes the window itself: with a screenshot too,
+            // whichever came first would win, and the other go missing.
+            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT")
+                .filter(|_| {
+                    let keep = args.frames.is_none();
+                    if !keep {
+                        eprintln!("stepv: --frames ignores STEPV_VIEW_SCREENSHOT");
+                    }
+                    keep
+                })
+                .map(PathBuf::from),
             frames: args.frames,
             pick_at: std::env::var("STEPV_VIEW_PICK")
                 .ok()

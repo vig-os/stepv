@@ -235,8 +235,10 @@
                   # `stepv view` dlopens its window and GPU libraries at run
                   # time (winit, wgpu): on Linux the wrapper puts nix's on the
                   # library path, so the product's viewer works from the
-                  # store. Hosts' Vulkan/GL drivers are found as usual (ICD
-                  # files); without any, the viewer falls back to software.
+                  # store. On NixOS the drivers come from /run/opengl-driver;
+                  # elsewhere the loader reads the host's ICD files and loads
+                  # host drivers against nix's glibc, which may fail (the
+                  # nixGL problem): the viewer then falls back to software.
                   nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                     pkgs.makeWrapper
                   ];
@@ -255,10 +257,10 @@
                           pkgs.libGL
                           pkgs.libxkbcommon
                           pkgs.wayland
-                          pkgs.xorg.libX11
-                          pkgs.xorg.libXcursor
-                          pkgs.xorg.libXrandr
-                          pkgs.xorg.libXi
+                          pkgs.libx11
+                          pkgs.libxcursor
+                          pkgs.libxrandr
+                          pkgs.libxi
                         ]
                       }
                     ''}
