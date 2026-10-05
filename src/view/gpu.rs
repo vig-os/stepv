@@ -302,6 +302,10 @@ impl Layout {
             }
             l.split_vertices += extra.len();
 
+            debug_assert!(
+                (part.faces.len() as u64) < u64::from(Pick::EDGE_BIT),
+                "a face id the pick encoding would read as an edge"
+            );
             l.face_base.push(l.materials.len() as u32);
             let faces = part.faces.len().max(1);
             l.materials.extend((0..faces).map(|f| {
@@ -321,10 +325,13 @@ impl Layout {
             let first_edge = (l.edge_positions.len() / 3) as u32;
             let mut at = 0;
             for (&id, &n) in part.edges.ids.iter().zip(&part.edges.lens) {
+                debug_assert!(
+                    id < Pick::EDGE_BIT - 1,
+                    "an edge id the pick encoding can't hold"
+                );
                 let pts = &part.edges.points[at * 3..(at + n as usize) * 3];
-                for w in pts.chunks_exact(3).collect::<Vec<_>>().windows(2) {
-                    l.edge_positions.extend_from_slice(w[0]);
-                    l.edge_positions.extend_from_slice(w[1]);
+                for k in 0..n as usize - 1 {
+                    l.edge_positions.extend_from_slice(&pts[k * 3..k * 3 + 6]);
                     l.edge_ids.extend([id, id]);
                 }
                 at += n as usize;
@@ -553,7 +560,11 @@ impl Target {
 /// The B-rep edges' colour, linear: near-black, as CAD viewers draw them.
 const EDGE_COLOR: [f32; 3] = [0.02, 0.022, 0.026];
 /// How far edges are pulled toward the eye, in depth units (the model's
-/// bounding sphere spans 0.5): 0.1% of its radius.
+/// bounding sphere spans 0.5): 0.1% of its diameter, about the mesh's chord
+/// error, so an edge clears the facets either side of it. A constant, so at
+/// grazing angles and on sheets thinner than this it can dash or show
+/// through: #34 (fat lines) takes edge points from the triangulation, which
+/// needs far less.
 const EDGE_PULL: f32 = 0.0005;
 
 const SHADER: &str = r"
@@ -1239,8 +1250,9 @@ pub struct PendingPick {
 }
 
 /// How far from the click, in pixels, an edge still wins the pick: a
-/// one-pixel line is otherwise all but unclickable.
-pub const PICK_RADIUS: u32 = 4;
+/// one-pixel line is otherwise all but unclickable, while a wider reach makes
+/// faces hard to pick in a dense, zoomed-out view (#31 review).
+pub const PICK_RADIUS: u32 = 3;
 
 /// What a pick around `centre` of a `w` x `h` window of id texels hit: the
 /// nearest edge within [`PICK_RADIUS`], else whatever is under the centre.
@@ -2345,7 +2357,7 @@ mod tests {
         // An edge 2 px right of the centre of a 9 x 9 window of face.
         let near = |x: u32, _y: u32| if x == 6 { edge } else { face };
         assert_eq!(resolve_pick((9, 9), (4, 4), near), Some(Pick::edge(0, 3)));
-        // Out of reach (a corner, 5.7 px away): the face under the click.
+        // Out of reach (a corner, 5.7 px away; the radius is 3): the face.
         let far = |x: u32, y: u32| if (x, y) == (0, 0) { edge } else { face };
         assert_eq!(
             resolve_pick((9, 9), (4, 4), far),
@@ -2438,9 +2450,8 @@ mod tests {
         );
         // A click two pixels below the edge, on the face, picks the edge.
         let hit = g.pick(&gs, &View::new(TILT), w, h, ex, ey + 2).unwrap();
-        let e = hit.edge_id().expect("an edge");
-        assert_eq!(hit.part, 0);
-        assert!(e < 12);
+        // boxed_edges numbers (0,0,1) -> (1,0,1), the front-top edge, 8.
+        assert_eq!(hit, Pick::edge(0, 8));
         // With edges off, the same click picks the face.
         let face = g.pick(
             &gs,

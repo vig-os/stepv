@@ -215,11 +215,39 @@ fn kernel_edges_are_numbered_as_the_topology() {
             let e = &part.edges;
             assert!(e.is_well_formed(), "{name} part {i}");
             let proto = &topo.prototypes[topo.parts[i].prototype];
-            for &id in &e.ids {
+            // Each polyline is the edge its id names: in range, and as long
+            // as the topology says (a shuffled or shifted numbering fails).
+            let scale = {
+                let m = &topo.parts[i].transform;
+                let det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8])
+                    + m[2] * (m[4] * m[9] - m[5] * m[8]);
+                det.abs().cbrt()
+            };
+            let mut at = 0;
+            for (&id, &n) in e.ids.iter().zip(&e.lens) {
                 assert!(
                     (id as usize) < proto.edges.len(),
                     "{name} part {i}: edge {id}"
                 );
+                let pts = &e.points[at * 3..(at + n as usize) * 3];
+                let polyline: f64 = pts
+                    .chunks_exact(3)
+                    .zip(pts.chunks_exact(3).skip(1))
+                    .map(|(a, b)| {
+                        (0..3)
+                            .map(|k| f64::from(b[k] - a[k]).powi(2))
+                            .sum::<f64>()
+                            .sqrt()
+                    })
+                    .sum();
+                let exact = proto.edges[id as usize].length * scale;
+                // Chords are shorter than their arc, by at most a few
+                // percent at the preview's angular deflection.
+                assert!(
+                    polyline <= exact * 1.0001 + 1e-6 && polyline >= exact * 0.97,
+                    "{name} part {i} edge {id}: polyline {polyline}, topology {exact}"
+                );
+                at += n as usize;
             }
             if !part.faces.is_empty() {
                 assert!(e.count() > 0, "{name} part {i} has faces but no edges");
