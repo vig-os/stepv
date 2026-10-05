@@ -569,8 +569,8 @@ impl Viewer {
     fn poll_measurer(&mut self, ctx: &egui::Context) {
         if let Some(m) = &self.measurer {
             while let Some((id, r)) = m.try_recv() {
-                self.measurement.answer(id, r);
-                if self.report_measure && self.measurement.waiting.is_none() {
+                let complete = self.measurement.answer(id, r);
+                if self.report_measure && complete {
                     let show = |r: &Option<Result<crate::measure::Answer, String>>| match r {
                         Some(Ok(a)) => {
                             format!("{:?} {:?} {:?}", a.distance, a.axis_distance, a.angle_deg)

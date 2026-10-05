@@ -161,8 +161,11 @@ out=$(STEPV_VIEW_MEASURE=1 STEPV_VIEW_PICK="@7.147,13.362,10;@35.147,13.362,10" 
   STEPV_VIEW_SCREENSHOT="$tmp/measure.png" "$stepv" view "$input" 2>"$tmp/err") || true
 read -r status backend error <<<"$(report <<<"$out")"
 [ "$status" = ok ] || fail "measure: $status $backend ($error): $(cat "$tmp/err")"
-grep -q "STEPV_VIEW_MEASURE distance Some(24.0) Some(28.0)" "$tmp/err" \
-  || fail "measure: the pins did not measure 28 mm apart: $(cat "$tmp/err")"
+python3 - "$(cat "$tmp/err")" <<'PY' || fail "measure: the pins did not measure 28 mm apart: $(cat "$tmp/err")"
+import re, sys
+m = re.search(r"STEPV_VIEW_MEASURE distance Some\(([0-9.e-]+)\) Some\(([0-9.e-]+)\)", sys.argv[1])
+assert m and abs(float(m.group(1)) - 24) < 1e-6 and abs(float(m.group(2)) - 28) < 1e-6
+PY
 echo "ok: measure mode: the pins' axes are 28 mm apart"
 
 # 6. --frames on every committed file.

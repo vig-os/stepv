@@ -14,6 +14,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -123,6 +124,8 @@ pub struct Server {
     next_id: u64,
     /// Extra environment for the kernel (tests: STEPV_OCCT_TEST_HOOKS).
     env: Vec<(String, String)>,
+    /// The file failed to load: every later query gets this, not a reload.
+    load_failed: Option<Arc<str>>,
     /// How many times the kernel had to be (re)started.
     pub starts: u32,
 }
@@ -140,6 +143,7 @@ impl Server {
             next_id: 1,
             starts: 0,
             env: Vec::new(),
+            load_failed: None,
         }
     }
 
@@ -186,10 +190,20 @@ impl Server {
         let stdout = child.stdout.take().expect("stdout is piped");
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
+            // Bytes, not str: a line that is not UTF-8 must not end the
+            // reader while the kernel lives on (#33 review).
+            let mut r = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match r.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
+                        if tx.send(line).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -206,9 +220,9 @@ impl Server {
             .map_err(|_| Error::Crashed(format!("not a ready line: {ready}")))?;
         p.sandbox = v["sandbox"].as_str().unwrap_or_default().to_owned();
         if v["ready"] != true {
-            return Err(Error::Load(
-                v["error"].as_str().unwrap_or("unknown error").to_owned(),
-            ));
+            let e: Arc<str> = v["error"].as_str().unwrap_or("unknown error").into();
+            self.load_failed = Some(e.clone());
+            return Err(Error::Load(e.to_string()));
         }
         self.process = Some(p);
         Ok(())
@@ -242,6 +256,9 @@ impl Server {
     /// See [`Server::ask`].
     #[doc(hidden)]
     pub fn raw(&mut self, query: &Value) -> Result<Answer, Error> {
+        if let Some(e) = &self.load_failed {
+            return Err(Error::Load(e.to_string()));
+        }
         if self.process.is_none() {
             self.start()?;
         }
@@ -266,6 +283,13 @@ impl Server {
                 return Err(Error::Crashed(format!("not an answer: {reply}")));
             }
         };
+        // An over-long line is refused without an id: no crash, and the
+        // kernel stays.
+        if v["id"].is_null() && v["ok"] == false {
+            return Err(Error::Refused(
+                v["error"].as_str().unwrap_or("refused").to_owned(),
+            ));
+        }
         if v["id"] != query["id"] {
             self.process = None;
             return Err(Error::Crashed(format!(
@@ -289,6 +313,9 @@ fn wait(p: &mut Process, limits: Limits) -> Result<String, Error> {
         match p.lines.recv_timeout(Duration::from_millis(5)) {
             Ok(line) => return Ok(line),
             Err(RecvTimeoutError::Disconnected) => {
+                // The output closed; the process may live on (blocked on
+                // stdin): kill it before reaping, or this waits forever.
+                let _ = p.child.kill();
                 let status = p.child.wait().map(|s| s.to_string()).unwrap_or_default();
                 return Err(Error::Crashed(format!("exited: {status}")));
             }

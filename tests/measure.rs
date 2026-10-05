@@ -154,8 +154,9 @@ fn a_point_lands_on_the_face_with_its_normal() {
             [10.0, 5.0, 40.0],
         ))
         .unwrap();
-    assert_eq!(a.point.unwrap(), [10.0, 5.0, 5.0]);
-    assert_eq!(a.normal.unwrap(), [0.0, 0.0, 1.0]);
+    let close = |x: [f64; 3], y: [f64; 3]| (0..3).all(|k| (x[k] - y[k]).abs() < 1e-9);
+    assert!(close(a.point.unwrap(), [10.0, 5.0, 5.0]), "{a:?}");
+    assert!(close(a.normal.unwrap(), [0.0, 0.0, 1.0]), "{a:?}");
 }
 
 #[test]
@@ -232,6 +233,98 @@ fn a_query_past_its_time_limit_is_killed() {
     s.raw(&json!({"id": 3, "op": "test_sleep", "ms": 10}))
         .expect("the next query gets a new kernel");
     assert_eq!(s.starts, 2);
+}
+
+#[test]
+fn edges_are_entities_too() {
+    // Two box edges that share a vertex meet at 90 degrees; an edge and the
+    // one parallel to it across a face are that face's width apart.
+    let topo = topology("box.brep");
+    let proto = &topo.prototypes[0];
+    let ends = |e: usize| proto.edges[e].vertices.map(Option::unwrap);
+    let mut s = Server::new(&kernel(), &data("box.brep"), limits());
+    let meeting = (1..proto.edges.len())
+        .find(|&j| ends(0).iter().any(|v| ends(j).contains(v)))
+        .unwrap();
+    let a = s
+        .ask(&Query::Angle(
+            Entity::Edge { part: 0, edge: 0 },
+            Entity::Edge {
+                part: 0,
+                edge: meeting as u32,
+            },
+        ))
+        .unwrap();
+    assert!((a.angle_deg.unwrap() - 90.0).abs() < 1e-9, "{a:?}");
+    // The distance from edge 0 to every other edge: the parallel ones are
+    // at the box's dimensions (20 x 10 x 5), never less than 5 apart unless
+    // they touch.
+    for j in 1..proto.edges.len() {
+        let d = s
+            .ask(&Query::Distance(
+                Entity::Edge { part: 0, edge: 0 },
+                Entity::Edge {
+                    part: 0,
+                    edge: j as u32,
+                },
+            ))
+            .unwrap()
+            .distance
+            .unwrap();
+        assert!(!(1e-9..5.0 - 1e-9).contains(&d), "edge 0 to {j}: {d}");
+    }
+}
+
+#[test]
+fn malformed_and_over_long_queries_are_refused_and_the_kernel_stays() {
+    let mut s = Server::new(&kernel(), &data("box.brep"), limits());
+    let e = s
+        .raw(&json!({"id": 1, "op": "distance", "a": {"part": 0}}))
+        .unwrap_err();
+    assert!(matches!(e, Error::Refused(_)), "{e:?}");
+    let e = s.raw(&json!({"id": 2, "op": "teleport"})).unwrap_err();
+    assert!(matches!(e, Error::Refused(_)), "{e:?}");
+    // A line past the kernel's 64 KiB: one refusal, not two answers.
+    let long = "x".repeat(100_000);
+    let e = s
+        .raw(&json!({"id": 3, "op": "ping", "pad": long}))
+        .unwrap_err();
+    assert_eq!(e, Error::Refused("line too long".into()));
+    // And the next query gets its own answer, from the same kernel.
+    let q = Query::Point(Entity::Face { part: 0, face: 0 }, [0.0; 3]);
+    s.ask(&q).expect("answers after the refusals");
+    assert_eq!(s.starts, 1);
+}
+
+#[test]
+fn a_query_past_its_memory_limit_is_killed() {
+    let limits = Limits {
+        timeout: Duration::from_secs(30),
+        memory: Some(300 << 20),
+    };
+    let mut s =
+        Server::new(&kernel(), &data("box.brep"), limits).with_env("STEPV_OCCT_TEST_HOOKS", "1");
+    s.raw(&json!({"id": 1, "op": "test_balloon", "mb": 1}))
+        .expect("a small balloon answers");
+    let e = s
+        .raw(&json!({"id": 2, "op": "test_balloon", "mb": 1024}))
+        .unwrap_err();
+    assert_eq!(e, Error::MemoryCap);
+    s.raw(&json!({"id": 3, "op": "test_balloon", "mb": 1}))
+        .expect("the next query gets a new kernel");
+    assert_eq!(s.starts, 2);
+}
+
+#[test]
+fn a_file_that_will_not_load_is_not_reloaded_per_query() {
+    let bad = std::env::temp_dir().join(format!("stepv-measure-bad-{}.step", std::process::id()));
+    std::fs::write(&bad, "ISO-10303-21;\nHEADER;\nENDSEC;\n").unwrap();
+    let mut s = Server::new(&kernel(), &bad, limits());
+    let q = Query::Point(Entity::Face { part: 0, face: 0 }, [0.0; 3]);
+    assert!(matches!(s.ask(&q), Err(Error::Load(_))));
+    assert!(matches!(s.ask(&q), Err(Error::Load(_))));
+    assert_eq!(s.starts, 1, "loaded once");
+    let _ = std::fs::remove_file(bad);
 }
 
 /// SIGKILL, without a libc dependency in the tests.

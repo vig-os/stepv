@@ -122,6 +122,12 @@ struct Parser {
         } else if (literal("null")) {
             v.kind = Json::Null;
         } else {
+            // JSON numbers only: strtod alone would take hex, inf and nan.
+            if (c != '-' && (c < '0' || c > '9')) return false;
+            for (std::size_t k = i; k < s.size() && s[k] != ',' && s[k] != '}' && s[k] != ']' &&
+                                    s[k] != ' ';
+                 ++k)
+                if (std::string("0123456789+-.eE").find(s[k]) == std::string::npos) return false;
             char* end = nullptr;
             v.kind = Json::Number;
             v.number = std::strtod(s.c_str() + i, &end);
@@ -296,11 +302,22 @@ std::string answer_query(const std::string& line, const Resolve& resolve) {
         if (op->string == "ping") return "{\"id\":" + id + ",\"ok\":true}";
         // A test hook (tests/measure.rs): a query that takes `ms`, so the
         // caller's per-query time limit has something to catch.
+        const auto clamped = [&](const char* key, double hi) {
+            const Json* v = q.get(key);
+            return v && v->kind == Json::Number ? std::clamp(v->number, 0.0, hi) : 0.0;
+        };
         if (op->string == "test_sleep" && std::getenv("STEPV_OCCT_TEST_HOOKS")) {
-            const Json* ms = q.get("ms");
-            std::this_thread::sleep_for(std::chrono::milliseconds(
-                ms && ms->kind == Json::Number ? static_cast<long>(ms->number) : 0));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(static_cast<long>(clamped("ms", 600000))));
             return "{\"id\":" + id + ",\"ok\":true}";
+        }
+        // And one that holds `mb` MiB for two seconds, for the memory limit.
+        if (op->string == "test_balloon" && std::getenv("STEPV_OCCT_TEST_HOOKS")) {
+            const std::size_t bytes = static_cast<std::size_t>(clamped("mb", 65536)) << 20;
+            std::vector<char> balloon(bytes);
+            for (std::size_t k = 0; k < bytes; k += 4096) balloon[k] = 1;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            return "{\"id\":" + id + ",\"ok\":true,\"distance\":" + num(balloon[0]) + "}";
         }
         std::string why;
         const auto a = entity(q.get("a"), resolve, why);

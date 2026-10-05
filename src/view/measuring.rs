@@ -40,9 +40,19 @@ impl Measurer {
         let (kernel, input): (PathBuf, PathBuf) = (kernel.to_owned(), input.to_owned());
         std::thread::spawn(move || {
             let mut server = Server::new(&kernel, &input, limits);
-            for (id, q) in jobs {
-                if done.send((id, server.ask(&q))).is_err() {
-                    break;
+            while let Ok(first) = jobs.recv() {
+                // Only the newest pair: a later pick made the rest stale, and
+                // a slow one must not hold up the next (#33 review).
+                let mut batch = vec![first];
+                batch.extend(jobs.try_iter());
+                let newest = batch.iter().map(|(id, _)| *id).max().unwrap_or(0);
+                for (id, q) in batch {
+                    if id + 1 < newest {
+                        continue;
+                    }
+                    if done.send((id, server.ask(&q))).is_err() {
+                        return;
+                    }
                 }
             }
         });
@@ -96,20 +106,25 @@ impl Measurement {
         }
     }
 
-    /// Files an answer; stale ones (an earlier pair's) are dropped.
-    pub fn answer(&mut self, id: u64, r: Result<Answer, Error>) {
-        let Some((d, g)) = self.waiting else { return };
+    /// Files an answer; stale ones (an earlier pair's) are dropped. True
+    /// when it completed the pair.
+    pub fn answer(&mut self, id: u64, r: Result<Answer, Error>) -> bool {
+        let Some((d, g)) = self.waiting else {
+            return false;
+        };
         let r = r.map_err(|e| e.to_string());
         if id == d {
             self.distance = Some(r);
         } else if id == g {
             self.angle = Some(r);
         } else {
-            return;
+            return false;
         }
         if self.distance.is_some() && self.angle.is_some() {
             self.waiting = None;
+            return true;
         }
+        false
     }
 
     pub fn clear(&mut self) {
