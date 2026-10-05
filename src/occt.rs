@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::{BBox, Color, Deflection, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
+use crate::{BBox, Color, Deflection, Edges, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
 
 /// The kernel's JSON summary, one line on its stdout. Present on success AND
 /// on a clean failure (exit 3) — the header-level facts survive a failed
@@ -191,6 +191,7 @@ pub fn run(
     limits: Limits,
     mesh_out: Option<&Path>,
     topology_out: Option<&Path>,
+    edges: bool,
 ) -> std::io::Result<Run> {
     let mut cmd = Command::new(kernel);
     cmd.arg(input)
@@ -203,6 +204,10 @@ pub fn run(
         .stderr(Stdio::null());
     if let Some(out) = mesh_out {
         cmd.arg("--mesh").arg(out);
+    }
+    if edges {
+        // STEPVMSH v4: the B-rep edges too (#31).
+        cmd.arg("--edges");
     }
     if let Some(out) = topology_out {
         cmd.arg("--topology").arg(out);
@@ -322,6 +327,8 @@ pub enum MeshError {
     BadEnum(u8),
     Truncated,
     TrailingBytes(usize),
+    /// A v4 edge polyline of fewer than two points.
+    BadEdge,
 }
 
 impl std::fmt::Display for MeshError {
@@ -332,6 +339,7 @@ impl std::fmt::Display for MeshError {
             Self::BadEnum(b) => write!(f, "invalid face-status or line-kind byte {b}"),
             Self::Truncated => write!(f, "STEPVMSH file is truncated"),
             Self::TrailingBytes(n) => write!(f, "{n} unexpected trailing bytes"),
+            Self::BadEdge => write!(f, "an edge polyline with fewer than two points"),
         }
     }
 }
@@ -409,7 +417,7 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         return Err(MeshError::BadMagic);
     }
     let version = c.u32()?;
-    if version != 3 {
+    if version != 3 && version != 4 {
         return Err(MeshError::UnsupportedVersion(version));
     }
     let mut b = [0.0; 6];
@@ -461,12 +469,43 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
             positions: c.vec4(segments * 6, f32::from_le_bytes)?,
             kinds: c.enums(segments, line_kind)?,
         };
+        // v4: the B-rep edges (#31).
+        let edges = if version == 4 {
+            let n = c.u32()? as usize;
+            // Each edge has 8 bytes of id and length: bound the count
+            // before allocating (the points are bounded below).
+            if n > c.0.len() / 8 {
+                return Err(MeshError::Truncated);
+            }
+            let ids = c.vec4(n, u32::from_le_bytes)?;
+            let lens = c.vec4(n, u32::from_le_bytes)?;
+            if lens.iter().any(|&l| l < 2) {
+                return Err(MeshError::BadEdge);
+            }
+            // Checked: on a 32-bit target a crafted file's lengths could
+            // wrap the sum past the bound below.
+            let total = lens
+                .iter()
+                .try_fold(0usize, |t, &l| t.checked_add(l as usize))
+                .ok_or(MeshError::Truncated)?;
+            if total > c.0.len() / 12 {
+                return Err(MeshError::Truncated);
+            }
+            Edges {
+                ids,
+                lens,
+                points: c.vec4(total * 3, f32::from_le_bytes)?,
+            }
+        } else {
+            Edges::default()
+        };
         parts.push(Part {
             name: (name_len > 0).then(|| String::from_utf8_lossy(name).into_owned()),
             color: has_color.then_some(Color { r, g, b }),
             mesh,
             faces,
             lines,
+            edges,
         });
     }
     if !c.0.is_empty() {
@@ -517,6 +556,79 @@ mod tests {
         }
         v.push(LineKind::MissingOutline as u8);
         v
+    }
+
+    /// `one_triangle` as v4, with `edges` polylines (id, points) appended.
+    fn with_edges(name: &str, edges: &[(u32, &[[f32; 3]])]) -> Vec<u8> {
+        let mut v = one_triangle(name);
+        v[8..12].copy_from_slice(&4u32.to_le_bytes());
+        v.extend((edges.len() as u32).to_le_bytes());
+        for (id, _) in edges {
+            v.extend(id.to_le_bytes());
+        }
+        for (_, pts) in edges {
+            v.extend((pts.len() as u32).to_le_bytes());
+        }
+        for (_, pts) in edges {
+            for p in *pts {
+                for x in p {
+                    v.extend(x.to_le_bytes());
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn decodes_v4_edges() {
+        let s = read_mesh(&with_edges(
+            "bolt",
+            &[
+                (7, &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                (2, &[[0.0; 3], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0]]),
+            ],
+        ))
+        .unwrap();
+        let e = &s.parts[0].edges;
+        assert_eq!(
+            (e.ids.as_slice(), e.lens.as_slice()),
+            (&[7, 2][..], &[2, 3][..])
+        );
+        assert_eq!(e.points.len(), 15);
+        assert!(s.parts[0].is_well_formed());
+        // v3 has none.
+        assert_eq!(
+            read_mesh(&one_triangle("bolt")).unwrap().parts[0]
+                .edges
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_v4_edges() {
+        // A one-point polyline.
+        assert_eq!(
+            read_mesh(&with_edges("b", &[(0, &[[0.0; 3]])])).unwrap_err(),
+            MeshError::BadEdge
+        );
+        // Points cut off partway.
+        let mut v = with_edges("b", &[(0, &[[0.0; 3], [1.0; 3]])]);
+        v.truncate(v.len() - 5);
+        assert_eq!(read_mesh(&v).unwrap_err(), MeshError::Truncated);
+        // A huge edge count, and huge lengths: refused before allocating.
+        let mut v = one_triangle("b");
+        v[8..12].copy_from_slice(&4u32.to_le_bytes());
+        v.extend(u32::MAX.to_le_bytes());
+        assert_eq!(read_mesh(&v).unwrap_err(), MeshError::Truncated);
+        let mut v = one_triangle("b");
+        v[8..12].copy_from_slice(&4u32.to_le_bytes());
+        v.extend(2u32.to_le_bytes());
+        v.extend([0u8; 8]); // ids
+        v.extend(u32::MAX.to_le_bytes());
+        v.extend(u32::MAX.to_le_bytes());
+        v.extend([0u8; 64]);
+        assert_eq!(read_mesh(&v).unwrap_err(), MeshError::Truncated);
     }
 
     #[test]

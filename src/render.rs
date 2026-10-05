@@ -279,6 +279,28 @@ pub(crate) const MISSING: [f32; 3] = [0.85, 0.05, 0.10];
 pub(crate) const SKETCH: [f32; 3] = [0.12, 0.13, 0.15];
 pub(crate) const CONSTRUCTION: [f32; 3] = [0.35, 0.45, 0.60];
 
+/// How a face's status is shown. The one rule, so the thumbnails and the
+/// GPU viewer flag the same faces (#31): the viewer's materials carry this,
+/// and its shader stripes exactly the faces this function stripes here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Overlay {
+    /// Exact, or exact enough: drawn as the model.
+    None = 0,
+    /// Triangles that only sample the surface: diagonal amber stripes.
+    Stripes = 1,
+}
+
+/// The overlay for `status`. Missing faces have no triangles to overlay:
+/// their outline is a line ([`crate::LineKind::MissingOutline`]).
+#[must_use]
+pub const fn overlay(status: FaceStatus) -> Overlay {
+    match status {
+        FaceStatus::Approx => Overlay::Stripes,
+        _ => Overlay::None,
+    }
+}
+
 /// View rotation: azimuth −35° about Y, then elevation 30° about X.
 fn view(cam: &Camera, p: [f32; 3]) -> [f32; 3] {
     let (sa, ca) = cam.azimuth_deg.to_radians().sin_cos();
@@ -440,7 +462,7 @@ pub fn render(scene: &Scene, opts: &Options) -> Result<Image, EmptyScene> {
                 .faces
                 .get(fid as usize)
                 .map_or(FaceStatus::Ok, |f| f.status);
-            let approx = status == FaceStatus::Approx;
+            let approx = overlay(status) == Overlay::Stripes;
             badge |= approx;
             let base = part.face_color(fid).unwrap_or(DEFAULT_COLOR);
             let (a, b, c) = (
@@ -730,6 +752,7 @@ mod tests {
                 max: [1.0; 3],
             },
             parts: vec![Part {
+                edges: Default::default(),
                 name: None,
                 color: Some(Color {
                     r: 0.2,

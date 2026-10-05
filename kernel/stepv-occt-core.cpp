@@ -15,10 +15,10 @@
 // Units: OCCT's readers convert to millimetres, so everything emitted here is
 // in mm regardless of the file's declared units.
 //
-// Mesh file format ("STEPVMSH", version 3, little-endian, no padding):
+// Mesh file format ("STEPVMSH", version 3 or 4, little-endian, no padding):
 //
 //   magic        8 bytes  "STEPVMSH"
-//   version      u32      3
+//   version      u32      3, or 4 when B-rep edges were asked for (--edges)
 //   bbox         6 x f64  min xyz, max xyz
 //   part_count   u32
 //   per part:
@@ -40,6 +40,13 @@
 //     segments   u32
 //     seg_points 6 * segments  x f32   two xyz endpoints per segment
 //     seg_kinds  segments      x u8    LineKind, below
+//   version 4 only, still per part (#31):
+//     edges      u32      B-rep edges, as polylines
+//     edge_ids   edges    x u32   the edge's index in the part's prototype's
+//                                 topology edges (topology.h, topology_edges)
+//     edge_lens  edges    x u32   points per polyline (>= 2)
+//     edge_pts   3 * sum(edge_lens) x f32
+// A v3 reader stops before them; Quick Look asks for v3 (no --edges).
 //
 // FaceStatus records HOW a face's triangles were obtained, so a renderer can
 // draw anything short of exact with a warning treatment instead of passing it
@@ -173,6 +180,7 @@ struct Summary {
     std::size_t vertices = 0;
     std::size_t triangles = 0;
     std::size_t segments = 0;
+    std::size_t edges = 0;  // B-rep edge polylines written (STEPVMSH v4)
     // Multi-file STEP assemblies (#19): the part files the top-level file
     // references, and how many of them could not be read (missing, or
     // outside what a sandbox lets this process open).
@@ -219,7 +227,7 @@ std::string to_json(const Summary& s) {
       << ",\"faces_missing\":" << s.faces_missing << ",\"sketch_parts\":" << s.sketch_parts
       << ",\"construction_parts\":" << s.construction_parts;
     o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles
-      << ",\"segments\":" << s.segments;
+      << ",\"segments\":" << s.segments << ",\"edges\":" << s.edges;
     o << ",\"external_files\":" << s.external_files
       << ",\"external_missing\":" << s.external_missing;
     o << ",\"t_read_ms\":" << s.t_read_ms << ",\"t_transfer_ms\":" << s.t_transfer_ms
@@ -585,10 +593,40 @@ FaceColors face_colors(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc
 }
 
 // Per-prototype output, in prototype coordinates.
+struct EdgeGeom {
+    uint32_t id;  // topology edge index
+    std::vector<gp_Pnt> points;
+};
+
 struct ProtoGeom {
     std::vector<FaceGeom> faces;
     std::vector<std::array<gp_Pnt, 2>> sketch;  // curves of a part with no faces
+    std::vector<EdgeGeom> edges;                // B-rep edges, with --edges
 };
+
+// The prototype's B-rep edges as polylines, at the mesh's deflection and in
+// the topology's numbering (#31). An edge OCCT cannot sample is left out:
+// the edge list is for drawing and picking, not a contract on completeness.
+std::vector<EdgeGeom> edge_geometry(const TopoDS_Shape& shape, const IMeshTools_Parameters& p) {
+    std::vector<EdgeGeom> out;
+    const TopTools_IndexedMapOfShape edges = stepv::topology_edges(shape);
+    out.reserve(static_cast<std::size_t>(edges.Extent()));
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        try {
+            const TopoDS_Edge& e = TopoDS::Edge(edges(i));
+            if (!BRep_Tool::IsGeometric(e)) continue;
+            BRepAdaptor_Curve c(e);
+            GCPnts_TangentialDeflection d(c, p.Angle, p.Deflection);
+            if (d.NbPoints() < 2) continue;
+            EdgeGeom g{static_cast<uint32_t>(i - 1), {}};
+            g.points.reserve(static_cast<std::size_t>(d.NbPoints()));
+            for (int k = 1; k <= d.NbPoints(); ++k) g.points.push_back(d.Value(k));
+            out.push_back(std::move(g));
+        } catch (const Standard_Failure&) {
+        }
+    }
+    return out;
+}
 
 ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Parameters& p,
                              double diagonal, const FaceColors& colors, FaceCache& cache,
@@ -629,6 +667,8 @@ struct PartMesh {
     std::vector<uint32_t> indices, face_ids;
     std::vector<float> seg_points;
     std::vector<uint8_t> seg_kinds;
+    std::vector<uint32_t> edge_ids, edge_lens;
+    std::vector<float> edge_points;
 };
 
 void push3(std::vector<float>& v, double x, double y, double z) {
@@ -671,6 +711,14 @@ void place(const ProtoGeom& pg, const TopLoc_Location& placement, LineKind curve
         m.seg_kinds.push_back(curve_kind);
     }
     if (!pg.sketch.empty()) ++(curve_kind == kSketch ? s.sketch_parts : s.construction_parts);
+    for (const EdgeGeom& e : pg.edges) {
+        m.edge_ids.push_back(e.id);
+        m.edge_lens.push_back(static_cast<uint32_t>(e.points.size()));
+        for (const gp_Pnt& q : e.points) {
+            gp_Pnt p = q.Transformed(t);
+            push3(m.edge_points, p.X(), p.Y(), p.Z());
+        }
+    }
 }
 
 // ── Mesh file ───────────────────────────────────────────────────────────────
@@ -773,8 +821,8 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
 }
 
 int run(const std::string& input_arg, const std::string& mesh_out,
-        const std::string& topology_out, double linear_rel, double angular_deg, bool parallel,
-        Summary& s) {
+        const std::string& topology_out, bool edges, double linear_rel, double angular_deg,
+        bool parallel, Summary& s) {
     // STEPCAFControl_Reader resolves multi-file assemblies' external
     // references against the main file's directory ONLY when the path is
     // absolute; given a relative one it silently yields an empty document.
@@ -868,10 +916,12 @@ int run(const std::string& input_arg, const std::string& mesh_out,
     // none, once per prototype. Counted as mesh time: it is meshing.
     FaceCache cache;
     std::map<std::string, ProtoGeom> geoms;
-    for (const auto& [key, shape] : prototypes)
-        geoms.emplace(key, prototype_geometry(shape, params, s.diagonal,
-                                              face_colors(st, ct, prototype_labels.at(key)),
-                                              cache, s));
+    for (const auto& [key, shape] : prototypes) {
+        ProtoGeom g = prototype_geometry(shape, params, s.diagonal,
+                                         face_colors(st, ct, prototype_labels.at(key)), cache, s);
+        if (edges) g.edges = edge_geometry(shape, params);
+        geoms.emplace(key, std::move(g));
+    }
     s.t_mesh_ms = ms_since(t0);
     // Faceless parts are the content of a sketch-only file, but construction
     // geometry in a file that has solids.
@@ -890,7 +940,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
             return kExitFailed;
         }
         f.write("STEPVMSH", 8);
-        put<uint32_t>(f, 3);
+        put<uint32_t>(f, edges ? 4 : 3);
         double x0, y0, z0, x1, y1, z1;
         bbox.Get(x0, y0, z0, x1, y1, z1);
         for (double v : {x0, y0, z0, x1, y1, z1}) put(f, v);
@@ -928,7 +978,14 @@ int run(const std::string& input_arg, const std::string& mesh_out,
             put<uint32_t>(f, static_cast<uint32_t>(m.seg_kinds.size()));
             put_vec(f, m.seg_points);
             put_vec(f, m.seg_kinds);
+            if (edges) {
+                put<uint32_t>(f, static_cast<uint32_t>(m.edge_ids.size()));
+                put_vec(f, m.edge_ids);
+                put_vec(f, m.edge_lens);
+                put_vec(f, m.edge_points);
+            }
         }
+        s.edges += m.edge_ids.size();
     }
     if (f.is_open()) {
         f.close();
@@ -973,12 +1030,19 @@ int run(const std::string& input_arg, const std::string& mesh_out,
 
 extern "C" char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
                                 double angular_deg, int* exit_code) {
-    return stepv_occt_run_topology(input, mesh_out, nullptr, linear_rel, angular_deg, exit_code);
+    return stepv_occt_run_ex(input, mesh_out, nullptr, 0, linear_rel, angular_deg, exit_code);
 }
 
 extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out,
                                          const char* topology_out, double linear_rel,
                                          double angular_deg, int* exit_code) {
+    return stepv_occt_run_ex(input, mesh_out, topology_out, 0, linear_rel, angular_deg,
+                             exit_code);
+}
+
+extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
+                                   const char* topology_out, int edges, double linear_rel,
+                                   double angular_deg, int* exit_code) {
     // OCCT's data-exchange layer keeps global state (Interface_Static, the
     // XSControl session): one file at a time per process. The CLI never
     // notices (one run per process); Quick Look issues concurrent requests.
@@ -996,7 +1060,7 @@ extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out
     } else {
         try {
             code = run(input, mesh_out ? mesh_out : "", topology_out ? topology_out : "",
-                       linear_rel, angular_deg, true, s);
+                       edges != 0, linear_rel, angular_deg, true, s);
         } catch (const Standard_Failure& e) {
             s.error = std::string("OCCT: ") + e.GetMessageString();
         } catch (const std::bad_alloc&) {

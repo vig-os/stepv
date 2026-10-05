@@ -26,8 +26,9 @@ namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 const char* const kUsage =
-    "usage: stepv-occt <input> [--mesh <out>] [--topology <out.json>] [--linear-rel <f>]\n"
-    "                  [--angular-deg <f>]\n";
+    "usage: stepv-occt <input> [--mesh <out>] [--topology <out.json>] [--edges]\n"
+    "                  [--linear-rel <f>] [--angular-deg <f>]\n"
+    "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n";
 
 // realpath(), or "" when it does not resolve.
 std::string canonical(const std::string& p) {
@@ -124,6 +125,7 @@ void escape_attempt(const std::string& spec) {
 
 int main(int argc, char** argv) {
     std::string input, mesh_out, topology_out;
+    bool edges = false;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -136,6 +138,7 @@ int main(int argc, char** argv) {
         };
         if (a == "--mesh") mesh_out = value();
         else if (a == "--topology") topology_out = value();
+        else if (a == "--edges") edges = true;
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -223,9 +226,9 @@ int main(int argc, char** argv) {
     dup2(STDERR_FILENO, STDOUT_FILENO);
 
     int code = 3;
-    char* json = stepv_occt_run_topology(
-        input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
-        topology_out.empty() ? nullptr : topology_out.c_str(), linear_rel, angular_deg, &code);
+    char* json = stepv_occt_run_ex(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
+                                   topology_out.empty() ? nullptr : topology_out.c_str(),
+                                   edges ? 1 : 0, linear_rel, angular_deg, &code);
     if (!json) return 3;
     // The summary says which sandbox the run was in.
     std::string line = json;

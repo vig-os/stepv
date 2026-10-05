@@ -32,6 +32,8 @@ use crate::{FaceStatus, Scene};
 pub struct RenderKey {
     pub camera: Camera,
     pub show_construction: bool,
+    /// Draw the B-rep edges (#31).
+    pub show_edges: bool,
     /// The viewport in physical pixels, at most the device's texture size.
     pub size: [u32; 2],
     pub dark: bool,
@@ -138,6 +140,8 @@ struct Viewer {
     pick_at: Option<(f32, f32)>,
     /// That click is in flight: report what it hits on stderr.
     report_pick: bool,
+    /// Draw the B-rep edges (#31).
+    show_edges: bool,
     /// The model tree (#30).
     tree: Tree,
     /// The tree generation the GPU's visibility matches.
@@ -209,6 +213,7 @@ impl Viewer {
             ids: None,
             pick_at: opts.pick_at,
             report_pick: false,
+            show_edges: true,
             tree,
             uploaded: 0,
             reveal: false,
@@ -239,6 +244,9 @@ impl Viewer {
             if pressed(key) {
                 self.apply(input, short);
             }
+        }
+        if pressed(Key::E) {
+            self.show_edges = !self.show_edges;
         }
         // Esc clears a selection (or one being picked) first, then quits.
         if pressed(Key::Escape) && (self.picked.is_some() || self.pending.is_some()) {
@@ -271,6 +279,11 @@ impl Viewer {
             if widgets::icon_button(ui, icon::RULER, None, "Construction curves (C)", on).clicked()
             {
                 self.apply(Input::ToggleConstruction, short);
+            }
+            let on = self.show_edges;
+            if widgets::icon_button(ui, icon::LINE_SEGMENTS, None, "B-rep edges (E)", on).clicked()
+            {
+                self.show_edges = !on;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let dark = ui.visuals().dark_mode;
@@ -360,6 +373,24 @@ impl Viewer {
             return;
         };
         let (part, face) = (pick.part as usize, pick.face as usize);
+        if let Some(edge) = pick.edge_id() {
+            // An edge (#31): its curve and length, then its part.
+            match self.topology.as_ref().and_then(|topo| {
+                super::inspect::edge(topo, part, edge as usize)
+                    .map(|rows| (rows, super::inspect::part(topo, part)))
+            }) {
+                Some((edge_rows, part_rows)) => {
+                    for r in edge_rows.iter().chain(&part_rows) {
+                        widgets::property_row(ui, r.key, &r.value);
+                    }
+                }
+                None => {
+                    widgets::property_row(ui, "Part", &format!("#{part}"));
+                    widgets::property_row(ui, "Edge", &format!("#{edge}"));
+                }
+            }
+            return;
+        }
         if pick.is_whole_part() {
             // Picked in the tree: the part, not one face of it.
             let name = self
@@ -430,6 +461,7 @@ impl Viewer {
         View {
             camera: key.camera,
             show_construction: key.show_construction,
+            show_edges: key.show_edges,
             clear: t.viewport.to_normalized_gamma_f32().map(f64::from),
             stripe: key.stripe,
             section: key.section,
@@ -519,18 +551,29 @@ impl Viewer {
                 ctx.request_repaint();
                 if std::mem::take(&mut self.report_pick) {
                     let what = hit.map_or("nothing".into(), |p| {
-                        let surface = self.topology.as_ref().and_then(|t| {
-                            let proto =
-                                t.prototypes.get(t.parts.get(p.part as usize)?.prototype)?;
-                            let f = proto.faces.get(p.face as usize)?;
-                            Some(super::inspect::surface_name(&f.surface))
+                        let proto = self.topology.as_ref().and_then(|t| {
+                            t.prototypes.get(t.parts.get(p.part as usize)?.prototype)
                         });
-                        format!(
-                            "part {} face {} ({})",
-                            p.part,
-                            p.face,
-                            surface.unwrap_or("no topology")
-                        )
+                        if let Some(e) = p.edge_id() {
+                            let curve = proto
+                                .and_then(|pr| pr.edges.get(e as usize))
+                                .map(|c| super::inspect::curve_name(&c.curve));
+                            format!(
+                                "part {} edge {e} ({})",
+                                p.part,
+                                curve.unwrap_or("no topology")
+                            )
+                        } else {
+                            let surface = proto
+                                .and_then(|pr| pr.faces.get(p.face as usize))
+                                .map(|f| super::inspect::surface_name(&f.surface));
+                            format!(
+                                "part {} face {} ({})",
+                                p.part,
+                                p.face,
+                                surface.unwrap_or("no topology")
+                            )
+                        }
                     });
                     eprintln!("stepv: STEPV_VIEW_PICK hit {what}");
                 }
@@ -610,6 +653,7 @@ impl Viewer {
         let key = RenderKey {
             camera: self.controls.camera,
             show_construction: self.controls.show_construction,
+            show_edges: self.show_edges,
             size: physical(rect.size(), ppp).map(|v| v.min(max)),
             dark,
             stripe: (6.0 * ppp).round().max(1.0) as u32,
@@ -743,7 +787,7 @@ impl eframe::App for Viewer {
         egui::Panel::bottom("status").frame(bar(t.panel)).show(root, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · Esc clears · R reset · F front · T top · C construction",
+                    "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · Esc clears · R reset · F front · T top · C construction · E edges",
                 )
                 .size(theme::size::SMALL)
                 .color(t.muted_foreground),
@@ -895,6 +939,7 @@ mod tests {
         let key = RenderKey {
             camera: Camera::default(),
             show_construction: false,
+            show_edges: true,
             size: [100, 100],
             dark: false,
             stripe: 6,
@@ -945,6 +990,7 @@ mod tests {
     fn summary_counts_faces_by_status() {
         use crate::{Face, Lines, Mesh, Part};
         let part = Part {
+            edges: Default::default(),
             name: None,
             color: None,
             mesh: Mesh::default(),

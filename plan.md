@@ -816,6 +816,34 @@ and #34 (capping, fat lines).
   - A face picked in the view opens the row's ancestors and scrolls to it.
 - **Measured** (release, M3 Ultra; `forty_thousand_nodes_stay_under_four_ms`): 40,401 rows, all expanded, in a headless egui frame of layout plus tessellation. p50 0.072 ms, p95 0.075 ms, against a 4 ms budget; egui caches the row galleys between frames. #27 measured 2.2 ms for its virtualised tree inside a whole window frame, GPU painting included. The naive nested headers cost 38 ms.
 
+### Edges and the overlay (#31, 2026-10-05)
+
+- **STEPVMSH v4:** `stepv-occt --edges` appends three arrays to each part: `edges`, `edge_ids`
+  and `edge_lens`, then the points. The edges are B-rep polylines sampled at the mesh's own
+  deflection, in the prototype's frame, then placed.
+  - The numbering is `stepv::topology_edges`, now the one function `--topology` uses too, so an
+    edge id names its JSON curve by construction. A test checks every id against every
+    `tests/data` file's topology.
+  - Only `stepv view` asks for v4. Thumbnails, `--glb`, `--mesh` and Quick Look's in-process path
+    stay v3, so the issue's "Quick Look keeps v3 behind a flag" holds.
+  - The Swift reader also accepts v4 and skips the edges; `just macos-test` decodes a real v4
+    file against v3.
+  - `assembly.step` has 21 edges.
+- **Drawing:** a LineList, pulled 0.0005 depth units toward the eye in the vertex shader (WebGPU
+  forbids depth bias on lines), so an edge wins over the faces it bounds.
+  - Near-black; E toggles them.
+  - A picked edge draws in the accent.
+- **Edge picking:** the id pass draws the edges too, writing `EDGE_BIT | edge`.
+  - A click reads a 9×9 window, and the nearest edge within 4 px wins over the face under the
+    pointer (`resolve_pick`): a one-pixel line is otherwise unclickable.
+  - `inspect::edge` gives the curve and its parameters, plus a length scaled with the instance.
+  - **Acceptance:** two pixels off the plate's hole rim, the pick reads Circle, r = 4 mm, length 8π.
+- **One overlay rule:** `render::overlay(status)` decides which faces are striped. `render.rs`
+  uses it, and the GPU materials carry its value (`Material::overlay`).
+  - A test holds every status to it.
+  - Another checks that both renderers stripe the same pixels (IoU > 0.9).
+  - Missing faces are a line (their outline), drawn on top in both.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -828,7 +856,7 @@ Agent work, in order:
    Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
-   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges →
+   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges (done: "Edges and the overlay" above) →
    #32 CI and packaging → #33 measurements → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
