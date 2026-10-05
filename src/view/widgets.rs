@@ -34,7 +34,6 @@ pub fn icon_button(
     if let Some(label) = label {
         job.append(label, space(1), font(size::BODY));
     }
-    job.halign = egui::Align::Center;
     let mut b = egui::Button::new(job)
         .min_size(vec2(space(7), space(7)))
         .corner_radius(CornerRadius::same(theme::RADIUS));

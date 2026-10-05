@@ -17,6 +17,8 @@ pub mod controls;
 pub mod gpu;
 pub mod inspect;
 #[cfg(feature = "viewer")]
+pub mod measuring;
+#[cfg(feature = "viewer")]
 pub mod software;
 #[cfg(feature = "viewer")]
 pub mod theme;
@@ -109,7 +111,13 @@ pub struct Options {
     pub frames: Option<u32>,
     /// `STEPV_VIEW_PICK=x,y`: click there (fractions of the viewport) once
     /// the first frame is drawn. With `screenshot`, it waits for the pick.
-    pub pick_at: Option<(f32, f32)>,
+    pub pick_at: Vec<PickAt>,
+    /// `STEPV_VIEW_MEASURE=1`: start in measure mode, and report each
+    /// measurement on stderr (the window tests' hook, with `pick_at`).
+    pub measure: bool,
+    /// The file and the limits a measurement server (#33) reads it with.
+    pub input: Option<PathBuf>,
+    pub limits: Option<crate::occt::Limits>,
 }
 
 /// What a `--frames` run measured: wall-clock intervals between frames,
@@ -146,12 +154,40 @@ pub struct Ran {
     pub frames: Option<FrameStats>,
 }
 
-/// Parses `STEPV_VIEW_PICK`'s `x,y`, each 0..1.
+/// Where a scripted click goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PickAt {
+    /// Fractions of the viewport.
+    Viewport(f32, f32),
+    /// A model point, projected through the camera at the time: the same
+    /// spot on the model whatever the window's size.
+    Model([f32; 3]),
+}
+
+/// Parses `STEPV_VIEW_PICK`: clicks separated by `;`, each `x,y` (viewport
+/// fractions, 0..1) or `@x,y,z` (a model point). Nothing, if any is
+/// malformed.
 #[must_use]
-pub fn parse_pick_at(s: &str) -> Option<(f32, f32)> {
-    let (x, y) = s.split_once(',')?;
-    let (x, y): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
-    ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
+pub fn parse_pick_at(s: &str) -> Vec<PickAt> {
+    let one = |c: &str| {
+        let c = c.trim();
+        let nums: Option<Vec<f32>> = c
+            .trim_start_matches('@')
+            .split(',')
+            .map(|v| v.trim().parse().ok())
+            .collect();
+        match (c.starts_with('@'), nums?.as_slice()) {
+            (true, &[x, y, z]) => Some(PickAt::Model([x, y, z])),
+            (false, &[x, y]) if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) => {
+                Some(PickAt::Viewport(x, y))
+            }
+            _ => None,
+        }
+    };
+    s.split(';')
+        .map(one)
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 /// The backend to open, given `--software` and what [`gpu::probe`] found,
@@ -271,9 +307,14 @@ mod tests {
 
     #[test]
     fn pick_at_parses_fractions_only() {
-        assert_eq!(parse_pick_at("0.5, 0.25"), Some((0.5, 0.25)));
-        assert_eq!(parse_pick_at("2,0"), None);
-        assert_eq!(parse_pick_at("x"), None);
+        assert_eq!(parse_pick_at("0.5, 0.25"), [PickAt::Viewport(0.5, 0.25)]);
+        assert_eq!(
+            parse_pick_at("0.1,0.2; @6,15.5,-1"),
+            [PickAt::Viewport(0.1, 0.2), PickAt::Model([6.0, 15.5, -1.0])]
+        );
+        assert!(parse_pick_at("2,0").is_empty());
+        assert!(parse_pick_at("@1,2").is_empty());
+        assert!(parse_pick_at("0.1,0.2;x").is_empty());
     }
 
     #[test]

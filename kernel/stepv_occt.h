@@ -29,6 +29,12 @@ char* stepv_occt_run_ex(const char* input, const char* mesh_out, const char* top
 
 void stepv_occt_free(char* p);
 
+// `stepv-occt --serve` (#33): reads `input` once, writes a ready line
+// ({"ready": true, "sandbox": ..., "parts": n}, or ready false with an
+// error) to `out_fd`, then answers one JSON query per line from `in_fd`
+// until it closes (protocol in measure.h). Returns the exit code.
+int stepv_occt_serve(const char* input, const char* sandbox, int in_fd, int out_fd);
+
 #ifdef __cplusplus
 }
 #endif

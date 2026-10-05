@@ -80,6 +80,8 @@ length.
 - **Without a usable GPU**, for example on a headless VM or with no drivers, it opens the
   software window and says why on stderr. `--software` asks for that window directly.
 - **`"backend"`** in the JSON line says which one ran.
+- **Measure (M):** click two faces or edges for their distance, the distance between their axes
+  and their angle. These are computed on the exact geometry by a sandboxed kernel process.
 - **`--frames N`** orbits for N frames, then exits and reports the frame intervals.
 - **The Linux tarball** takes the window and GPU libraries (X11/Wayland, libvulkan, libGL) from the
   host.

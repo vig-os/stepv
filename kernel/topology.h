@@ -5,7 +5,10 @@
 #pragma once
 
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 
 #include <cstddef>
@@ -36,6 +39,11 @@ struct TopoPart {
 // edge polylines (STEPVMSH v4) use the same numbering, so a picked edge
 // names its curve.
 TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape);
+
+// A planar face's outward normal: the plane's X x Y (its Axis() only for
+// right-handed axes), flipped again by the face's orientation. The one
+// convention --topology and the measurements (#33) share.
+gp_Dir outward_normal(const gp_Pln& plane, const TopoDS_Face& face);
 
 // Writes the topology of `prototypes` (each in its own coordinates; a part
 // places one) to `path`. Returns "" on success, else what went wrong.

@@ -16,6 +16,9 @@
 #      and the inspector's topology names it a plane.
 #   6. `stepv view --frames 30` on every tests/data file: the GPU backend, and
 #      30 frames reported (#32's smoke test).
+#   7. Measure mode (#33): two clicks on the pins (model points, so the same
+#      spot at any window size) measure 28 mm between their axes, through
+#      the sandboxed kernel server.
 #
 # STEPV_VIEW_REQUIRE_WINDOW=1 fails a GPU screenshot that fell back to the
 # viewport render: where windows are presented (Xvfb), the panels must be
@@ -152,6 +155,15 @@ read -r status backend error <<<"$(report <<<"$out")"
 grep -q "STEPV_VIEW_PICK hit part 0 face [0-9]* (Plane)" "$tmp/err" \
   || fail "the click did not pick the plate's top: $(cat "$tmp/err")"
 echo "ok: a click picks the plate's top face ($(grep -o 'face [0-9]* (Plane)' "$tmp/err"))"
+
+# 7. Measure the pins, through the window and the kernel server.
+out=$(STEPV_VIEW_MEASURE=1 STEPV_VIEW_PICK="@7.147,13.362,10;@35.147,13.362,10" \
+  STEPV_VIEW_SCREENSHOT="$tmp/measure.png" "$stepv" view "$input" 2>"$tmp/err") || true
+read -r status backend error <<<"$(report <<<"$out")"
+[ "$status" = ok ] || fail "measure: $status $backend ($error): $(cat "$tmp/err")"
+grep -q "STEPV_VIEW_MEASURE distance Some(24.0) Some(28.0)" "$tmp/err" \
+  || fail "measure: the pins did not measure 28 mm apart: $(cat "$tmp/err")"
+echo "ok: measure mode: the pins' axes are 28 mm apart"
 
 # 6. --frames on every committed file.
 for f in "$root"/tests/data/*.step "$root"/tests/data/*.brep "$root"/tests/data/*.igs; do

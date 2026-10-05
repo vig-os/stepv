@@ -28,7 +28,9 @@ constexpr int kExitUsage = 2;
 const char* const kUsage =
     "usage: stepv-occt <input> [--mesh <out>] [--topology <out.json>] [--edges]\n"
     "                  [--linear-rel <f>] [--angular-deg <f>]\n"
-    "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n";
+    "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n"
+    "  --serve  read the file once, then answer measurement queries, one JSON\n"
+    "           line each, on stdin/stdout (measure.h); no outputs\n";
 
 // realpath(), or "" when it does not resolve.
 std::string canonical(const std::string& p) {
@@ -125,7 +127,7 @@ void escape_attempt(const std::string& spec) {
 
 int main(int argc, char** argv) {
     std::string input, mesh_out, topology_out;
-    bool edges = false;
+    bool edges = false, serve = false;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -139,6 +141,7 @@ int main(int argc, char** argv) {
         if (a == "--mesh") mesh_out = value();
         else if (a == "--topology") topology_out = value();
         else if (a == "--edges") edges = true;
+        else if (a == "--serve") serve = true;
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -225,6 +228,12 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     dup2(STDERR_FILENO, STDOUT_FILENO);
 
+    if (serve) {
+        // Sandboxed like a run, with nothing writable: queries in, answers
+        // out, on the descriptors it already has.
+        if (!mesh_out.empty() || !topology_out.empty()) return kExitUsage;
+        return stepv_occt_serve(input.c_str(), sandbox.c_str(), STDIN_FILENO, json_fd);
+    }
     int code = 3;
     char* json = stepv_occt_run_ex(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
                                    topology_out.empty() ? nullptr : topology_out.c_str(),

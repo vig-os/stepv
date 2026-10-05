@@ -92,16 +92,13 @@ void put(std::ostream& o, const char* key, double v) {
 // Returns the face's area, which the prototype's is the sum of.
 double face_json(std::ostream& o, const TopoDS_Face& face, const TopTools_IndexedMapOfShape& edges) {
     BRepAdaptor_Surface s(face);
-    const bool reversed = face.Orientation() == TopAbs_REVERSED;
     o << "{\"surface\":";
     switch (s.GetType()) {
     case GeomAbs_Plane: {
         // The surface normal is X x Y, which is Axis() only for right-handed
         // axes; the face's orientation flips it again.
         const gp_Pln pl = s.Plane();
-        gp_Dir n = pl.Axis().Direction();
-        if (!pl.Position().Direct()) n.Reverse();
-        if (reversed) n.Reverse();
+        const gp_Dir n = outward_normal(pl, face);
         o << "\"plane\"";
         put(o, "origin", pl.Location());
         put(o, "normal", n);
@@ -208,6 +205,13 @@ void edge_json(std::ostream& o, const TopoDS_Edge& edge, const TopTools_IndexedM
 }
 
 }  // namespace
+
+gp_Dir outward_normal(const gp_Pln& plane, const TopoDS_Face& face) {
+    gp_Dir n = plane.Axis().Direction();
+    if (!plane.Position().Direct()) n.Reverse();
+    if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+    return n;
+}
 
 TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape) {
     TopTools_IndexedMapOfShape all, edges;
