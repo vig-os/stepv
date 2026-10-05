@@ -672,7 +672,11 @@ impl eframe::App for Viewer {
             )
             .default_size(260.0)
             .min_size(200.0)
-            .show(root, |ui| self.properties(ui));
+            .show(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.properties(ui));
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(t.viewport))
             .show(root, |ui| self.viewport(ui, &rs));
