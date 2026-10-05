@@ -113,6 +113,8 @@ struct Viewer {
     screenshot: Option<PathBuf>,
     /// Frames painted, for the screenshot hook.
     frames: u32,
+    /// When the window screenshot was requested.
+    requested: Option<std::time::Instant>,
     /// Set once the screenshot is saved (or failed): close next frame.
     error: Arc<Mutex<Option<String>>>,
 }
@@ -161,6 +163,7 @@ impl Viewer {
             theme: opts.theme,
             screenshot: opts.screenshot.clone(),
             frames: 0,
+            requested: None,
             error,
         })
     }
@@ -380,7 +383,13 @@ impl Viewer {
 
     /// The `STEPV_VIEW_SCREENSHOT` hook: once the window has settled, grab
     /// it, save it, and close.
-    fn screenshot(&mut self, ctx: &egui::Context) {
+    ///
+    /// eframe captures a window only when it presents a frame, and an
+    /// unpresented window (asleep display, a CI runner with no visible
+    /// screen) never does. After [`SCREENSHOT_WAIT`] the hook saves the
+    /// viewport's own render instead, saying so on stderr: that still proves
+    /// the window's device drew the model, but not the panels around it.
+    fn screenshot(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
         let Some(path) = self.screenshot.clone() else {
             return;
         };
@@ -390,8 +399,29 @@ impl Viewer {
                 _ => None,
             })
         });
-        if let Some(image) = image {
-            if let Err(e) = save(&image, &path) {
+        let result = if let Some(image) = image {
+            Some(save(&image, &path))
+        } else if self
+            .requested
+            .is_some_and(|t| t.elapsed() > SCREENSHOT_WAIT)
+        {
+            Some(match &self.target {
+                Some(target) => {
+                    eprintln!(
+                        "stepv: the window was never presented; saved the viewport's render instead"
+                    );
+                    let img = super::gpu::read_back(&rs.device, &rs.queue, target);
+                    img.to_png().map_err(|e| e.to_string()).and_then(|png| {
+                        std::fs::write(&path, png).map_err(|e| format!("{}: {e}", path.display()))
+                    })
+                }
+                None => Err("no screenshot: the viewport never rendered".into()),
+            })
+        } else {
+            None
+        };
+        if let Some(result) = result {
+            if let Err(e) = result {
                 *self.error.lock().unwrap() = Some(e);
             }
             self.screenshot = None;
@@ -401,21 +431,14 @@ impl Viewer {
         // A few frames first: fonts, the theme and the first render land.
         if self.frames == 3 {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(Default::default()));
-        }
-        // Never spin forever waiting for a screenshot that does not come.
-        if self.frames > SCREENSHOT_FRAMES {
-            *self.error.lock().unwrap() =
-                Some(format!("no screenshot after {SCREENSHOT_FRAMES} frames"));
-            self.screenshot = None;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-            return;
+            self.requested = Some(std::time::Instant::now());
         }
         ctx.request_repaint();
     }
 }
 
-/// How long the screenshot hook waits for its image.
-const SCREENSHOT_FRAMES: u32 = 600;
+/// How long the screenshot hook waits for the window's own capture.
+const SCREENSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn save(image: &egui::ColorImage, path: &Path) -> Result<(), String> {
     let img = crate::render::Image {
@@ -476,7 +499,7 @@ impl eframe::App for Viewer {
             .frame(egui::Frame::NONE.fill(t.viewport))
             .show(root, |ui| self.viewport(ui, &rs));
         self.frames = self.frames.saturating_add(1);
-        self.screenshot(&ctx);
+        self.screenshot(&ctx, &rs);
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
