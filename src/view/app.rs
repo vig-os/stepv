@@ -2,8 +2,9 @@
 //!
 //! The layout is a toolbar (view presets, display toggles, the backend and
 //! sandbox pills, the theme switch), a properties panel on the right, a
-//! status bar, and the viewport. #29 adds picking and the inspector, #30 the
-//! model tree.
+//! status bar, and the viewport. A click picks a face through the GPU's id
+//! pass (#29); the Selection panel names it from `--topology`, and the
+//! Section panel cuts the model. #30 adds the model tree.
 //!
 //! Repaint discipline: eframe repaints on input only, and the viewport is
 //! re-rendered only when what it shows changed ([`RenderKey`]): an idle
@@ -17,10 +18,11 @@ use eframe::egui_wgpu::{self, wgpu};
 use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
-use super::gpu::{GpuScene, Layout, Renderer, Target, View};
+use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
 use super::widgets::{self, Tone};
 use super::{Backend, Options, ThemePref, theme};
 use crate::render::Camera;
+use crate::topology::Topology;
 use crate::{FaceStatus, Scene};
 
 /// What a viewport frame depends on. Equal keys draw equal pixels, so an
@@ -34,6 +36,9 @@ pub struct RenderKey {
     pub dark: bool,
     /// The approximated-face stripe width in physical pixels.
     pub stripe: u32,
+    /// The section plane, when on.
+    pub section: Option<[f32; 4]>,
+    pub picked: Option<Pick>,
 }
 
 /// Whether a frame with `key` must be rendered: only when it differs from
@@ -117,12 +122,26 @@ struct Viewer {
     requested: Option<std::time::Instant>,
     /// Set once the screenshot is saved (or failed): close next frame.
     error: Arc<Mutex<Option<String>>>,
+    /// The exact B-rep (#29's inspector), when the kernel wrote it.
+    topology: Option<Topology>,
+    picked: Option<Pick>,
+    /// A click being resolved on the GPU.
+    pending: Option<PendingPick>,
+    /// The id pass's target, kept between clicks at the viewport's size.
+    ids: Option<IdTarget>,
+    cut: bool,
+    section: Section,
+    /// `STEPV_VIEW_PICK`: a click to make once the first frame is drawn.
+    pick_at: Option<(f32, f32)>,
+    /// That click is in flight: report what it hits on stderr.
+    report_pick: bool,
 }
 
 impl Viewer {
     fn new(
         cc: &eframe::CreationContext<'_>,
         scene: &Scene,
+        topology: Option<Topology>,
         opts: &Options,
         error: Arc<Mutex<Option<String>>>,
     ) -> Result<Self, String> {
@@ -165,6 +184,18 @@ impl Viewer {
             frames: 0,
             requested: None,
             error,
+            topology,
+            picked: None,
+            pending: None,
+            ids: None,
+            pick_at: opts.pick_at,
+            report_pick: false,
+            cut: false,
+            section: Section {
+                axis: 0,
+                offset: 0.5,
+                flip: false,
+            },
         })
     }
 
@@ -187,7 +218,11 @@ impl Viewer {
                 self.apply(input, short);
             }
         }
-        if pressed(Key::Q) || pressed(Key::Escape) {
+        // Esc clears a selection (or one being picked) first, then quits.
+        if pressed(Key::Escape) && (self.picked.is_some() || self.pending.is_some()) {
+            self.picked = None;
+            self.pending = None;
+        } else if pressed(Key::Q) || pressed(Key::Escape) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
@@ -259,7 +294,7 @@ impl Viewer {
         });
     }
 
-    fn properties(&self, ui: &mut egui::Ui) {
+    fn properties(&mut self, ui: &mut egui::Ui) {
         let s = &self.summary;
         widgets::section_header(ui, "Model");
         widgets::property_row(ui, "File", &s.file);
@@ -279,6 +314,10 @@ impl Viewer {
             );
         }
         ui.separator();
+        self.selection(ui);
+        ui.separator();
+        self.section_controls(ui);
+        ui.separator();
         widgets::section_header(ui, "View");
         let c = &self.controls.camera;
         widgets::property_row(ui, "Azimuth", &format!("{:.0}°", c.azimuth_deg));
@@ -290,8 +329,133 @@ impl Viewer {
         widgets::property_row(ui, "Adapter", &self.adapter);
     }
 
+    /// The inspector: what the picked face is, from the exact B-rep.
+    fn selection(&self, ui: &mut egui::Ui) {
+        widgets::section_header(ui, "Selection");
+        let t = widgets::tokens(ui);
+        let Some(pick) = self.picked else {
+            ui.label(egui::RichText::new("Click a face to inspect it").color(t.muted_foreground));
+            return;
+        };
+        let (part, face) = (pick.part as usize, pick.face as usize);
+        match self.topology.as_ref().and_then(|topo| {
+            super::inspect::face(topo, part, face)
+                .map(|rows| (rows, super::inspect::part(topo, part)))
+        }) {
+            Some((face_rows, part_rows)) => {
+                for r in face_rows.iter().chain(&part_rows) {
+                    widgets::property_row(ui, r.key, &r.value);
+                }
+            }
+            None => {
+                // No topology (a kernel without --topology, or a file whose
+                // topology failed): the mesh's numbering is all there is.
+                widgets::property_row(ui, "Part", &format!("#{part}"));
+                widgets::property_row(ui, "Face", &format!("#{face}"));
+                ui.label(
+                    egui::RichText::new("No exact topology for this file")
+                        .color(t.muted_foreground),
+                );
+            }
+        }
+    }
+
+    /// The section plane: on/off, axis, position, side.
+    fn section_controls(&mut self, ui: &mut egui::Ui) {
+        widgets::section_header(ui, "Section");
+        ui.checkbox(&mut self.cut, "Cut the model");
+        ui.add_enabled_ui(self.cut, |ui| {
+            ui.horizontal(|ui| {
+                for (k, name) in ["X", "Y", "Z"].iter().enumerate() {
+                    ui.radio_value(&mut self.section.axis, k, *name);
+                }
+                ui.checkbox(&mut self.section.flip, "Flip");
+            });
+            ui.add(egui::Slider::new(&mut self.section.offset, 0.0..=1.0).show_value(false));
+        });
+    }
+
+    /// The section plane, when it is on.
+    fn plane(&self) -> Option<[f32; 4]> {
+        let (lo, hi) = self.scene.bounds?;
+        self.cut.then(|| self.section.plane(lo, hi))
+    }
+
+    /// What `key` draws.
+    fn view(&self, key: &RenderKey, dark: bool) -> View {
+        let t = theme::tokens(dark);
+        let a = egui::Rgba::from(t.accent);
+        View {
+            camera: key.camera,
+            show_construction: key.show_construction,
+            clear: t.viewport.to_normalized_gamma_f32().map(f64::from),
+            stripe: key.stripe,
+            section: key.section,
+            picked: key.picked,
+            highlight: [a.r(), a.g(), a.b()],
+        }
+    }
+
+    /// Starts resolving a click at `at` (points) in the viewport `rect`.
+    fn start_pick(&mut self, rs: &egui_wgpu::RenderState, rect: egui::Rect, at: egui::Pos2) {
+        let (Some(key), Some(target)) = (self.last, self.target.as_ref()) else {
+            return;
+        };
+        let (w, h) = (target.width, target.height);
+        if self
+            .ids
+            .as_ref()
+            .is_none_or(|t| (t.width, t.height) != (w, h))
+        {
+            self.ids = Some(IdTarget::new(&rs.device, w, h));
+        }
+        let (x, y) = super::gpu::texel_at(
+            [rect.min.x, rect.min.y],
+            [rect.width(), rect.height()],
+            [at.x, at.y],
+            w,
+            h,
+        );
+        let view = self.view(&key, key.dark);
+        let ids = self.ids.as_ref().expect("created above");
+        self.pending =
+            Some(
+                self.renderer
+                    .pick(&rs.device, &rs.queue, &self.scene, ids, &view, (x, y)),
+            );
+    }
+
+    /// Collects a finished pick; asks for another frame while one is out.
+    fn finish_pick(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
+        let Some(p) = &self.pending else { return };
+        match p.poll(&rs.device) {
+            Some(hit) => {
+                self.picked = hit;
+                self.pending = None;
+                if std::mem::take(&mut self.report_pick) {
+                    let what = hit.map_or("nothing".into(), |p| {
+                        let surface = self.topology.as_ref().and_then(|t| {
+                            let proto =
+                                t.prototypes.get(t.parts.get(p.part as usize)?.prototype)?;
+                            let f = proto.faces.get(p.face as usize)?;
+                            Some(super::inspect::surface_name(&f.surface))
+                        });
+                        format!(
+                            "part {} face {} ({})",
+                            p.part,
+                            p.face,
+                            surface.unwrap_or("no topology")
+                        )
+                    });
+                    eprintln!("stepv: STEPV_VIEW_PICK hit {what}");
+                }
+            }
+            None => ctx.request_repaint(),
+        }
+    }
+
     /// Re-renders the viewport if `key` differs from the last frame's.
-    fn render(&mut self, rs: &egui_wgpu::RenderState, key: RenderKey, clear: egui::Color32) {
+    fn render(&mut self, rs: &egui_wgpu::RenderState, key: RenderKey) {
         if !needs_render(&mut self.last, key) {
             return;
         }
@@ -320,13 +484,8 @@ impl Viewer {
             }
             self.target = Some(target);
         }
+        let view = self.view(&key, key.dark);
         let target = self.target.as_ref().expect("created above");
-        let view = View {
-            camera: key.camera,
-            show_construction: key.show_construction,
-            clear: clear.to_normalized_gamma_f32().map(f64::from),
-            stripe: key.stripe,
-        };
         let frame = self
             .renderer
             .render(&rs.device, &rs.queue, &self.scene, target, &view);
@@ -369,8 +528,23 @@ impl Viewer {
             size: physical(rect.size(), ppp).map(|v| v.min(max)),
             dark,
             stripe: (6.0 * ppp).round().max(1.0) as u32,
+            section: self.plane(),
+            picked: self.picked,
         };
-        self.render(rs, key, theme::tokens(dark).viewport);
+        self.render(rs, key);
+        // A click (not the end of a drag) picks what is under it, in the
+        // frame just rendered; it lands a frame or two later.
+        if resp.clicked()
+            && let Some(at) = resp.interact_pointer_pos()
+        {
+            self.start_pick(rs, rect, at);
+        }
+        if let Some((x, y)) = self.pick_at.take() {
+            self.report_pick = true;
+            self.start_pick(rs, rect, rect.min + egui::vec2(x, y) * rect.size());
+            ui.ctx().request_repaint();
+        }
+        self.finish_pick(ui.ctx(), rs);
         if let Some(id) = self.texture {
             ui.painter().image(
                 id,
@@ -428,8 +602,12 @@ impl Viewer {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
-        // A few frames first: fonts, the theme and the first render land.
-        if self.frames == 3 {
+        // A few frames first: fonts, the theme and the first render land,
+        // and a STEPV_VIEW_PICK click with its highlight.
+        let settled = self.pick_at.is_none()
+            && self.pending.is_none()
+            && self.last.is_some_and(|k| k.picked == self.picked);
+        if self.requested.is_none() && self.frames >= 3 && settled {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(Default::default()));
             self.requested = Some(std::time::Instant::now());
         }
@@ -479,7 +657,7 @@ impl eframe::App for Viewer {
         egui::Panel::bottom("status").frame(bar(t.panel)).show(root, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Drag to orbit · right-drag or shift-drag to pan · scroll to zoom · R reset · F front · T top · C construction",
+                    "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · Esc clears · R reset · F front · T top · C construction",
                 )
                 .size(theme::size::SMALL)
                 .color(t.muted_foreground),
@@ -494,7 +672,11 @@ impl eframe::App for Viewer {
             )
             .default_size(260.0)
             .min_size(200.0)
-            .show(root, |ui| self.properties(ui));
+            .show(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.properties(ui));
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(t.viewport))
             .show(root, |ui| self.viewport(ui, &rs));
@@ -513,6 +695,7 @@ impl eframe::App for Viewer {
 /// back so the caller can fall back to the software viewer.
 pub(super) fn run(
     scene: Scene,
+    topology: Option<Topology>,
     title: &str,
     opts: &Options,
 ) -> Result<Backend, (String, Option<Scene>)> {
@@ -556,7 +739,7 @@ pub(super) fn run(
         native,
         Box::new(move |cc| {
             let scene = slot2.lock().unwrap().take().ok_or("no scene")?;
-            match Viewer::new(cc, &scene, &opts2, error2) {
+            match Viewer::new(cc, &scene, topology, &opts2, error2) {
                 // The GPU has it; the CPU copy goes now (#28: the prototype
                 // held both, 2.1 GB on the stress assembly).
                 Ok(v) => {
@@ -618,6 +801,8 @@ mod tests {
             size: [100, 100],
             dark: false,
             stripe: 6,
+            section: None,
+            picked: None,
         };
         let mut last = None;
         assert!(needs_render(&mut last, key), "the first frame renders");
@@ -629,6 +814,14 @@ mod tests {
             },
             RenderKey { dark: true, ..key },
             RenderKey { stripe: 12, ..key },
+            RenderKey {
+                section: Some([1.0, 0.0, 0.0, 5.0]),
+                ..key
+            },
+            RenderKey {
+                picked: Some(Pick { part: 0, face: 3 }),
+                ..key
+            },
             RenderKey {
                 show_construction: true,
                 ..key

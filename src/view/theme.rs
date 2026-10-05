@@ -37,6 +37,9 @@ pub struct Tokens {
     pub hover: Color32,
     pub pressed: Color32,
     pub border: Color32,
+    /// Form controls' outline (checkboxes, radios, slider rails), a step
+    /// stronger than `border` so they read on the panel (shadcn's `--input`).
+    pub input: Color32,
     /// The one accent: selection, focus, toggled buttons, links.
     pub accent: Color32,
     /// Text and icons on [`Self::accent`].
@@ -83,6 +86,7 @@ pub const LIGHT: Tokens = Tokens {
     hover: rgb(0xe4e4e7),
     pressed: rgb(0xd4d4d8),
     border: rgb(0xe4e4e7),
+    input: rgb(0x8f8f98),
     accent: rgb(0x2563eb),
     accent_foreground: rgb(0xffffff),
     success: rgb(0x15803d),
@@ -102,6 +106,7 @@ pub const DARK: Tokens = Tokens {
     hover: rgb(0x3f3f46),
     pressed: rgb(0x52525b),
     border: rgb(0x27272a),
+    input: rgb(0x71717a),
     accent: rgb(0x60a5fa),
     accent_foreground: rgb(0x09090b),
     success: rgb(0x4ade80),
@@ -204,8 +209,12 @@ pub fn style(t: &Tokens) -> egui::Style {
     // Separators and frames draw with the noninteractive stroke.
     w.noninteractive.bg_stroke = Stroke::new(1.0, t.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, t.foreground);
-    // A focus ring, as shadcn's `--ring`.
-    w.hovered.bg_stroke = Stroke::new(1.0, t.border);
+    // Controls at rest: outlined, and their fill (a checkbox's box, a slider's
+    // rail) a step off the panel. Buttons keep the quiet `weak_bg_fill`;
+    // the toolbar's ghost buttons drop the outline themselves.
+    w.inactive.bg_stroke = Stroke::new(1.0, t.input);
+    w.inactive.bg_fill = t.hover;
+    w.hovered.bg_stroke = Stroke::new(1.0, t.input);
     s.visuals = v;
     s
 }
@@ -267,6 +276,9 @@ mod tests {
                 );
             }
             // Text on hover/pressed button fills stays legible too.
+            // Controls' outlines are visible against the panel (WCAG's 3:1
+            // for non-text UI).
+            assert!(contrast(t.input, t.panel) >= 3.0, "dark={}", t.dark);
             for fill in [t.hover, t.pressed] {
                 assert!(contrast(t.foreground, fill) >= 4.5, "dark={}", t.dark);
             }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Picking and the inspector** ([#29](https://github.com/vig-os/stepv/issues/29)): click a face in
+  `stepv view` to see what it exactly is, from `--topology`
+  - The surface type and parameters (a plane's normal, a cylinder's radius, ⌀ and axis, …) in
+    model coordinates, the face's area, and the part's volume and size
+  - The face is highlighted; Esc clears it
+  - A section plane (X, Y or Z, flippable) cuts the model, and picks and highlights honour it
 - **GPU viewer** ([#28](https://github.com/vig-os/stepv/issues/28), for
   [#21](https://github.com/vig-os/stepv/issues/21)): `stepv view` draws on the GPU through egui +
   wgpu (Metal, Vulkan or GL)

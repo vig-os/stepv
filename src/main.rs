@@ -49,8 +49,10 @@ OPTIONS:
     -h, --help           Print this help
 
 VIEWER:
-    Drag to orbit, right- or shift-drag to pan, scroll to zoom; R reset,
-    F front, T top, C construction curves, Q or Esc to quit. Defaults to
+    Drag to orbit, right- or shift-drag to pan, scroll to zoom; click a face
+    to inspect its exact surface (Esc clears it); R reset, F front, T top,
+    C construction curves, Q or Esc to quit. The Section panel cuts the
+    model along X, Y or Z. Defaults to
     --quality preview and --timeout 120. Draws on the GPU (Metal, Vulkan
     or GL), or in software when there is no usable adapter; the JSON line
     says which as \"backend\".
@@ -230,9 +232,40 @@ fn run(args: &Args) -> (u8, Value) {
         return (EXIT_OK, report);
     }
     if args.view {
-        let scene = match tessellate(args, &mut report, None, None) {
+        // The exact B-rep for the inspector (#29) comes with the mesh.
+        let topo_tmp = temp_path("json");
+        let mut result = tessellate(args, &mut report, None, Some(&topo_tmp));
+        let mut topo_bytes = std::fs::read(&topo_tmp);
+        let _ = std::fs::remove_file(&topo_tmp);
+        // The kernel failed in the topology stage, after the mesh: open the
+        // viewer without the inspector rather than not at all (#29 review).
+        if result.is_err() && topology_failed(&report) {
+            eprintln!(
+                "stepv: the exact topology failed ({}); opening without the inspector",
+                report["error"].as_str().unwrap_or("unknown error")
+            );
+            report = json!({ "stepv": report["stepv"], "info": report["info"] });
+            result = tessellate(args, &mut report, None, None);
+            topo_bytes = Err(std::io::Error::other("the kernel's topology stage failed"));
+        }
+        let scene = match result {
             Ok((s, _)) => s,
             Err(code) => return (code, report),
+        };
+        // Without it the viewer still opens: it only cannot name surfaces.
+        let topology = match topo_bytes
+            .map_err(|e| e.to_string())
+            .and_then(|b| Topology::parse(&b).map_err(|e| e.to_string()))
+            .and_then(|t| {
+                t.check_against(&scene)
+                    .map(|()| t)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("stepv: no exact topology for the inspector: {e}");
+                None
+            }
         };
         let name = args
             .input
@@ -252,8 +285,11 @@ fn run(args: &Args) -> (u8, Value) {
             sandbox,
             file: name,
             screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT").map(PathBuf::from),
+            pick_at: std::env::var("STEPV_VIEW_PICK")
+                .ok()
+                .and_then(|s| view::parse_pick_at(&s)),
         };
-        return match view::run(scene, &title, &opts) {
+        return match view::run(scene, topology, &title, &opts) {
             Ok(backend) => {
                 report["status"] = json!("ok");
                 report["backend"] = json!(backend.name());
@@ -367,6 +403,12 @@ fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
     report["status"] = json!(status);
     report["error"] = json!(msg);
     code
+}
+
+/// Whether a failed kernel run got as far as the topology, its last stage:
+/// the mesh was fine, only `--topology` failed.
+fn topology_failed(report: &Value) -> bool {
+    report["kernel"]["stage"] == "topology"
 }
 
 /// Runs the kernel and decodes its buffers. On failure, fills `report` and
@@ -627,6 +669,18 @@ mod tests {
                 .limits
                 .timeout,
             Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn only_a_topology_stage_failure_is_retried() {
+        assert!(topology_failed(&json!({"kernel": {"stage": "topology"}})));
+        for stage in ["read", "transfer", "mesh", "done"] {
+            assert!(!topology_failed(&json!({"kernel": {"stage": stage}})));
+        }
+        assert!(
+            !topology_failed(&json!({"kernel": null})),
+            "no summary: a crash, not this"
         );
     }
 

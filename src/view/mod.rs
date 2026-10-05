@@ -15,6 +15,7 @@ mod app;
 pub mod controls;
 #[cfg(feature = "viewer")]
 pub mod gpu;
+pub mod inspect;
 #[cfg(feature = "viewer")]
 pub mod software;
 #[cfg(feature = "viewer")]
@@ -102,6 +103,17 @@ pub struct Options {
     /// `STEPV_VIEW_SCREENSHOT`: draw, save the window as PNG here, and quit.
     /// The tests' and the PR screenshots' hook.
     pub screenshot: Option<PathBuf>,
+    /// `STEPV_VIEW_PICK=x,y`: click there (fractions of the viewport) once
+    /// the first frame is drawn. With `screenshot`, it waits for the pick.
+    pub pick_at: Option<(f32, f32)>,
+}
+
+/// Parses `STEPV_VIEW_PICK`'s `x,y`, each 0..1.
+#[must_use]
+pub fn parse_pick_at(s: &str) -> Option<(f32, f32)> {
+    let (x, y) = s.split_once(',')?;
+    let (x, y): (f32, f32) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
+    ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
 }
 
 /// The backend to open, given `--software` and what [`gpu::probe`] found,
@@ -124,7 +136,12 @@ pub fn choose(software: bool, adapter: Option<Backend>) -> (Backend, Option<&'st
 /// # Errors
 /// When no window can be opened at all, or the scene is empty.
 #[cfg(feature = "viewer")]
-pub fn run(scene: crate::Scene, title: &str, opts: &Options) -> Result<Backend, String> {
+pub fn run(
+    scene: crate::Scene,
+    topology: Option<crate::topology::Topology>,
+    title: &str,
+    opts: &Options,
+) -> Result<Backend, String> {
     let probe = if opts.software { None } else { gpu::probe() };
     let (backend, note) = choose(opts.software, probe);
     if let Some(note) = note {
@@ -134,7 +151,7 @@ pub fn run(scene: crate::Scene, title: &str, opts: &Options) -> Result<Backend, 
         software::run(&scene, title, opts.screenshot.as_deref())?;
         return Ok(Backend::Software);
     }
-    match app::run(scene, title, opts) {
+    match app::run(scene, topology, title, opts) {
         Ok(b) => Ok(b),
         // The window never opened: the probe found an adapter the window
         // could not use (a surface it cannot present to, a device it refused).
@@ -152,7 +169,12 @@ pub fn run(scene: crate::Scene, title: &str, opts: &Options) -> Result<Backend, 
 /// # Errors
 /// Always.
 #[cfg(not(feature = "viewer"))]
-pub fn run(_scene: crate::Scene, _title: &str, _opts: &Options) -> Result<Backend, String> {
+pub fn run(
+    _scene: crate::Scene,
+    _topology: Option<crate::topology::Topology>,
+    _title: &str,
+    _opts: &Options,
+) -> Result<Backend, String> {
     Err("this stepv was built without the `viewer` feature".into())
 }
 
@@ -194,6 +216,13 @@ mod tests {
             names,
             ["metal", "vulkan", "gl", "dx12", "other", "software"]
         );
+    }
+
+    #[test]
+    fn pick_at_parses_fractions_only() {
+        assert_eq!(parse_pick_at("0.5, 0.25"), Some((0.5, 0.25)));
+        assert_eq!(parse_pick_at("2,0"), None);
+        assert_eq!(parse_pick_at("x"), None);
     }
 
     #[test]

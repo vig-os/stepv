@@ -41,8 +41,9 @@ pub fn icon_button(
     if selected {
         b = b.fill(t.accent);
     } else {
-        // Quiet at rest, as shadcn's "ghost" button: the fill shows on hover.
-        b = b.fill(Color32::TRANSPARENT);
+        // Quiet at rest, as shadcn's "ghost" button: no outline, and the
+        // fill shows on hover.
+        b = b.fill(Color32::TRANSPARENT).stroke(egui::Stroke::NONE);
     }
     ui.add(b).on_hover_text(tooltip)
 }
