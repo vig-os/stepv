@@ -28,7 +28,13 @@ trap 'rm -rf "$stage"' EXIT
 pkg="$stage/stepv"
 mkdir -p "$pkg/bin" "$pkg/libexec" "$pkg/lib"
 
-install -m755 "$result/bin/stepv" "$pkg/libexec/stepv.bin"
+# The real binary: on Linux the nix product's bin/stepv is makeWrapper's
+# script (LD_LIBRARY_PATH for the viewer's libraries, #32), and the binary is
+# bin/.stepv-wrapped. The tarball has its own launcher (below), which takes
+# those libraries from the host instead.
+bin="$result/bin/stepv"
+[ -e "$result/bin/.stepv-wrapped" ] && bin="$result/bin/.stepv-wrapped"
+install -m755 "$bin" "$pkg/libexec/stepv.bin"
 install -m755 "$result/libexec/stepv/stepv-occt" "$pkg/libexec/stepv-occt.bin"
 cp -r "$result/share" "$pkg/share"
 chmod -R u+w "$pkg/share"
