@@ -315,6 +315,12 @@ fn run(args: &Args) -> (u8, Value) {
                 .map(|s| view::parse_pick_at(&s))
                 .unwrap_or_default(),
             measure: std::env::var_os("STEPV_VIEW_MEASURE").is_some_and(|v| v == "1"),
+            section: std::env::var("STEPV_VIEW_SECTION").ok().and_then(|s| {
+                let mut f = s.split(',').map(str::trim);
+                let (a, o): (usize, f32) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+                let flip = f.next() == Some("flip");
+                (a < 3 && (0.0..=1.0).contains(&o)).then_some((a, o, flip))
+            }),
         };
         return match view::run(scene, topology, &title, &opts) {
             Ok(ran) => {

@@ -115,6 +115,10 @@ pub struct Options {
     /// `STEPV_VIEW_MEASURE=1`: start in measure mode, and report each
     /// measurement on stderr (the window tests' hook, with `pick_at`).
     pub measure: bool,
+    /// `STEPV_VIEW_SECTION=axis,offset[,flip]` (axis 0..2, offset 0..1):
+    /// open with the model cut there and capped (#34's screenshots and
+    /// window test).
+    pub section: Option<(usize, f32, bool)>,
     /// The file and the limits a measurement server (#33) reads it with.
     pub input: Option<PathBuf>,
     pub limits: Option<crate::occt::Limits>,

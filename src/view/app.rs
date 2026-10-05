@@ -35,6 +35,8 @@ pub struct RenderKey {
     pub show_construction: bool,
     /// Draw the B-rep edges (#31).
     pub show_edges: bool,
+    /// Cap the section's cut (#34).
+    pub cap: bool,
     /// The viewport in physical pixels, at most the device's texture size.
     pub size: [u32; 2],
     pub dark: bool,
@@ -136,6 +138,8 @@ struct Viewer {
     /// The id pass's target, kept between clicks at the viewport's size.
     ids: Option<IdTarget>,
     cut: bool,
+    /// Cap the cut, hatched (#34).
+    cap: bool,
     section: Section,
     /// `STEPV_VIEW_PICK`: a click to make once the first frame is drawn.
     pick_at: std::collections::VecDeque<super::PickAt>,
@@ -245,11 +249,12 @@ impl Viewer {
             tree,
             uploaded: 0,
             reveal: false,
-            cut: false,
+            cut: opts.section.is_some(),
+            cap: true,
             section: Section {
-                axis: 0,
-                offset: 0.5,
-                flip: false,
+                axis: opts.section.map_or(0, |(a, _, _)| a),
+                offset: opts.section.map_or(0.5, |(_, o, _)| o),
+                flip: opts.section.is_some_and(|(_, _, f)| f),
             },
         })
     }
@@ -631,6 +636,7 @@ impl Viewer {
         widgets::section_header(ui, "Section");
         ui.checkbox(&mut self.cut, "Cut the model");
         ui.add_enabled_ui(self.cut, |ui| {
+            ui.checkbox(&mut self.cap, "Cap the cut");
             ui.horizontal(|ui| {
                 for (k, name) in ["X", "Y", "Z"].iter().enumerate() {
                     ui.radio_value(&mut self.section.axis, k, *name);
@@ -655,6 +661,9 @@ impl Viewer {
             camera: key.camera,
             show_construction: key.show_construction,
             show_edges: key.show_edges,
+            cap: key.cap,
+            // 1.5 px at the display's scale (stripe is 6 px at it).
+            line_width: key.stripe as f32 / 4.0,
             clear: t.viewport.to_normalized_gamma_f32().map(f64::from),
             stripe: key.stripe,
             section: key.section,
@@ -874,6 +883,7 @@ impl Viewer {
             camera: self.controls.camera,
             show_construction: self.controls.show_construction,
             show_edges: self.show_edges,
+            cap: self.cap,
             size: physical(rect.size(), ppp).map(|v| v.min(max)),
             dark,
             stripe: (6.0 * ppp).round().max(1.0) as u32,
@@ -1179,6 +1189,7 @@ mod tests {
             camera: Camera::default(),
             show_construction: false,
             show_edges: true,
+            cap: true,
             size: [100, 100],
             dark: false,
             stripe: 6,

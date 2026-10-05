@@ -88,6 +88,9 @@
 #include <GProp_GProps.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <NCollection_DataMap.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
@@ -605,16 +608,50 @@ struct ProtoGeom {
     std::vector<EdgeGeom> edges;                // B-rep edges, with --edges
 };
 
-// The prototype's B-rep edges as polylines, at the mesh's deflection and in
-// the topology's numbering (#31). An edge OCCT cannot sample is left out:
-// the edge list is for drawing and picking, not a contract on completeness.
+// An edge's polyline as the mesher drew it: its nodes on the triangulation
+// of a face it bounds, so it lies exactly on the triangles' boundary and
+// needs almost no depth pull to win against them (#34). Empty when no
+// adjacent face has a triangulation carrying it.
+std::vector<gp_Pnt> edge_on_triangulation(const TopoDS_Edge& e,
+                                          const TopTools_ListOfShape& faces) {
+    for (const TopoDS_Shape& f : faces) {
+        TopLoc_Location loc;
+        const Handle(Poly_Triangulation) tri =
+            BRep_Tool::Triangulation(TopoDS::Face(f), loc);
+        if (tri.IsNull()) continue;
+        const Handle(Poly_PolygonOnTriangulation) poly =
+            BRep_Tool::PolygonOnTriangulation(e, tri, loc);
+        if (poly.IsNull() || poly->NbNodes() < 2) continue;
+        std::vector<gp_Pnt> pts;
+        pts.reserve(static_cast<std::size_t>(poly->NbNodes()));
+        for (int k = 1; k <= poly->NbNodes(); ++k)
+            pts.push_back(tri->Node(poly->Node(k)).Transformed(loc.Transformation()));
+        return pts;
+    }
+    return {};
+}
+
+// The prototype's B-rep edges as polylines, in the topology's numbering
+// (#31): from the triangulation where the mesher drew them, else sampled
+// from the curve at the mesh's deflection. An edge OCCT cannot sample is
+// left out: the list is for drawing and picking, not a contract on
+// completeness.
 std::vector<EdgeGeom> edge_geometry(const TopoDS_Shape& shape, const IMeshTools_Parameters& p) {
     std::vector<EdgeGeom> out;
     const TopTools_IndexedMapOfShape edges = stepv::topology_edges(shape);
+    TopTools_IndexedDataMapOfShapeListOfShape faces_of;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, faces_of);
     out.reserve(static_cast<std::size_t>(edges.Extent()));
     for (int i = 1; i <= edges.Extent(); ++i) {
         try {
             const TopoDS_Edge& e = TopoDS::Edge(edges(i));
+            if (const TopTools_ListOfShape* faces = faces_of.Seek(e)) {
+                std::vector<gp_Pnt> pts = edge_on_triangulation(e, *faces);
+                if (!pts.empty()) {
+                    out.push_back({static_cast<uint32_t>(i - 1), std::move(pts)});
+                    continue;
+                }
+            }
             if (!BRep_Tool::IsGeometric(e)) continue;
             BRepAdaptor_Curve c(e);
             GCPnts_TangentialDeflection d(c, p.Angle, p.Deflection);

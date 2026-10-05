@@ -16,6 +16,8 @@
 #      and the inspector's topology names it a plane.
 #   6. `stepv view --frames 30` on every tests/data file: the GPU backend, and
 #      30 frames reported (#32's smoke test).
+#   8. A section (#34): cut through the hole and the pins, capped: the
+#      hatched cap's two greys fill a good part of the window.
 #   7. Measure mode (#33): two clicks on the pins (model points, so the same
 #      spot at any window size) measure 28 mm between their axes, through
 #      the sandboxed kernel server.
@@ -167,6 +169,41 @@ m = re.search(r"STEPV_VIEW_MEASURE distance Some\(([0-9.e-]+)\) Some\(([0-9.e-]+
 assert m and abs(float(m.group(1)) - 24) < 1e-6 and abs(float(m.group(2)) - 28) < 1e-6
 PY
 echo "ok: measure mode: the pins' axes are 28 mm apart"
+
+# 8. A capped section, through the window.
+shot="$tmp/section.png"
+out=$(STEPV_VIEW_SECTION=1,0.5,flip STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --theme light 2>"$tmp/err") || true
+read -r status backend error <<<"$(report <<<"$out")"
+[ "$status" = ok ] || fail "section: $status $backend ($error): $(cat "$tmp/err")"
+python3 - "$shot" <<'PY' || fail "section: no cap in the window"
+import struct, sys, zlib
+data = open(sys.argv[1], "rb").read()
+pos, idat = 8, b""
+while pos < len(data):
+    n, kind = struct.unpack(">I4s", data[pos:pos + 8]); body = data[pos + 8:pos + 8 + n]
+    if kind == b"IHDR": w, h, _, ct = struct.unpack(">IIBB", body[:10])
+    elif kind == b"IDAT": idat += body
+    pos += 12 + n
+raw, bpp = zlib.decompress(idat), (4 if ct == 6 else 3)
+stride, prev, cap = w * bpp, bytearray(w * bpp), 0
+for y in range(h):
+    f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+    for i in range(stride):
+        a = line[i - bpp] if i >= bpp else 0; b = prev[i]; c = prev[i - bpp] if i >= bpp else 0
+        if f == 1: line[i] = (line[i] + a) & 255
+        elif f == 2: line[i] = (line[i] + b) & 255
+        elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+        elif f == 4:
+            p = a + b - c; pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    for x in range(0, stride, bpp):
+        r, g, bb = line[x:x + 3]
+        # The cap's fill (~150) or hatch (~80) grey.
+        if max(r, g, bb) - min(r, g, bb) < 12 and (60 < r < 100 or 135 < r < 170): cap += 1
+    prev = line
+assert cap > 2000, f"only {cap} cap pixels"
+PY
+echo "ok: a section through the hole and pins is capped"
 
 # 6. --frames on every committed file.
 for f in "$root"/tests/data/*.step "$root"/tests/data/*.brep "$root"/tests/data/*.igs; do
