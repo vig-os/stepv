@@ -31,6 +31,31 @@ pub struct Measurer {
     rx: Receiver<(u64, Result<Answer, Error>)>,
 }
 
+/// The queries of `batch` still worth asking: the newest measurement pair
+/// (a later pick made the rest stale, and a slow one must not hold up the
+/// next, #33 review), and the newest section (#43: the slider moved on).
+fn fresh(batch: Vec<(u64, Query)>) -> Vec<(u64, Query)> {
+    let section = |q: &Query| matches!(q, Query::Section(_));
+    let newest = |want: bool| {
+        batch
+            .iter()
+            .filter(|(_, q)| section(q) == want)
+            .map(|(id, _)| *id)
+            .max()
+    };
+    let (pair, cut) = (newest(false).unwrap_or(0), newest(true));
+    batch
+        .into_iter()
+        .filter(|(id, q)| {
+            if section(q) {
+                Some(*id) == cut
+            } else {
+                id + 1 >= pair
+            }
+        })
+        .collect()
+}
+
 impl Measurer {
     /// Starts the worker; the kernel starts on the first query.
     #[must_use]
@@ -41,15 +66,9 @@ impl Measurer {
         std::thread::spawn(move || {
             let mut server = Server::new(&kernel, &input, limits);
             while let Ok(first) = jobs.recv() {
-                // Only the newest pair: a later pick made the rest stale, and
-                // a slow one must not hold up the next (#33 review).
                 let mut batch = vec![first];
                 batch.extend(jobs.try_iter());
-                let newest = batch.iter().map(|(id, _)| *id).max().unwrap_or(0);
-                for (id, q) in batch {
-                    if id + 1 < newest {
-                        continue;
-                    }
+                for (id, q) in fresh(batch) {
                     if done.send((id, server.ask(&q))).is_err() {
                         return;
                     }
@@ -139,11 +158,7 @@ mod tests {
     fn answer(distance: f64) -> Answer {
         Answer {
             distance: Some(distance),
-            points: None,
-            axis_distance: None,
-            angle_deg: None,
-            point: None,
-            normal: None,
+            ..Answer::default()
         }
     }
 
@@ -171,6 +186,35 @@ mod tests {
         // A third pick starts over.
         assert!(m.pick(Pick { part: 2, face: 0 }, &mut next).is_empty());
         assert!(m.b.is_none() && m.distance.is_none());
+    }
+
+    #[test]
+    fn only_the_newest_pair_and_section_are_asked() {
+        let (a, b) = (
+            Entity::Face { part: 0, face: 0 },
+            Entity::Face { part: 0, face: 1 },
+        );
+        let cut = |w| Query::Section([0.0, 1.0, 0.0, w]);
+        let batch = vec![
+            (1, Query::Distance(a, b)),
+            (2, Query::Angle(a, b)),
+            (3, cut(1.0)),
+            (4, cut(2.0)),
+            (5, Query::Distance(b, a)),
+            (6, Query::Angle(b, a)),
+        ];
+        let ids: Vec<u64> = fresh(batch).iter().map(|(id, _)| *id).collect();
+        // A newer pair does not make the section stale, nor the other way.
+        assert_eq!(ids, [4, 5, 6]);
+        let ids: Vec<u64> = fresh(vec![
+            (7, Query::Distance(a, b)),
+            (8, Query::Angle(a, b)),
+            (9, cut(3.0)),
+        ])
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+        assert_eq!(ids, [7, 8, 9]);
     }
 
     #[test]

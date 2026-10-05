@@ -10,7 +10,15 @@
 //     -> {"id": 2, "ok": true, "angle_deg": f}
 //   {"id": 3, "op": "point", "a": {"part": 0, "face": 2}, "near": [x,y,z]}
 //     -> {"id": 3, "ok": true, "point": [x,y,z], "normal": [x,y,z]}   (normal: faces)
+//   {"id": 4, "op": "section", "plane": [nx, ny, nz, w]}
+//     -> {"id": 4, "ok": true, "caps": [{"part": p, "positions": [x,y,z,...],
+//                                        "indices": [i,j,k,...]}, ...]}
 //   anything wrong -> {"id": n, "ok": false, "error": "..."}
+//
+// A section (#43) is the exact cut of every solid part by the plane
+// dot(p, n) = w, as the viewer's section keeps dot(p, n) <= w: per part the
+// plane crosses, the cut's faces (holes left out), triangulated. A part with
+// no solid (a sheet, a sketch), or that the plane misses, has no cap.
 //
 // Entities are (part, face) or (part, edge), numbered exactly as --topology
 // numbers them: a part is the mesh's part i, a face its prototype's face in
@@ -34,7 +42,11 @@ namespace stepv {
 // is none.
 using Resolve = std::function<std::optional<TopoDS_Shape>(long part, bool edge, long index)>;
 
+// The placed shape of part `part`; nullopt past the last part.
+using ResolvePart = std::function<std::optional<TopoDS_Shape>(long part)>;
+
 // Answers one query line. Never throws: OCCT failures become ok:false.
-std::string answer_query(const std::string& line, const Resolve& resolve);
+std::string answer_query(const std::string& line, const Resolve& resolve,
+                         const ResolvePart& part);
 
 }  // namespace stepv

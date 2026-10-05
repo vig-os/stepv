@@ -24,6 +24,7 @@ pub use eframe::egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
 use super::Backend;
+use crate::measure::Cap;
 use crate::render::{self, Camera};
 use crate::{FaceStatus, LineKind, Scene};
 
@@ -297,6 +298,8 @@ pub struct Layout {
     /// shell: a ray through its hole crosses it once, and the parity would
     /// hatch the plane outside any solid (#34 review).
     pub capped: Vec<bool>,
+    /// Per part: its colour, linear RGB, for its exact section cap (#43).
+    pub part_colors: Vec<[f32; 3]>,
     pub parts: Vec<PartRange>,
     /// The fit without, and with, construction curves (`render.rs` frames
     /// only what it draws).
@@ -389,6 +392,8 @@ impl Layout {
                 }
                 at += n as usize;
             }
+            let c = part.color.unwrap_or(render::DEFAULT_COLOR);
+            l.part_colors.push([c.r, c.g, c.b]);
             l.capped.push(
                 !part.mesh.indices.is_empty()
                     && part.faces.iter().all(|f| f.status != FaceStatus::Missing),
@@ -621,7 +626,24 @@ impl Target {
     }
 }
 
-/// A section cap's fill and hatch, linear (#34): neutral, so a cap never
+/// A vertex of an exact section cap (#43): on the plane, in model
+/// coordinates, with its part's colour, the part, and the cap's rank among
+/// the caps (later ranks are drawn a hair in front).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+struct CapVertex {
+    position: [f32; 3],
+    color: [f32; 3],
+    part: u32,
+    rank: u32,
+}
+
+/// The exact caps' depth step, per rank (NDC depth; the model's bounding
+/// sphere spans 0.5): where two parts overlap (an interference), the later
+/// cap shows, never a mix of both.
+const CAP_STEP: f32 = 1.0 / 262_144.0;
+
+/// The stencil cap's fill and hatch, linear (#34): neutral, so a cap never
 /// reads as a part's own colour.
 const CAP_COLOR: [f32; 3] = [0.30, 0.31, 0.33];
 const CAP_HATCH: [f32; 3] = [0.08, 0.085, 0.095];
@@ -758,6 +780,37 @@ struct CapOut { @builtin(position) pos: vec4<f32> };
   return encode(select(CAP, CAP_HATCH, line));
 }
 
+// Exact caps (#43): the kernel's section of each part, in the part's colour,
+// hatched as the stencil cap is. On the plane itself, so never cut().
+struct ExactOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(flat) color: vec3<f32>,
+  @location(1) @interpolate(flat) part: u32,
+};
+
+@vertex fn vs_exact(@location(0) p: vec3<f32>, @location(1) c: vec3<f32>,
+                    @location(2) part_rank: vec2<u32>) -> ExactOut {
+  var o: ExactOut;
+  o.pos = u.clip * vec4(p, 1.0);
+  o.pos.z = max(o.pos.z - f32(part_rank.y) * CAP_STEP, 0.0);
+  o.color = c;
+  o.part = part_rank.x;
+  return o;
+}
+
+@fragment fn fs_exact(i: ExactOut) -> @location(0) vec4<f32> {
+  if (!shown(i.part)) { discard; }
+  let period = 3.0 * f32(u.flags.y);
+  let line = fract((i.pos.x + i.pos.y) / period) < 0.22;
+  return encode(select(i.color * 0.6, i.color * 0.22, line));
+}
+
+// As the stencil cap: a click on it picks nothing behind it.
+@fragment fn fs_id_exact(i: ExactOut) -> @location(0) vec2<u32> {
+  if (!shown(i.part)) { discard; }
+  return vec2(0u, 0u);
+}
+
 struct LineOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) @interpolate(flat) kind_part: vec2<u32>,
@@ -865,6 +918,9 @@ pub struct Renderer {
     cap: wgpu::RenderPipeline,
     id_stencil: [wgpu::RenderPipeline; 8],
     id_cap: wgpu::RenderPipeline,
+    /// Exact caps (#43), when the scene has them for the plane drawn.
+    exact: wgpu::RenderPipeline,
+    id_exact: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -898,7 +954,8 @@ impl Renderer {
         let consts = format!(
             "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\nconst EDGE_PULL = {:?};\n\
              const APPROX = {};\nconst APPROX_DARK = {};\nconst OVERLAY_STRIPES = {}u;\n\
-             const EDGE = {};\nconst EDGE_BIT = {}u;\nconst CAP = {};\nconst CAP_HATCH = {};\n",
+             const EDGE = {};\nconst EDGE_BIT = {}u;\nconst CAP = {};\nconst CAP_HATCH = {};\n\
+             const CAP_STEP = {:?};\n",
             rgb(render::MISSING),
             rgb(render::CONSTRUCTION),
             rgb(render::SKETCH),
@@ -909,7 +966,8 @@ impl Renderer {
             rgb(EDGE_COLOR),
             Pick::EDGE_BIT,
             rgb(CAP_COLOR),
-            rgb(CAP_HATCH)
+            rgb(CAP_HATCH),
+            CAP_STEP
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stepv view"),
@@ -1202,6 +1260,31 @@ impl Renderer {
                 ..Output::shaded()
             },
         );
+        let cap_vertex = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<CapVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32x2],
+        })];
+        let exact = pipeline(
+            "stepv exact cap",
+            "vs_exact",
+            "fs_exact",
+            &cap_vertex,
+            wgpu::PrimitiveTopology::TriangleList,
+            Output::shaded(),
+        );
+        let id_exact = pipeline(
+            "stepv id exact cap",
+            "vs_exact",
+            "fs_id_exact",
+            &cap_vertex,
+            wgpu::PrimitiveTopology::TriangleList,
+            Output {
+                target: ID.into(),
+                samples: 1,
+                ..Output::shaded()
+            },
+        );
         Self {
             mesh,
             lines,
@@ -1213,6 +1296,8 @@ impl Renderer {
             cap,
             id_stencil,
             id_cap,
+            exact,
+            id_exact,
             layout,
         }
     }
@@ -1273,8 +1358,11 @@ impl Renderer {
                     pass.set_pipeline(&self.highlight);
                     draw_mesh(&mut pass, scene, Some(pick.part as usize));
                 }
-                if view.section.is_some() && view.cap {
-                    draw_cap(&mut pass, scene, &self.stencil, &self.cap);
+                if let Some(plane) = view.section.filter(|_| view.cap) {
+                    match scene.exact_caps(plane) {
+                        Some(caps) => draw_exact(&mut pass, caps, &self.exact),
+                        None => draw_cap(&mut pass, scene, &self.stencil, &self.cap),
+                    }
                 }
             }
             if scene.has_edges {
@@ -1351,8 +1439,11 @@ impl Renderer {
             if scene.has_mesh {
                 pass.set_pipeline(&self.id);
                 draw_mesh(&mut pass, scene, None);
-                if view.section.is_some() && view.cap {
-                    draw_cap(&mut pass, scene, &self.id_stencil, &self.id_cap);
+                if let Some(plane) = view.section.filter(|_| view.cap) {
+                    match scene.exact_caps(plane) {
+                        Some(caps) => draw_exact(&mut pass, caps, &self.id_exact),
+                        None => draw_cap(&mut pass, scene, &self.id_stencil, &self.id_cap),
+                    }
                 }
             }
             if scene.has_edges {
@@ -1465,6 +1556,14 @@ fn draw_cap(
     pass.set_pipeline(cap);
     pass.set_vertex_buffer(0, scene.cap.slice(..));
     pass.draw(0..6, 0..1);
+}
+
+/// The exact caps (#43): the kernel's triangles, hidden parts discarded in
+/// the fragment shader.
+fn draw_exact(pass: &mut wgpu::RenderPass<'_>, caps: &ExactCaps, pipeline: &wgpu::RenderPipeline) {
+    pass.set_pipeline(pipeline);
+    pass.set_vertex_buffer(0, caps.vertices.slice(..));
+    pass.draw(0..caps.count, 0..1);
 }
 
 /// Draws the B-rep edges: one fat-line instance per segment (hidden parts
@@ -1646,6 +1745,10 @@ pub struct GpuScene {
     cap: wgpu::Buffer,
     /// Per part: whether it takes part in the cap's parity.
     capped: Vec<bool>,
+    /// Per part: its colour, for its exact cap.
+    part_colors: Vec<[f32; 3]>,
+    /// The kernel's exact caps (#43), for the one plane they were cut by.
+    exact: Option<ExactCaps>,
     uniforms: wgpu::Buffer,
     visible: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -1658,6 +1761,13 @@ pub struct GpuScene {
     pub bounds: Option<([f32; 3], [f32; 3])>,
     /// The CPU mirror of the GPU bitset: hidden parts are not drawn at all.
     visibility: Visibility,
+}
+
+/// The kernel's exact section caps (#43), uploaded for one plane.
+pub struct ExactCaps {
+    plane: [f32; 4],
+    vertices: wgpu::Buffer,
+    count: u32,
 }
 
 impl GpuScene {
@@ -1770,6 +1880,8 @@ impl GpuScene {
             line_parts,
             edge_segments: layout.edge_parts.len() as u32,
             capped: layout.capped.clone(),
+            part_colors: layout.part_colors.clone(),
+            exact: None,
             line_segments: layout.line_parts.len() as u32,
             cap: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("cap"),
@@ -1797,6 +1909,63 @@ impl GpuScene {
         for (c, &s) in self.capped.iter_mut().zip(solid) {
             *c &= s;
         }
+    }
+
+    /// Sets the kernel's exact section caps for `plane` (#43). They are
+    /// drawn for that plane only; any other gets the stencil cap. Caps
+    /// naming no part of this scene are dropped.
+    pub fn set_exact_caps(&mut self, device: &wgpu::Device, plane: [f32; 4], caps: &[Cap]) {
+        let mut vertices = Vec::new();
+        let mut rank = 0;
+        for c in caps {
+            let Some(&color) = self.part_colors.get(c.part as usize) else {
+                continue;
+            };
+            let at = |i: u32| c.positions.get(i as usize * 3..i as usize * 3 + 3);
+            let before = vertices.len();
+            for t in c.indices.chunks_exact(3) {
+                // A triangle naming a vertex the cap lacks is skipped whole.
+                let (Some(a), Some(b), Some(d)) = (at(t[0]), at(t[1]), at(t[2])) else {
+                    continue;
+                };
+                for p in [a, b, d] {
+                    vertices.push(CapVertex {
+                        position: [p[0], p[1], p[2]],
+                        color,
+                        part: c.part,
+                        rank,
+                    });
+                }
+            }
+            if vertices.len() > before {
+                rank += 1;
+            }
+        }
+        self.exact = Some(ExactCaps {
+            plane,
+            count: vertices.len() as u32,
+            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("exact caps"),
+                // wgpu refuses an empty buffer; nothing is drawn from it.
+                contents: if vertices.is_empty() {
+                    &[0u8; std::mem::size_of::<CapVertex>()][..]
+                } else {
+                    bytemuck::cast_slice(&vertices)
+                },
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+        });
+    }
+
+    /// Drops the exact caps: every plane gets the stencil cap again.
+    pub fn clear_exact_caps(&mut self) {
+        self.exact = None;
+    }
+
+    /// The exact caps, when they were cut by `plane`.
+    #[must_use]
+    pub fn exact_caps(&self, plane: [f32; 4]) -> Option<&ExactCaps> {
+        self.exact.as_ref().filter(|e| e.plane == plane)
     }
 
     /// The sphere a view frames: without, or with, construction curves.

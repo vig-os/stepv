@@ -49,11 +49,26 @@ pub enum Query {
     Angle(Entity, Entity),
     /// The point of an entity nearest `near`, and a face's normal there.
     Point(Entity, [f64; 3]),
+    /// The exact section of every solid part by the plane `(n, w)`, the
+    /// viewer's convention (kept: `dot(p, n) <= w`), triangulated: a cap per
+    /// part the plane cuts (#43).
+    Section([f64; 4]),
+}
+
+/// One part's section by a [`Query::Section`] plane: triangles on the plane,
+/// holes left out, in model coordinates.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Cap {
+    pub part: u32,
+    /// x, y, z per vertex.
+    pub positions: Vec<f32>,
+    /// Three per triangle, into [`Self::positions`].
+    pub indices: Vec<u32>,
 }
 
 /// The kernel's answer to a [`Query`], all in millimetres and model
 /// coordinates.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Answer {
     pub distance: Option<f64>,
     /// The witness points of [`Self::distance`]: on the first entity, then
@@ -63,6 +78,8 @@ pub struct Answer {
     pub angle_deg: Option<f64>,
     pub point: Option<[f64; 3]>,
     pub normal: Option<[f64; 3]>,
+    /// A [`Query::Section`]'s caps, one per part cut.
+    pub caps: Option<Vec<Cap>>,
 }
 
 /// Why a query has no answer.
@@ -246,6 +263,7 @@ impl Server {
             Query::Point(a, near) => {
                 json!({ "id": id, "op": "point", "a": a.to_json(), "near": near })
             }
+            Query::Section(plane) => json!({ "id": id, "op": "section", "plane": plane }),
         };
         self.raw(&line)
     }

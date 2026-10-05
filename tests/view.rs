@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use stepv::measure::{Query, Server};
 use stepv::occt::{self, Limits, Outcome};
 use stepv::render::{self, Camera};
 use stepv::topology::Topology;
@@ -353,6 +354,103 @@ fn a_section_through_the_bracket_caps_the_plate_and_keeps_the_hole_open() {
     assert!(!grey(hole), "the hole is capped over: {hole:?}");
     // Above the plate, between the pins: nothing at all.
     assert_eq!(pixel([20.0, 15.0, 10.0])[3], 0);
+}
+
+/// #43's acceptance: with the kernel's exact section, each part has its own
+/// cap in its own colour, so the pins show *inside* the plate as well (they
+/// interfere with it), not as one grey parity cap. Any other plane falls
+/// back to the stencil cap.
+#[test]
+fn exact_caps_show_each_part_in_the_plate_too() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let scene = load("assembly.step");
+    let mut gs = g.upload(&scene);
+    let plane = [0.0, 1.0, 0.0, 15.0];
+    let mut server = Server::new(
+        &occt::kernel_path(),
+        &data("assembly.step"),
+        Limits::DEFAULT,
+    );
+    let answer = server
+        .ask(&Query::Section(plane.map(f64::from)))
+        .expect("the kernel cuts the bracket");
+    gs.set_exact_caps(&g.device, plane, &answer.caps.unwrap());
+    let cam = Camera {
+        azimuth_deg: 180.0,
+        elevation_deg: 0.0,
+        ..Camera::default()
+    };
+    let view = View {
+        section: Some(plane),
+        ..View::new(cam)
+    };
+    let (w, h) = (640, 480);
+    let m = clip_matrix(&cam, &gs.fits[0].unwrap(), w, h);
+    let at = |img: &render::Image, p: [f32; 3]| {
+        let c = [0, 1].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
+        img.pixel(
+            ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+            ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+        )
+    };
+    // The plate is blue, the pins orange, both hatched darker.
+    let blue = |p: [u8; 4]| p[3] == 255 && p[2] > p[0] + 40;
+    let orange = |p: [u8; 4]| p[3] == 255 && p[0] > p[2] + 60 && p[0] > p[1];
+    let img = g.render(&gs, &view, w, h);
+    for p in [[2.0, 15.0, 2.5], [12.0, 15.0, 1.0], [30.0, 15.0, 4.0]] {
+        assert!(
+            blue(at(&img, p)),
+            "{p:?}: not the plate's cap: {:?}",
+            at(&img, p)
+        );
+    }
+    // A pin above the plate, and inside it: its own cap, both.
+    for p in [
+        [6.0, 15.0, 10.0],
+        [6.0, 15.0, 2.5],
+        [34.0, 15.0, 2.5],
+        [5.0, 15.0, 1.0],
+    ] {
+        assert!(
+            orange(at(&img, p)),
+            "{p:?}: not a pin's cap: {:?}",
+            at(&img, p)
+        );
+    }
+    // Another plane: the stencil cap, grey, until the kernel answers for it.
+    let grey = |p: [u8; 4]| {
+        let (hi, lo) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+        p[3] == 255 && hi - lo < 20
+    };
+    let other = [0.0, 1.0, 0.0, 14.0];
+    let img = g.render(
+        &gs,
+        &View {
+            section: Some(other),
+            ..view
+        },
+        w,
+        h,
+    );
+    let p = [6.0, 14.0, 2.5];
+    assert!(
+        grey(at(&img, p)),
+        "{p:?}: no stencil fallback: {:?}",
+        at(&img, p)
+    );
+    // A click on an exact cap picks nothing behind it, as on the stencil's.
+    let c = [0, 1].map(|r| m[0][r] * 2.0 + m[1][r] * 15.0 + m[2][r] * 2.5 + m[3][r]);
+    let (px, py) = (
+        ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+        ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+    );
+    assert_eq!(
+        g.pick(&gs, &view, w, h, px, py),
+        None,
+        "picked through the cap"
+    );
 }
 
 #[test]

@@ -5,6 +5,15 @@
 #include "topology.h"
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS_Compound.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -18,6 +27,7 @@
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -289,9 +299,98 @@ std::string point(const std::string& id, const TopoDS_Shape& a, const Json* near
     return out + "}";
 }
 
+// The section op (measure.h): per solid part the plane crosses, the
+// Boolean common of its solids with a face on the plane, meshed.
+std::string section(const std::string& id, const Json* plane, const ResolvePart& part) {
+    if (!plane || plane->kind != Json::Array || plane->array.size() != 4)
+        return error(id, "section needs \"plane\": [nx, ny, nz, w]");
+    double v[4];
+    for (int k = 0; k < 4; ++k) {
+        if (plane->array[k].kind != Json::Number) return error(id, "plane: numbers");
+        v[k] = plane->array[k].number;
+    }
+    const double len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(len > 1e-12)) return error(id, "the plane's normal is zero");
+    const gp_Dir n(v[0] / len, v[1] / len, v[2] / len);
+    const double w = v[3] / len;
+    std::ostringstream o;
+    // Single precision is all a cap is drawn with.
+    o.precision(9);
+    o << "{\"id\":" << id << ",\"ok\":true,\"caps\":[";
+    bool first_cap = true;
+    for (long i = 0;; ++i) {
+        const auto shape = part(i);
+        if (!shape) break;
+        TopoDS_Compound solids;
+        BRep_Builder b;
+        b.MakeCompound(solids);
+        bool any = false;
+        for (TopExp_Explorer ex(*shape, TopAbs_SOLID); ex.More(); ex.Next()) {
+            b.Add(solids, ex.Current());
+            any = true;
+        }
+        if (!any) continue;
+        Bnd_Box box;
+        BRepBndLib::Add(solids, box);
+        if (box.IsVoid()) continue;
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        double lo = INFINITY, hi = -INFINITY;
+        for (const double x : {x0, x1})
+            for (const double y : {y0, y1})
+                for (const double z : {z0, z1}) {
+                    const double d = x * n.X() + y * n.Y() + z * n.Z() - w;
+                    lo = std::min(lo, d);
+                    hi = std::max(hi, d);
+                }
+        if (hi < 0 || lo > 0) continue;  // the plane misses it
+        // A face on the plane, centred on the box's projection and well past
+        // it, so the common is the whole section.
+        const gp_Pnt c((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+        const double off = c.X() * n.X() + c.Y() * n.Y() + c.Z() * n.Z() - w;
+        const gp_Pnt on(c.X() - off * n.X(), c.Y() - off * n.Y(), c.Z() - off * n.Z());
+        const double r = std::sqrt(box.SquareExtent()) + 1.0;
+        const TopoDS_Face face = BRepBuilderAPI_MakeFace(gp_Pln(on, n), -r, r, -r, r).Face();
+        BRepAlgoAPI_Common common(solids, face);
+        if (!common.IsDone() || common.HasErrors())
+            return error(id, "the section of part " + std::to_string(i) + " failed");
+        const TopoDS_Shape cut = common.Shape();
+        // Planar faces: the deflection only shapes curved boundaries (a
+        // hole's circle), at the preview mesh's density.
+        BRepMesh_IncrementalMesh(cut, r * 1e-3, false, 0.35, false);
+        std::ostringstream pos, idx;
+        pos.precision(9);
+        std::size_t base = 0;
+        for (TopExp_Explorer ex(cut, TopAbs_FACE); ex.More(); ex.Next()) {
+            TopLoc_Location loc;
+            const Handle(Poly_Triangulation) tri =
+                BRep_Tool::Triangulation(TopoDS::Face(ex.Current()), loc);
+            if (tri.IsNull()) continue;
+            const gp_Trsf t = loc.Transformation();
+            for (int k = 1; k <= tri->NbNodes(); ++k) {
+                const gp_Pnt p = tri->Node(k).Transformed(t);
+                pos << (base || k > 1 ? "," : "") << p.X() << ',' << p.Y() << ',' << p.Z();
+            }
+            for (int k = 1; k <= tri->NbTriangles(); ++k) {
+                int a, bb, cc;
+                tri->Triangle(k).Get(a, bb, cc);
+                idx << (idx.tellp() > 0 ? "," : "") << base + a - 1 << ',' << base + bb - 1 << ','
+                    << base + cc - 1;
+            }
+            base += static_cast<std::size_t>(tri->NbNodes());
+        }
+        if (idx.tellp() <= 0) continue;
+        o << (first_cap ? "" : ",") << "{\"part\":" << i << ",\"positions\":[" << pos.str()
+          << "],\"indices\":[" << idx.str() << "]}";
+        first_cap = false;
+    }
+    return o.str() + "]}";
+}
+
 }  // namespace
 
-std::string answer_query(const std::string& line, const Resolve& resolve) {
+std::string answer_query(const std::string& line, const Resolve& resolve,
+                         const ResolvePart& part) {
     Json q;
     if (!parse(line, q)) return error("null", "not a JSON object");
     const Json* idj = q.get("id");
@@ -319,6 +418,7 @@ std::string answer_query(const std::string& line, const Resolve& resolve) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             return "{\"id\":" + id + ",\"ok\":true,\"distance\":" + num(balloon[0]) + "}";
         }
+        if (op->string == "section") return section(id, q.get("plane"), part);
         std::string why;
         const auto a = entity(q.get("a"), resolve, why);
         if (!a) return error(id, "a: " + why);
