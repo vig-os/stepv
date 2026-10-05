@@ -335,11 +335,12 @@ fn a_section_through_the_bracket_caps_the_plate_and_keeps_the_hole_open() {
         let (hi, lo) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
         p[3] == 255 && hi - lo < 20
     };
-    // The plate where no pin is (the fixture's pins pass through it, and
-    // overlapping solids cancel each other's parity: interference is not
-    // capped), and a pin above the plate.
+    // The plate, the plate where a pin passes through it (overlapping parts
+    // keep their own stencil bits, so the overlap is capped too), and a pin
+    // above the plate.
     for at in [
         [2.0, 15.0, 2.5],
+        [6.0, 15.0, 2.5],
         [12.0, 15.0, 1.0],
         [30.0, 15.0, 4.0],
         [6.0, 15.0, 10.0],

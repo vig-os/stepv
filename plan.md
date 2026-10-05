@@ -920,9 +920,16 @@ and #34 (capping, fat lines).
     odd. It gets its own depth, so anything in front of the cut still hides it. It's hatched at
     45° in two neutral greys.
   - The depth target became `Depth24PlusStencil8`.
-  - **Limit:** overlapping solids (the fixture's pins pass through the plate) cancel each other's
-    parity, so interference is not capped, which is the usual stencil-cap behaviour. A kernel
-    section through the query channel would cap exactly: #43.
+  - Each part inverts its own bit (`1 << part % 8`), so overlapping parts don't cancel each
+    other: the fixture's pins pass through the plate, and the plate stays capped under them. Only
+    parts that share a bit (eight apart) can still cancel.
+  - Parts that aren't closed solids (a missing face, or no volume in the topology) stay out of the
+    parity, so an open shell can't hatch the plane outside any solid.
+  - The id pass runs the same parity and draws the cap as "nothing", so a click on the hatching
+    picks nothing rather than the hidden face behind it.
+  - Faces carry a slope-scaled depth bias, so an edge's flat quad also wins on tilted and concave
+    corners. A test checks a concave edge keeps at least half a convex one's width.
+  - Exact, per-part caps from a kernel section are #43.
   - **Acceptance** (`tests/view.rs`, real kernel): cut at y = 15 through the hole and the pins, the
     plate's profile is capped and the hole is open (its wall shows, in the part's colour).
     `test-viewer.sh` checks the cap in a real window.

@@ -16,11 +16,11 @@
 #      and the inspector's topology names it a plane.
 #   6. `stepv view --frames 30` on every tests/data file: the GPU backend, and
 #      30 frames reported (#32's smoke test).
-#   8. A section (#34): cut through the hole and the pins, capped: the
-#      hatched cap's two greys fill a good part of the window.
 #   7. Measure mode (#33): two clicks on the pins (model points, so the same
 #      spot at any window size) measure 28 mm between their axes, through
 #      the sandboxed kernel server.
+#   8. A section (#34): cut through the hole and the pins, capped: the
+#      hatched cap's two greys fill a good part of the window.
 #
 # STEPV_VIEW_REQUIRE_WINDOW=1 fails a GPU screenshot that fell back to the
 # viewport render: where windows are presented (Xvfb), the panels must be

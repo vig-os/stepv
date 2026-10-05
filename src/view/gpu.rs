@@ -170,9 +170,11 @@ fn transpose(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 #[must_use]
 pub fn cap_quad(plane: [f32; 4], fit: &Fit) -> [[f32; 3]; 6] {
     let n = [plane[0], plane[1], plane[2]];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
-        .sqrt()
-        .max(f32::MIN_POSITIVE);
+    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+    if len < 1e-12 {
+        // No plane: nothing to cap.
+        return [[0.0; 3]; 6];
+    }
     let n = n.map(|c| c / len);
     let w = plane[3] / len;
     let d = n[0] * fit.mid[0] + n[1] * fit.mid[1] + n[2] * fit.mid[2] - w;
@@ -291,6 +293,10 @@ pub struct Layout {
     /// lines are drawn one instance per segment (#34).
     pub edge_parts: Vec<u32>,
     pub line_parts: Vec<u32>,
+    /// Per part: closed enough to cap. A part with missing faces is an open
+    /// shell: a ray through its hole crosses it once, and the parity would
+    /// hatch the plane outside any solid (#34 review).
+    pub capped: Vec<bool>,
     pub parts: Vec<PartRange>,
     /// The fit without, and with, construction curves (`render.rs` frames
     /// only what it draws).
@@ -383,6 +389,10 @@ impl Layout {
                 }
                 at += n as usize;
             }
+            l.capped.push(
+                !part.mesh.indices.is_empty()
+                    && part.faces.iter().all(|f| f.status != FaceStatus::Missing),
+            );
             l.parts.push(PartRange {
                 base_vertex,
                 indices: first_index..l.indices.len() as u32,
@@ -721,7 +731,18 @@ struct MeshOut {
   return vec4(0.0);
 }
 
+@fragment fn fs_id_stencil(i: MeshOut) -> @location(0) vec2<u32> {
+  if (!shown(i.id.x) || cut(i.world)) { discard; }
+  return vec2(0u, 0u);
+}
+
 struct CapOut { @builtin(position) pos: vec4<f32> };
+
+// The cap in the id pass: no entity, so a click on the hatching picks
+// nothing rather than the hidden face behind it (#34 review).
+@fragment fn fs_id_cap(i: CapOut) -> @location(0) vec2<u32> {
+  return vec2(0u, 0u);
+}
 
 @vertex fn vs_cap(@location(0) p: vec3<f32>) -> CapOut {
   var o: CapOut;
@@ -836,9 +857,14 @@ pub struct Renderer {
     id: wgpu::RenderPipeline,
     edges: wgpu::RenderPipeline,
     id_edges: wgpu::RenderPipeline,
-    /// Section capping (#34): the parity pass, and the hatched cap.
-    stencil: wgpu::RenderPipeline,
+    /// Section capping (#34): the parity pass, one pipeline per stencil bit
+    /// (part i inverts bit i % 8, so overlapping parts do not cancel each
+    /// other), and the hatched cap; and the same for the id pass, whose cap
+    /// writes "nothing", so no click picks through it.
+    stencil: [wgpu::RenderPipeline; 8],
     cap: wgpu::RenderPipeline,
+    id_stencil: [wgpu::RenderPipeline; 8],
+    id_cap: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -997,13 +1023,24 @@ impl Renderer {
             attributes: &wgpu::vertex_attr_array![3 => Uint32],
         });
         let fat = [seg.clone(), seg_tag.clone(), seg_part.clone()];
+        // Faces are pushed back a little, more where they slope away: an
+        // edge's quad, flat at its centreline's depth, then wins over the
+        // faces beside it on tilted and concave corners too (#34 review).
+        let faces = wgpu::DepthBiasState {
+            constant: 4,
+            slope_scale: 1.5,
+            clamp: 0.0,
+        };
         let mesh = pipeline(
             "stepv mesh",
             "vs_mesh",
             "fs_mesh",
             &[vec3(0), vec3(1), u32_at(2)],
             wgpu::PrimitiveTopology::TriangleList,
-            Output::shaded(),
+            Output {
+                bias: faces,
+                ..Output::shaded()
+            },
         );
         let lines = pipeline(
             "stepv lines",
@@ -1049,7 +1086,7 @@ impl Renderer {
                 target: ID.into(),
                 samples: 1,
                 depth_write: true,
-                bias: Default::default(),
+                bias: faces,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),
             },
@@ -1086,30 +1123,43 @@ impl Renderer {
             depth_fail_op: wgpu::StencilOperation::Keep,
             pass_op: wgpu::StencilOperation::Invert,
         };
-        let stencil = pipeline(
-            "stepv cap stencil",
-            "vs_mesh",
-            "fs_stencil",
-            &[vec3(0), vec3(1), u32_at(2)],
-            wgpu::PrimitiveTopology::TriangleList,
-            Output {
-                target: wgpu::ColorTargetState {
-                    format: COLOR,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::empty(),
-                },
-                samples: SAMPLES,
-                depth_write: false,
-                bias: Default::default(),
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState {
-                    front: parity,
-                    back: parity,
-                    read_mask: 0xff,
-                    write_mask: 0xff,
-                },
+        let parity_out = |target: wgpu::TextureFormat, samples: u32, bit: u32| Output {
+            target: wgpu::ColorTargetState {
+                format: target,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
             },
-        );
+            samples,
+            depth_write: false,
+            bias: Default::default(),
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState {
+                front: parity,
+                back: parity,
+                read_mask: 0xff,
+                write_mask: 1 << bit,
+            },
+        };
+        let stencil = std::array::from_fn(|bit| {
+            pipeline(
+                "stepv cap stencil",
+                "vs_mesh",
+                "fs_stencil",
+                &[vec3(0), vec3(1), u32_at(2)],
+                wgpu::PrimitiveTopology::TriangleList,
+                parity_out(COLOR, SAMPLES, bit as u32),
+            )
+        });
+        let id_stencil = std::array::from_fn(|bit| {
+            pipeline(
+                "stepv id cap stencil",
+                "vs_mesh",
+                "fs_id_stencil",
+                &[vec3(0), vec3(1), u32_at(2)],
+                wgpu::PrimitiveTopology::TriangleList,
+                parity_out(ID, 1, bit as u32),
+            )
+        });
         // The cap: the plane, where the count is odd, at its own depth (so
         // anything in front of the cut still hides it).
         let inside = wgpu::StencilFaceState {
@@ -1134,6 +1184,24 @@ impl Renderer {
                 ..Output::shaded()
             },
         );
+        let id_cap = pipeline(
+            "stepv id cap",
+            "vs_cap",
+            "fs_id_cap",
+            &[vec3(0)],
+            wgpu::PrimitiveTopology::TriangleList,
+            Output {
+                target: ID.into(),
+                samples: 1,
+                stencil: wgpu::StencilState {
+                    front: inside,
+                    back: inside,
+                    read_mask: 0xff,
+                    write_mask: 0,
+                },
+                ..Output::shaded()
+            },
+        );
         Self {
             mesh,
             lines,
@@ -1143,6 +1211,8 @@ impl Renderer {
             id_edges,
             stencil,
             cap,
+            id_stencil,
+            id_cap,
             layout,
         }
     }
@@ -1204,12 +1274,7 @@ impl Renderer {
                     draw_mesh(&mut pass, scene, Some(pick.part as usize));
                 }
                 if view.section.is_some() && view.cap {
-                    pass.set_pipeline(&self.stencil);
-                    pass.set_stencil_reference(0);
-                    draw_mesh(&mut pass, scene, None);
-                    pass.set_pipeline(&self.cap);
-                    pass.set_vertex_buffer(0, scene.cap.slice(..));
-                    pass.draw(0..6, 0..1);
+                    draw_cap(&mut pass, scene, &self.stencil, &self.cap);
                 }
             }
             if scene.has_edges {
@@ -1250,6 +1315,10 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&uniforms(scene, view, target.width, target.height)),
         );
+        if let Some(plane) = view.section {
+            let quad = cap_quad(plane, &scene.fit(view.show_construction));
+            queue.write_buffer(&scene.cap, 0, bytemuck::cast_slice(&quad));
+        }
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("stepv pick"),
         });
@@ -1271,7 +1340,10 @@ impl Renderer {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Discard,
                     }),
-                    stencil_ops: None,
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
                 }),
                 ..Default::default()
             });
@@ -1279,6 +1351,9 @@ impl Renderer {
             if scene.has_mesh {
                 pass.set_pipeline(&self.id);
                 draw_mesh(&mut pass, scene, None);
+                if view.section.is_some() && view.cap {
+                    draw_cap(&mut pass, scene, &self.id_stencil, &self.id_cap);
+                }
             }
             if scene.has_edges {
                 pass.set_pipeline(&self.id_edges);
@@ -1363,6 +1438,33 @@ fn uniforms(scene: &GpuScene, view: &View, w: u32, h: u32) -> Uniforms {
         pick: view.picked.map_or([0; 4], |p| [p.part + 1, p.face, 0, 0]),
         viewport: [w as f32, h as f32, view.line_width, view.line_width * 1.25],
     }
+}
+
+/// The section cap: each capped, shown part inverts its stencil bit
+/// over everything the cut left of it; then the cap quad where any bit is
+/// set.
+fn draw_cap(
+    pass: &mut wgpu::RenderPass<'_>,
+    scene: &GpuScene,
+    parity: &[wgpu::RenderPipeline; 8],
+    cap: &wgpu::RenderPipeline,
+) {
+    pass.set_stencil_reference(0);
+    pass.set_vertex_buffer(0, scene.positions.slice(..));
+    pass.set_vertex_buffer(1, scene.normals.slice(..));
+    pass.set_vertex_buffer(2, scene.faces.slice(..));
+    pass.set_index_buffer(scene.indices.slice(..), wgpu::IndexFormat::Uint32);
+    for (i, p) in scene.parts.iter().enumerate() {
+        if !scene.visibility.get(i) || !scene.capped[i] || p.indices.is_empty() {
+            continue;
+        }
+        pass.set_pipeline(&parity[i % 8]);
+        let i = i as u32;
+        pass.draw_indexed(p.indices.clone(), p.base_vertex, i..i + 1);
+    }
+    pass.set_pipeline(cap);
+    pass.set_vertex_buffer(0, scene.cap.slice(..));
+    pass.draw(0..6, 0..1);
 }
 
 /// Draws the B-rep edges: one fat-line instance per segment (hidden parts
@@ -1542,6 +1644,8 @@ pub struct GpuScene {
     line_segments: u32,
     /// The section cap's quad, rewritten each frame it is drawn.
     cap: wgpu::Buffer,
+    /// Per part: whether it takes part in the cap's parity.
+    capped: Vec<bool>,
     uniforms: wgpu::Buffer,
     visible: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -1665,6 +1769,7 @@ impl GpuScene {
             edge_parts,
             line_parts,
             edge_segments: layout.edge_parts.len() as u32,
+            capped: layout.capped.clone(),
             line_segments: layout.line_parts.len() as u32,
             cap: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("cap"),
@@ -1682,6 +1787,15 @@ impl GpuScene {
             fits: layout.fits,
             bounds: layout.bounds,
             visibility,
+        }
+    }
+
+    /// Narrows the parts the cap counts to those `solid` says are solids
+    /// (the topology knows: a prototype with a volume). Open shells and
+    /// surface bodies stay uncapped.
+    pub fn set_solids(&mut self, solid: &[bool]) {
+        for (c, &s) in self.capped.iter_mut().zip(solid) {
+            *c &= s;
         }
     }
 
@@ -2386,10 +2500,23 @@ mod tests {
             g.pick(&gs, &view, w, h, px, py),
             Some(Pick { part: 0, face: 2 })
         );
+        // Uncapped, the pick goes through the cut to the inside of the back
+        // face; capped (#34), the cap is in the way and picks nothing.
         assert_eq!(
-            g.pick(&gs, &flipped, w, h, px, py),
+            g.pick(
+                &gs,
+                &View {
+                    cap: false,
+                    ..flipped
+                },
+                w,
+                h,
+                px,
+                py
+            ),
             Some(Pick { part: 0, face: 3 })
         );
+        assert_eq!(g.pick(&gs, &flipped, w, h, px, py), None);
         // And the image agrees with the pick: through the cut, the (red)
         // back face shows.
         let red = Some(Color {
@@ -2837,6 +2964,127 @@ mod tests {
         assert!(
             thick >= 4 && thick > thin,
             "a 5 px edge darkened {thick} rows"
+        );
+    }
+
+    #[test]
+    fn overlapping_parts_are_capped_across_their_overlap() {
+        let Some(g) = gpu() else { return };
+        // Two boxes sharing x 1..2, cut at y = 0.5, seen from the cut side.
+        let gs = g.upload(&scene(vec![
+            cuboid([0.0; 3], [2.0, 1.0, 1.0], [None; 6]),
+            cuboid([1.0, 0.0, 0.0], [3.0, 1.0, 1.0], [None; 6]),
+        ]));
+        let from_cut = Camera {
+            azimuth_deg: 180.0,
+            elevation_deg: 0.0,
+            ..Camera::default()
+        };
+        let cut = View {
+            section: Some([0.0, 1.0, 0.0, 0.5]),
+            ..View::new(from_cut)
+        };
+        let (w, h) = (160, 80);
+        let img = g.render(&gs, &cut, w, h);
+        for x in [0.5, 1.5, 2.5] {
+            let (px, py) = pixel_of(&gs, &from_cut, w, h, [x, 0.5, 0.5]);
+            // A few pixels around, for the hatch's two greys.
+            assert!(
+                (px.saturating_sub(3)..px + 3).all(|x| is_cap(img.pixel(x, py))),
+                "x = {x} is not capped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_cap_picks_nothing_behind_it() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&scene(vec![cuboid([0.0; 3], [1.0; 3], [None; 6])]));
+        let from_cut = Camera {
+            azimuth_deg: 180.0,
+            elevation_deg: 0.0,
+            ..Camera::default()
+        };
+        let cut = View {
+            section: Some([0.0, 1.0, 0.0, 0.5]),
+            ..View::new(from_cut)
+        };
+        let (w, h) = (96, 96);
+        assert_eq!(
+            g.pick(&gs, &cut, w, h, w / 2, h / 2),
+            None,
+            "picked through the cap"
+        );
+        // Uncapped, the back face behind the cut is what shows, and is picked.
+        let open = g.pick(&gs, &View { cap: false, ..cut }, w, h, w / 2, h / 2);
+        assert_eq!(open, Some(Pick { part: 0, face: 2 }));
+    }
+
+    #[test]
+    fn open_shells_are_not_capped() {
+        let mut p = cuboid([0.0; 3], [1.0; 3], [None; 6]);
+        p.faces[3].status = FaceStatus::Missing;
+        let l = Layout::new(&scene(vec![p, cuboid([2.0; 3], [3.0; 3], [None; 6])]));
+        assert_eq!(l.capped, [false, true]);
+        let Some(g) = gpu() else { return };
+        let mut gs = g.upload(&scene(vec![cuboid([0.0; 3], [1.0; 3], [None; 6])]));
+        gs.set_solids(&[false]);
+        let from_cut = Camera {
+            azimuth_deg: 180.0,
+            elevation_deg: 0.0,
+            ..Camera::default()
+        };
+        let img = g.render(
+            &gs,
+            &View {
+                section: Some([0.0, 1.0, 0.0, 0.5]),
+                ..View::new(from_cut)
+            },
+            96,
+            96,
+        );
+        assert!(!is_cap(img.pixel(48, 48)), "a surface body was capped");
+    }
+
+    #[test]
+    fn a_concave_edge_keeps_its_width() {
+        let Some(g) = gpu() else { return };
+        // An L: a tall box on a long one. The tall box's bottom-right edge,
+        // at x = 1, z = 1, runs along the inner corner with the long box's
+        // top: a concave edge, the faces beside it nearer than its quad's
+        // centre on one side.
+        let gs = g.upload(&scene(vec![
+            boxed_edges([0.0; 3], [3.0, 1.0, 1.0]),
+            boxed_edges([0.0, 0.0, 1.0], [1.0, 1.0, 2.0]),
+        ]));
+        let plain = g.upload(&scene(vec![
+            cuboid([0.0; 3], [3.0, 1.0, 1.0], [None; 6]),
+            cuboid([0.0, 0.0, 1.0], [1.0, 1.0, 2.0], [None; 6]),
+        ]));
+        let cam = Camera {
+            azimuth_deg: -40.0,
+            elevation_deg: 35.0,
+            ..Camera::default()
+        };
+        let (w, h) = (200, 200);
+        let view = View {
+            line_width: 3.0,
+            ..View::new(cam)
+        };
+        let (on, off) = (g.render(&gs, &view, w, h), g.render(&plain, &view, w, h));
+        let darkened = |p: [f32; 3]| {
+            let (x, y) = pixel_of(&gs, &cam, w, h, p);
+            (y.saturating_sub(6)..(y + 6).min(h))
+                .filter(|&y| i32::from(off.pixel(x, y)[0]) - i32::from(on.pixel(x, y)[0]) > 20)
+                .count()
+        };
+        // The concave inner edge, mid-way, against a convex outer edge.
+        let concave = darkened([1.0, 0.5, 1.0]);
+        let convex = darkened([3.0, 0.5, 1.0]);
+        assert!(concave >= 2, "the concave edge is {concave} px");
+        assert!(
+            concave * 2 >= convex,
+            "concave {concave} px against convex {convex} px"
         );
     }
 

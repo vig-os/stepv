@@ -207,7 +207,21 @@ impl Viewer {
         // becomes an Err, and the software fallback, not a panic.
         let scope = rs.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let renderer = Renderer::new(&rs.device);
-        let gpu_scene = GpuScene::upload(&rs.device, &renderer, Layout::new(scene));
+        let mut gpu_scene = GpuScene::upload(&rs.device, &renderer, Layout::new(scene));
+        // Only solids are capped (#34): the topology knows which prototypes
+        // have a volume; without it, every closed part counts.
+        if let Some(t) = &topology {
+            let solid: Vec<bool> = t
+                .parts
+                .iter()
+                .map(|p| {
+                    t.prototypes
+                        .get(p.prototype)
+                        .is_some_and(|pr| pr.volume.is_some())
+                })
+                .collect();
+            gpu_scene.set_solids(&solid);
+        }
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(format!("the GPU refused the viewer's pipelines: {e}"));
         }
