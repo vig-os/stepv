@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Section caps and fat edges** ([#34](https://github.com/vig-os/stepv/issues/34)): a cut model
+  shows its solid cross-section hatched, as a drawing's section, with holes left open; "Cap the
+  cut" turns it off
+  - Edges and sketches are drawn as anti-aliased quads 1.5 px wide at the display's scale, not
+    1-px lines
+  - The kernel takes edge points from the mesh's own triangulation, so edges sit exactly on the
+    faces they bound
 - **Measurements** ([#33](https://github.com/vig-os/stepv/issues/33)): in `stepv view`, M (or
   Measure) and two clicks on faces or edges give the distance between them, the distance between
   their axes (cylinders, cones, lines, circles), and their angle, with the witness points drawn

@@ -910,6 +910,40 @@ and #34 (capping, fat lines).
   - two adjacent faces of the box meet at 90°, and opposite ones at 180°;
   - `test-viewer.sh` gets 28 mm through two clicks in a real window.
 
+### Section caps and fat lines (#34, 2026-10-05)
+
+- **Caps:** a stencil-parity pass, on the GPU.
+  - After the image, every surface left by the cut is drawn again with no colour or depth writes,
+    inverting the stencil. At a pixel of the section plane inside a solid, the count is odd.
+  - Parity, not front/back counting, because CAD exports don't orient faces reliably.
+  - A quad on the plane, spanning the fit sphere (`cap_quad`), is then drawn where the stencil is
+    odd. It gets its own depth, so anything in front of the cut still hides it. It's hatched at
+    45° in two neutral greys.
+  - The depth target became `Depth24PlusStencil8`.
+  - Each part inverts its own bit (`1 << part % 8`), so overlapping parts don't cancel each
+    other: the fixture's pins pass through the plate, and the plate stays capped under them. Only
+    parts that share a bit (eight apart) can still cancel.
+  - Parts that aren't closed solids (a missing face, or no volume in the topology) stay out of the
+    parity, so an open shell can't hatch the plane outside any solid.
+  - The id pass runs the same parity and draws the cap as "nothing", so a click on the hatching
+    picks nothing rather than the hidden face behind it.
+  - Faces carry a slope-scaled depth bias, so an edge's flat quad also wins on tilted and concave
+    corners. A test checks a concave edge keeps at least half a convex one's width.
+  - Exact, per-part caps from a kernel section are #43.
+  - **Acceptance** (`tests/view.rs`, real kernel): cut at y = 15 through the hole and the pins, the
+    plate's profile is capped and the hole is open (its wall shows, in the part's colour).
+    `test-viewer.sh` checks the cap in a real window.
+- **Fat lines:** edges and sketch lines are instanced quads, six vertices per segment, built in
+  the vertex shader at a constant pixel width (1.5 px × the display scale; sketches and outlines a
+  quarter wider). They are extended past each end, so polylines join, and MSAA anti-aliases them.
+  The id pass draws the same quads, so edges are easier to pick.
+- **Edges from the triangulation:** the kernel takes an edge's points from
+  `BRep_Tool::PolygonOnTriangulation` on an adjacent face, so an edge lies exactly on the triangle
+  boundary it bounds.
+  - It falls back to curve sampling where a face was recovered (#31's review).
+  - The depth pull drops from 0.0005 to 0.0001.
+  - The edge-length test against the topology still holds.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -923,7 +957,7 @@ Agent work, in order:
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
    #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges (done: "Edges and the overlay" above) →
-   #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements (done: "Measurements" above) → #34 capping.
+   #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements (done: "Measurements" above) → #34 capping (done: "Section caps and fat lines" above).
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
 toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.

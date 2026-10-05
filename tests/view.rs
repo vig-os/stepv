@@ -301,6 +301,60 @@ fn picking_the_hole_rim_names_its_circle() {
     );
 }
 
+/// #34's acceptance: a section through the bracket shows a filled plate
+/// profile with the hole open. Cut at y = 15, through the hole's and the
+/// pins' axes, and seen from the cut side.
+#[test]
+fn a_section_through_the_bracket_caps_the_plate_and_keeps_the_hole_open() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let scene = load("assembly.step");
+    let gs = g.upload(&scene);
+    let cam = Camera {
+        azimuth_deg: 180.0,
+        elevation_deg: 0.0,
+        ..Camera::default()
+    };
+    let view = View {
+        section: Some([0.0, 1.0, 0.0, 15.0]),
+        ..View::new(cam)
+    };
+    let (w, h) = (640, 480);
+    let img = g.render(&gs, &view, w, h);
+    let m = clip_matrix(&cam, &gs.fits[0].unwrap(), w, h);
+    let pixel = |p: [f32; 3]| {
+        let c = [0, 1].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
+        img.pixel(
+            ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+            ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+        )
+    };
+    // The cap: grey, low saturation (the plate is red, the pins orange).
+    let grey = |p: [u8; 4]| {
+        let (hi, lo) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+        p[3] == 255 && hi - lo < 20
+    };
+    // The plate, the plate where a pin passes through it (overlapping parts
+    // keep their own stencil bits, so the overlap is capped too), and a pin
+    // above the plate.
+    for at in [
+        [2.0, 15.0, 2.5],
+        [6.0, 15.0, 2.5],
+        [12.0, 15.0, 1.0],
+        [30.0, 15.0, 4.0],
+        [6.0, 15.0, 10.0],
+    ] {
+        assert!(grey(pixel(at)), "{at:?} is not capped: {:?}", pixel(at));
+    }
+    // The hole (x 16..24) is open: what shows there is the hole's wall
+    // behind the cut, the part's own colour, not the cap.
+    let hole = pixel([20.0, 15.0, 2.5]);
+    assert!(!grey(hole), "the hole is capped over: {hole:?}");
+    // Above the plate, between the pins: nothing at all.
+    assert_eq!(pixel([20.0, 15.0, 10.0])[3], 0);
+}
+
 #[test]
 fn per_face_colours_reach_the_gpu() {
     let Some(g) = require_gpu(Headless::new()) else {
