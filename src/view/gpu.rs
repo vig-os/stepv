@@ -400,7 +400,27 @@ impl View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pick {
     pub part: u32,
+    /// [`Pick::WHOLE_PART`] for a part picked in the model tree.
     pub face: u32,
+}
+
+impl Pick {
+    /// The `face` of a whole-part selection: every face highlights.
+    pub const WHOLE_PART: u32 = u32::MAX;
+
+    /// The whole of `part`.
+    #[must_use]
+    pub const fn part(part: u32) -> Self {
+        Self {
+            part,
+            face: Self::WHOLE_PART,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_whole_part(&self) -> bool {
+        self.face == Self::WHOLE_PART
+    }
 }
 
 /// A section plane across the model's bounding box: perpendicular to `axis`
@@ -566,7 +586,9 @@ struct MeshOut {
 // The picked face, over the shaded one: a depth-biased second pass of just
 // that face's part, so it is a highlight and not a recolour.
 @fragment fn fs_highlight(i: MeshOut) -> @location(0) vec4<f32> {
-  if (!shown(i.id.x) || cut(i.world) || i.id.x + 1u != u.pick.x || i.id.y != u.pick.y) {
+  // pick.y == 0xffffffff selects the whole part (the model tree's pick).
+  let face_ok = u.pick.y == 0xffffffffu || i.id.y == u.pick.y;
+  if (!shown(i.id.x) || cut(i.world) || i.id.x + 1u != u.pick.x || !face_ok) {
     discard;
   }
   return vec4(encode(u.highlight.rgb).rgb, u.highlight.a);
@@ -1953,6 +1975,39 @@ mod tests {
         );
         // y runs down, as egui's points and the texture's rows do.
         assert!(texel_at(min, size, [300.0, 330.0], 800, 600).1 > 500);
+    }
+
+    #[test]
+    fn a_whole_part_highlights_every_face_of_it() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&two_boxes());
+        let (w, h) = (160, 90);
+        let top = Camera {
+            elevation_deg: 35.0,
+            ..FRONT
+        };
+        let front = pixel_of(&gs, &top, w, h, [0.5, 0.0, 0.5]);
+        let lid = pixel_of(&gs, &top, w, h, [0.5, 0.5, 1.0]);
+        let other = pixel_of(&gs, &top, w, h, [3.5, 0.0, 0.5]);
+        let plain = g.render(&gs, &View::new(top), w, h);
+        let lit = g.render(
+            &gs,
+            &View {
+                picked: Some(Pick::part(0)),
+                highlight: [1.0, 0.0, 0.0],
+                ..View::new(top)
+            },
+            w,
+            h,
+        );
+        for (x, y) in [front, lid] {
+            assert_ne!(
+                plain.pixel(x, y),
+                lit.pixel(x, y),
+                "({x}, {y}) of part 0 not highlighted"
+            );
+        }
+        assert_eq!(plain.pixel(other.0, other.1), lit.pixel(other.0, other.1));
     }
 
     #[test]

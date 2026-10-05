@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Model tree** ([#30](https://github.com/vig-os/stepv/issues/30)): the assembly tree beside the
+  view in `stepv view`
+  - Show/hide per node, which carries down to every part below; Isolate and Show all; search by name
+  - Selection both ways: a row selects its part in the view, and a face clicked in the view
+    reveals its row
+  - Virtualised: only the rows on screen are laid out, so 40,000 nodes cost a frame what 40 do
 - **Picking and the inspector** ([#29](https://github.com/vig-os/stepv/issues/29)): click a face in
   `stepv view` to see what it exactly is, from `--topology`
   - The surface type and parameters (a plane's normal, a cylinder's radius, ⌀ and axis, …) in

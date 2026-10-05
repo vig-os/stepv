@@ -794,6 +794,28 @@ and #34 (capping, fat lines).
   - its top reads Plane, normal +z, area 1200 − 16π.
   - `scripts/test-viewer.sh` also clicks through a real window (`STEPV_VIEW_PICK`).
 
+### Model tree (#30, 2026-10-05)
+
+- **`view::tree::Tree`** flattens the assembly tree once into a preorder vector of rows: name,
+  depth, part, parent, and `end`, so a subtree is the range `i + 1..end`. Without a topology, the
+  tree is a flat list of the mesh's part names.
+- **Per frame**, it costs only what is on screen:
+  - The display list (expanded rows, or search matches with their ancestors) is rebuilt only when
+    expansion or the search changes.
+  - Each row's shown-leaf count is recomputed bottom-up only when visibility changes. An
+    assembly's tri-state checkbox therefore costs O(1), however many parts it holds.
+  - `ScrollArea::show_rows` lays out only the visible slice, which a test checks: 40,401 rows give
+    fewer than 60 laid out.
+- **Visibility** is the per-part bitset the GPU already honours (`GpuScene::set_visibility`).
+  - A new tree generation re-uploads it and re-renders.
+  - Hidden parts can't be picked.
+  - A selection whose part gets hidden is dropped, as #29's review asked.
+- **Selection:**
+  - A tree row selects the whole part: `Pick::part`, with `face = u32::MAX`, which the highlight
+    pass draws over every face of it. The inspector then shows the part.
+  - A face picked in the view opens the row's ancestors and scrolls to it.
+- **Measured** (release, M3 Ultra; `forty_thousand_nodes_stay_under_four_ms`): 40,401 rows, all expanded, in a headless egui frame of layout plus tessellation. p50 0.072 ms, p95 0.075 ms, against a 4 ms budget; egui caches the row galleys between frames. #27 measured 2.2 ms for its virtualised tree inside a whole window frame, GPU painting included. The naive nested headers cost 38 ms.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -806,7 +828,7 @@ Agent work, in order:
    Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
-   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree → #31 overlay and edges →
+   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges →
    #32 CI and packaging → #33 measurements → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
