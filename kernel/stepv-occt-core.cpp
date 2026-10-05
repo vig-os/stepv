@@ -1232,6 +1232,11 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
         if (index < 0 || static_cast<std::size_t>(index) >= faces.size()) return std::nullopt;
         return faces[static_cast<std::size_t>(index)].Moved(loc);
     };
+    const stepv::ResolvePart resolve_part = [&](long part) -> std::optional<TopoDS_Shape> {
+        if (part < 0 || static_cast<std::size_t>(part) >= placed.size()) return std::nullopt;
+        const Placed& p = placed[static_cast<std::size_t>(part)];
+        return p.shape.Moved(p.location);
+    };
     if (!write_line(out_fd, "{\"ready\":true,\"sandbox\":\"" + sb + "\",\"parts\":" +
                                 std::to_string(placed.size()) + "}"))
         return kExitFailed;
@@ -1258,7 +1263,8 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
             const std::string line = buf.substr(0, nl);
             buf.erase(0, nl + 1);
             if (line.empty()) continue;
-            if (!write_line(out_fd, stepv::answer_query(line, resolve))) return kExitOk;
+            if (!write_line(out_fd, stepv::answer_query(line, resolve, resolve_part)))
+                return kExitOk;
         }
         // A line longer than any query is not one: refuse it and move on.
         if (buf.size() > (1 << 16)) {

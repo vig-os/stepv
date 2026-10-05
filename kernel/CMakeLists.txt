@@ -19,7 +19,7 @@ endif()
 
 set(STEPV_OCCT_LIBS
   TKDESTEP TKDEIGES TKXCAF TKXSBase TKLCAF TKCAF TKCDF
-  TKMesh TKShHealing TKTopAlgo TKBRep TKGeomAlgo TKGeomBase TKG3d TKG2d
+  TKBO TKMesh TKShHealing TKTopAlgo TKBRep TKGeomAlgo TKGeomBase TKG3d TKG2d
   TKMath TKernel)
 
 # The kernel CLI: what the Rust side runs as a subprocess, sandboxed

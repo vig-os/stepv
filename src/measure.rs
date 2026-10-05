@@ -11,7 +11,7 @@
 //! or when the process dies, it is killed, restarted on the next query, and
 //! the query reports what happened. The caller never hangs on it.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
@@ -49,11 +49,26 @@ pub enum Query {
     Angle(Entity, Entity),
     /// The point of an entity nearest `near`, and a face's normal there.
     Point(Entity, [f64; 3]),
+    /// The exact section of every solid part by the plane `(n, w)`, the
+    /// viewer's convention (kept: `dot(p, n) <= w`), triangulated: a cap per
+    /// part the plane cuts (#43).
+    Section([f64; 4]),
+}
+
+/// One part's section by a [`Query::Section`] plane: triangles on the plane,
+/// holes left out, in model coordinates.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Cap {
+    pub part: u32,
+    /// x, y, z per vertex.
+    pub positions: Vec<f32>,
+    /// Three per triangle, into [`Self::positions`].
+    pub indices: Vec<u32>,
 }
 
 /// The kernel's answer to a [`Query`], all in millimetres and model
 /// coordinates.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Answer {
     pub distance: Option<f64>,
     /// The witness points of [`Self::distance`]: on the first entity, then
@@ -63,6 +78,8 @@ pub struct Answer {
     pub angle_deg: Option<f64>,
     pub point: Option<[f64; 3]>,
     pub normal: Option<[f64; 3]>,
+    /// A [`Query::Section`]'s caps, one per part cut.
+    pub caps: Option<Vec<Cap>>,
 }
 
 /// Why a query has no answer.
@@ -79,6 +96,10 @@ pub enum Error {
     MemoryCap,
     /// The kernel died or spoke nonsense: restarted on the next query.
     Crashed(String),
+    /// An answer (or the ready line) was longer than [`MAX_LINE`]:
+    /// killed; the next query restarts it. The viewer stops asking for
+    /// exact caps after one.
+    TooLong,
 }
 
 impl std::fmt::Display for Error {
@@ -92,17 +113,33 @@ impl std::fmt::Display for Error {
                 "the measurement used too much memory; the kernel was restarted"
             ),
             Self::Crashed(e) => write!(f, "the kernel crashed ({e}); it will be restarted"),
+            Self::TooLong => write!(
+                f,
+                "the kernel's answer was too long; the kernel was stopped"
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
+/// The longest answer line read (a section's caps are the big ones; 900
+/// parts' are 24 KiB): past it, the kernel is dropped ([`Error::TooLong`]).
+/// Parsed, a line takes several times its size.
+pub const MAX_LINE: u64 = 16 << 20;
+
+/// What the reader thread passes on.
+enum Line {
+    Text(String),
+    /// A line past [`MAX_LINE`]: the reader stopped there.
+    TooLong,
+}
+
 /// One running kernel.
 struct Process {
     child: Child,
     stdin: ChildStdin,
-    lines: Receiver<String>,
+    lines: Receiver<Line>,
     /// The sandbox it reported.
     sandbox: String,
 }
@@ -196,12 +233,23 @@ impl Server {
             let mut buf = Vec::new();
             loop {
                 buf.clear();
-                match r.read_until(b'\n', &mut buf) {
+                match r.by_ref().take(MAX_LINE).read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
+                    // An endless line must not take the caller's memory: no
+                    // answer, then the reader ends, which reads as a crash.
+                    Ok(_) if !buf.ends_with(b"\n") && buf.len() as u64 >= MAX_LINE => {
+                        let _ = tx.send(Line::TooLong);
+                        break;
+                    }
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
-                        if tx.send(line).is_err() {
+                        if tx.send(Line::Text(line)).is_err() {
                             break;
+                        }
+                        // One big answer must not pin its buffer for the
+                        // kernel's life.
+                        if buf.capacity() > 1 << 20 {
+                            buf = Vec::new();
                         }
                     }
                 }
@@ -246,6 +294,7 @@ impl Server {
             Query::Point(a, near) => {
                 json!({ "id": id, "op": "point", "a": a.to_json(), "near": near })
             }
+            Query::Section(plane) => json!({ "id": id, "op": "section", "plane": plane }),
         };
         self.raw(&line)
     }
@@ -311,7 +360,12 @@ fn wait(p: &mut Process, limits: Limits) -> Result<String, Error> {
     let start = Instant::now();
     loop {
         match p.lines.recv_timeout(Duration::from_millis(5)) {
-            Ok(line) => return Ok(line),
+            Ok(Line::Text(line)) => return Ok(line),
+            // Ready line or answer alike: killed, as for a time limit.
+            Ok(Line::TooLong) => {
+                let _ = p.child.kill();
+                return Err(Error::TooLong);
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 // The output closed; the process may live on (blocked on
                 // stdin): kill it before reaping, or this waits forever.

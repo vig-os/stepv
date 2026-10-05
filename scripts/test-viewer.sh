@@ -19,8 +19,9 @@
 #   7. Measure mode (#33): two clicks on the pins (model points, so the same
 #      spot at any window size) measure 28 mm between their axes, through
 #      the sandboxed kernel server.
-#   8. A section (#34): cut through the hole and the pins, capped: the
-#      hatched cap's two greys fill a good part of the window.
+#   8. A section (#34): cut through the hole and the pins, capped. The
+#      kernel's exact caps land (#43): the plate's in its blue and the pins'
+#      in their orange, each hatched, fill a good part of the window.
 #   9. A file whose exact topology fails (the kernel's
 #      STEPV_OCCT_TEST_TOPOLOGY_FAIL hook) still opens, without the
 #      inspector, after ONE kernel run (#38).
@@ -178,7 +179,10 @@ shot="$tmp/section.png"
 out=$(STEPV_VIEW_SECTION=1,0.5,flip STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --theme light 2>"$tmp/err") || true
 read -r status backend error <<<"$(report <<<"$out")"
 [ "$status" = ok ] || fail "section: $status $backend ($error): $(cat "$tmp/err")"
-python3 - "$shot" <<'PY' || fail "section: no cap in the window"
+grep -q "STEPV_VIEW_SECTION exact caps for 3 parts" "$tmp/err" \
+  || fail "section: no exact caps from the kernel: $(cat "$tmp/err")"
+caps=$(python3 - "$shot" <<'PY'
+
 import struct, sys, zlib
 data = open(sys.argv[1], "rb").read()
 pos, idat = 8, b""
@@ -188,7 +192,14 @@ while pos < len(data):
     elif kind == b"IDAT": idat += body
     pos += 12 + n
 raw, bpp = zlib.decompress(idat), (4 if ct == 6 else 3)
-stride, prev, cap = w * bpp, bytearray(w * bpp), 0
+# The exact caps' fill (0.6) and hatch (0.22) of the plate's and the pins'
+# colours, sRGB-encoded as the shader does.
+def enc(v):
+    v = min(max(v, 0.0), 1.0)
+    return round(255 * (12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055))
+shades = {name: [tuple(enc(k * c) for c in rgb) for k in (0.6, 0.22)]
+          for name, rgb in (("plate", (0.10, 0.25, 0.85)), ("pins", (0.95, 0.50, 0.05)))}
+stride, prev, cap = w * bpp, bytearray(w * bpp), {"plate": 0, "pins": 0}
 for y in range(h):
     f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
     for i in range(stride):
@@ -200,13 +211,15 @@ for y in range(h):
             p = a + b - c; pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
             line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
     for x in range(0, stride, bpp):
-        r, g, bb = line[x:x + 3]
-        # The cap's fill (~150) or hatch (~80) grey.
-        if max(r, g, bb) - min(r, g, bb) < 12 and (60 < r < 100 or 135 < r < 170): cap += 1
+        px = line[x:x + 3]
+        for name, want in shades.items():
+            if any(all(abs(px[k] - s[k]) <= 4 for k in range(3)) for s in want): cap[name] += 1
     prev = line
-assert cap > 2000, f"only {cap} cap pixels"
+assert cap["plate"] > 2000 and cap["pins"] > 300, f"cap pixels: {cap}"
+print(f"plate {cap['plate']}, pins {cap['pins']}")
 PY
-echo "ok: a section through the hole and pins is capped"
+) || fail "section: no exact caps in the window"
+echo "ok: a section through the hole and pins is capped exactly, per part ($caps px)"
 
 # 6. --frames on every committed file.
 for f in "$root"/tests/data/*.step "$root"/tests/data/*.brep "$root"/tests/data/*.igs; do

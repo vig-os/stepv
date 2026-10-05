@@ -19,7 +19,7 @@ use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
 use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
-use super::measuring::{Measurement, Measurer};
+use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, FrameStats, Options, Ran, ThemePref, theme};
@@ -47,6 +47,8 @@ pub struct RenderKey {
     pub picked: Option<Pick>,
     /// The model tree's visibility generation.
     pub visibility: u64,
+    /// How many times exact section caps have landed (#43).
+    pub caps: u64,
 }
 
 /// Whether a frame with `key` must be rendered: only when it differs from
@@ -168,6 +170,11 @@ struct Viewer {
     uploaded: u64,
     /// Scroll the tree to the selection next frame (a pick in the view).
     reveal: bool,
+    /// The exact section caps (#43): asked of the kernel once the plane
+    /// holds still, the stencil cap meanwhile.
+    exact: ExactCut,
+    /// STEPV_VIEW_SECTION: report the caps on stderr when they land.
+    report_section: bool,
 }
 
 impl Viewer {
@@ -263,6 +270,8 @@ impl Viewer {
             tree,
             uploaded: 0,
             reveal: false,
+            exact: ExactCut::default(),
+            report_section: opts.section.is_some(),
             cut: opts.section.is_some(),
             cap: true,
             section: Section {
@@ -570,42 +579,116 @@ impl Viewer {
         if queries.is_empty() {
             return;
         }
-        if self.measurer.is_none() {
-            let (Some(input), Some(limits)) = (&self.input, self.limits) else {
-                self.measurement.distance = Some(Err("no file to measure".into()));
-                self.measurement.waiting = None;
-                return;
-            };
-            self.measurer = Some(Measurer::spawn(&crate::occt::kernel_path(), input, limits));
-        }
-        let m = self.measurer.as_ref().expect("started above");
+        let Some(m) = self.measurer() else {
+            self.measurement.distance = Some(Err("no file to measure".into()));
+            self.measurement.waiting = None;
+            return;
+        };
         for (id, q) in queries {
             m.send(id, q);
         }
     }
 
-    /// Collects measurement answers; asks for frames while one is out.
-    fn poll_measurer(&mut self, ctx: &egui::Context) {
-        if let Some(m) = &self.measurer {
-            while let Some((id, r)) = m.try_recv() {
-                let complete = self.measurement.answer(id, r);
-                if self.report_measure && complete {
-                    let show = |r: &Option<Result<crate::measure::Answer, String>>| match r {
-                        Some(Ok(a)) => {
-                            format!("{:?} {:?} {:?}", a.distance, a.axis_distance, a.angle_deg)
-                        }
-                        Some(Err(e)) => format!("error: {e}"),
-                        None => "none".into(),
-                    };
-                    eprintln!(
-                        "stepv: STEPV_VIEW_MEASURE distance {} angle {}",
-                        show(&self.measurement.distance),
-                        show(&self.measurement.angle)
-                    );
+    /// The kernel server's worker, started on first use; `None` without a
+    /// file to serve.
+    fn measurer(&mut self) -> Option<&Measurer> {
+        if self.measurer.is_none() {
+            let (input, limits) = (self.input.as_ref()?, self.limits?);
+            self.measurer = Some(Measurer::spawn(&crate::occt::kernel_path(), input, limits));
+        }
+        self.measurer.as_ref()
+    }
+
+    /// The capped section plane, and whether the scene has its exact caps.
+    fn capped_plane(&self) -> (Option<[f32; 4]>, bool) {
+        let plane = self.plane().filter(|_| self.cap);
+        (
+            plane,
+            plane.is_some_and(|p| self.scene.exact_caps(p).is_some()),
+        )
+    }
+
+    /// Asks the kernel for the exact caps (#43) once the plane has held
+    /// still, unless it has them, or said no, already.
+    fn ask_section(&mut self, ctx: &egui::Context) {
+        let (plane, have) = self.capped_plane();
+        match self.exact.due(plane, have, std::time::Instant::now()) {
+            Due::Nothing => {}
+            Due::Wait(d) => ctx.request_repaint_after(d),
+            Due::Ask(p) => {
+                let id = self.next_query;
+                match self.measurer() {
+                    Some(m) => {
+                        m.send(id, crate::measure::Query::Section(p.map(f64::from)));
+                        self.next_query += 1;
+                        self.exact.sent(id, p);
+                    }
+                    None => self.exact.refuse(p, "no file to cut".into(), true),
                 }
             }
         }
-        if self.measurement.waiting.is_some() {
+    }
+
+    /// Files the kernel's caps for the plane they were asked about.
+    fn section_answer(
+        &mut self,
+        rs: &egui_wgpu::RenderState,
+        plane: [f32; 4],
+        r: Result<Vec<crate::measure::Cap>, crate::measure::Error>,
+    ) {
+        let set = match r {
+            Ok(caps) => self
+                .scene
+                .set_exact_caps(&rs.device, plane, &caps)
+                .map(|()| caps.len())
+                .map_err(|e| (e, true)),
+            Err(e) => Err((e.to_string(), sticky(&e))),
+        };
+        match set {
+            Ok(n) => {
+                self.exact.landed();
+                if self.report_section {
+                    eprintln!("stepv: STEPV_VIEW_SECTION exact caps for {n} parts");
+                }
+            }
+            Err((e, sticky)) => {
+                eprintln!("stepv: no exact section caps ({e}); the stencil cap stays");
+                self.exact.refuse(plane, e, sticky);
+            }
+        }
+    }
+
+    /// Collects measurement answers; asks for frames while one is out.
+    fn poll_measurer(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
+        let mut answers = Vec::new();
+        if let Some(m) = &self.measurer {
+            answers.extend(std::iter::from_fn(|| m.try_recv()));
+        }
+        for (id, r) in answers {
+            let r = match self.exact.take(id, r) {
+                Taken::Section(plane, caps) => {
+                    self.section_answer(rs, plane, caps);
+                    continue;
+                }
+                Taken::Other(r) => r,
+            };
+            let complete = self.measurement.answer(id, r);
+            if self.report_measure && complete {
+                let show = |r: &Option<Result<crate::measure::Answer, String>>| match r {
+                    Some(Ok(a)) => {
+                        format!("{:?} {:?} {:?}", a.distance, a.axis_distance, a.angle_deg)
+                    }
+                    Some(Err(e)) => format!("error: {e}"),
+                    None => "none".into(),
+                };
+                eprintln!(
+                    "stepv: STEPV_VIEW_MEASURE distance {} angle {}",
+                    show(&self.measurement.distance),
+                    show(&self.measurement.angle)
+                );
+            }
+        }
+        if self.measurement.waiting.is_some() || self.exact.waiting() {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     }
@@ -658,7 +741,21 @@ impl Viewer {
                 ui.checkbox(&mut self.section.flip, "Flip");
             });
             ui.add(egui::Slider::new(&mut self.section.offset, 0.0..=1.0).show_value(false));
+            if let (Some(p), have) = self.capped_plane() {
+                let (text, why) = self.exact.status(p, have);
+                let label = ui.weak(text);
+                if let Some(why) = why {
+                    label.on_hover_text(why);
+                }
+            }
         });
+    }
+
+    /// Whether the cap drawn is the last it will be: exact, refused, or no
+    /// cap at all (the screenshot hook waits for it).
+    fn section_settled(&self) -> bool {
+        let (plane, have) = self.capped_plane();
+        self.exact.settled(plane, have)
     }
 
     /// The section plane, when it is on.
@@ -888,6 +985,7 @@ impl Viewer {
                 self.apply(Input::Scroll(n), short);
             }
         }
+        self.ask_section(ui.ctx());
         let dark = ui.visuals().dark_mode;
         let ppp = ui.ctx().pixels_per_point();
         // Past the texture limit (a window across two 5K displays), render
@@ -904,6 +1002,7 @@ impl Viewer {
             section: self.plane(),
             picked: self.picked,
             visibility: self.tree.generation,
+            caps: self.exact.landed,
         };
         self.render(rs, key);
         // A click (not the end of a drag) picks what is under it, in the
@@ -935,7 +1034,7 @@ impl Viewer {
                 egui::Color32::WHITE,
             );
         }
-        self.poll_measurer(ui.ctx());
+        self.poll_measurer(ui.ctx(), rs);
         if self.measuring {
             self.draw_witness(ui, rect);
         }
@@ -992,6 +1091,7 @@ impl Viewer {
         // and a STEPV_VIEW_PICK click with its highlight.
         let settled = self.pick_at.is_empty()
             && self.measurement.waiting.is_none()
+            && self.section_settled()
             && self.pending.is_none()
             && self.last.is_some_and(|k| k.picked == self.picked);
         if self.requested.is_none() && self.frames >= 3 && settled {
@@ -1210,6 +1310,7 @@ mod tests {
             section: None,
             picked: None,
             visibility: 0,
+            caps: 0,
         };
         let mut last = None;
         assert!(needs_render(&mut last, key), "the first frame renders");
@@ -1233,6 +1334,8 @@ mod tests {
                 visibility: 1,
                 ..key
             },
+            // Exact caps landed (#43).
+            RenderKey { caps: 1, ..key },
             RenderKey {
                 show_construction: true,
                 ..key

@@ -937,7 +937,8 @@ and #34 (capping, fat lines).
     picks nothing rather than the hidden face behind it.
   - Faces carry a slope-scaled depth bias, so an edge's flat quad also wins on tilted and concave
     corners. A test checks a concave edge keeps at least half a convex one's width.
-  - Exact, per-part caps from a kernel section are #43.
+  - Exact, per-part caps from a kernel section are #43 (below); the stencil cap is now their
+    fallback.
   - **Acceptance** (`tests/view.rs`, real kernel): cut at y = 15 through the hole and the pins, the
     plate's profile is capped and the hole is open (its wall shows, in the part's colour).
     `test-viewer.sh` checks the cap in a real window.
@@ -951,6 +952,54 @@ and #34 (capping, fat lines).
   - It falls back to curve sampling where a face was recovered (#31's review).
   - The depth pull drops from 0.0005 to 0.0001.
   - The edge-length test against the topology still holds.
+
+### Exact section caps (#43, 2026-10-05)
+
+The stencil cap is one grey for every part, so an interference (the fixture's pins pass through
+the plate) is capped, but nobody can see whose section is whose. Now the kernel cuts each part
+exactly, and the viewer draws one cap per part in that part's colour.
+
+- **The kernel op:** `stepv-occt --serve` takes `{"op": "section", "plane": [nx, ny, nz, w]}`,
+  the viewer's plane (kept: `dot(p, n) <= w`). Protocol at the top of `kernel/measure.h`.
+  - For each part with solids whose box the plane crosses: `BRepAlgoAPI_Common` of the solids
+    with a face on the plane, well past the box. That gives the section's faces, holes and
+    islands included.
+  - The faces are meshed with `BRepMesh_IncrementalMesh` and returned as triangles, in model
+    coordinates.
+  - The issue planned closed polylines with an earcut in the viewer. The kernel already knows
+    which loop is a hole and has a mesher, so the viewer gets triangles and needs no
+    triangulator.
+  - Sheets and sketches have no cap, as under the stencil. A zero normal is refused.
+  - If one part's Boolean fails, the whole query fails, so every part keeps the stencil cap. A
+    missing exact cap would show that part's inside as if it were hollow.
+  - Cost: 900 parts (the fixture × 300) in 0.27 s for 144 caps, about 2 ms a cap. A query is held
+    to the run's limits, as a measurement is.
+- **The viewer:** the plane must hold still for 150 ms before the query is sent, so a dragged
+  slider doesn't queue one per frame. The worker keeps only the newest section query, apart from
+  the newest measurement pair.
+  - Exact caps are drawn only for the plane they were cut by. Any other plane, while a query is in
+    flight or after the kernel refuses, gets the stencil cap. The panel says "Exact section" or
+    "Approximate section", with the reason on hover.
+  - A refusal holds for its plane until the plane moves. A timeout, the memory cap, or caps larger
+    than the GPU's buffers turn exact caps off for the session. Otherwise every stop of the slider
+    would cost another kernel restart.
+  - The kernel is untrusted: the server reads at most `MAX_LINE` (16 MiB) per answer line. A
+    kernel that writes more is killed (`Error::TooLong`), and that also turns exact caps off. The
+    caps' total size is checked against the device before anything is built.
+  - Each cap is hatched in its part's colour (fill ×0.6, hatch ×0.22).
+  - Each cap is drawn `CAP_STEP` (2⁻¹⁸ of NDC depth) nearer the eye than the earlier caps whose
+    boxes it overlaps, and no others. Ranks stop at 63, so the offset stays under 0.05% of the
+    model however many parts are cut. Where two parts overlap, the later one shows cleanly, with
+    no z-fighting mix of the two.
+  - The caps are an index buffer, sized against the device's limit.
+  - The id pass draws exact caps as "nothing", as it does the stencil cap.
+- **Acceptance:**
+  - `tests/measure.rs`: at y = 15, the plate's cap is 160 mm² (40 × 5 less the 8 × 5 hole) and
+    each pin's is 60 mm² (4 × 15).
+  - `tests/view.rs`: the pins are orange *inside* the plate too, the plate is blue around them,
+    and another plane falls back to the grey stencil cap.
+  - `test-viewer.sh`: the window counts both parts' cap colours, after the kernel reported
+    "exact caps for 3 parts".
 
 ### Work queue (ordered, 2026-10-04)
 

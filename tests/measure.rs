@@ -333,3 +333,105 @@ fn kill9(pid: u32) {
         .args(["-9", &pid.to_string()])
         .status();
 }
+
+/// The area of a cap's triangles.
+fn cap_area(c: &stepv::measure::Cap) -> f64 {
+    let p = |i: u32| {
+        let i = i as usize * 3;
+        [0, 1, 2].map(|k| f64::from(c.positions[i + k]))
+    };
+    c.indices
+        .chunks_exact(3)
+        .map(|t| {
+            let (a, b, d) = (p(t[0]), p(t[1]), p(t[2]));
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() / 2.0
+        })
+        .sum()
+}
+
+/// #43: the exact section, per part. At y = 15 the plane runs through the
+/// plate's hole and both pins' axes: the plate's cap is its 40 x 5 section
+/// less the hole's 8 x 5, and each pin's is a 4 x 15 rectangle, the part
+/// inside the plate included (the pins interfere with it).
+#[test]
+fn a_section_caps_each_part_exactly() {
+    let mut s = Server::new(&kernel(), &data("assembly.step"), limits());
+    let a = s.ask(&Query::Section([0.0, 1.0, 0.0, 15.0])).unwrap();
+    let caps = a.caps.expect("a section answer has caps");
+    let mut by_part: Vec<(u32, f64)> = caps.iter().map(|c| (c.part, cap_area(c))).collect();
+    by_part.sort_by_key(|&(p, _)| p);
+    assert_eq!(
+        by_part.iter().map(|&(p, _)| p).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    for (&(part, area), want) in by_part.iter().zip([160.0, 60.0, 60.0]) {
+        assert!(
+            (area - want).abs() < 1e-3,
+            "part {part}: {area} mm², want {want}"
+        );
+    }
+    for c in &caps {
+        assert!(!c.indices.is_empty() && c.indices.len() % 3 == 0);
+        assert!(
+            c.indices
+                .iter()
+                .all(|&i| (i as usize) < c.positions.len() / 3)
+        );
+        assert!(
+            c.positions
+                .chunks_exact(3)
+                .all(|p| (p[1] - 15.0).abs() < 1e-4),
+            "part {}: off the plane",
+            c.part
+        );
+    }
+    // The plane is (n, w), kept dot(p, n) <= w: flipped, the same section.
+    let flipped = s.ask(&Query::Section([0.0, -1.0, 0.0, -15.0])).unwrap();
+    let total = |caps: &[stepv::measure::Cap]| caps.iter().map(cap_area).sum::<f64>();
+    assert!((total(&flipped.caps.unwrap()) - 280.0).abs() < 1e-3);
+    // Past the model, and through a sketch (no solids): no caps, no error.
+    let past = s.ask(&Query::Section([0.0, 1.0, 0.0, 100.0])).unwrap();
+    assert_eq!(past.caps.map(|c| c.len()), Some(0));
+    let mut sketch = Server::new(&kernel(), &data("sketch.step"), limits());
+    let none = sketch.ask(&Query::Section([0.0, 0.0, 1.0, 0.0])).unwrap();
+    assert_eq!(none.caps.map(|c| c.len()), Some(0));
+}
+
+/// A plane the kernel cannot use is refused, and the server lives on.
+#[test]
+fn a_degenerate_section_plane_is_refused() {
+    let mut s = Server::new(&kernel(), &data("box.brep"), limits());
+    let e = s.ask(&Query::Section([0.0, 0.0, 0.0, 1.0])).unwrap_err();
+    assert!(matches!(e, Error::Refused(_)), "{e:?}");
+    let a = s.ask(&Query::Section([0.0, 0.0, 1.0, 2.5])).unwrap();
+    let caps = a.caps.unwrap();
+    assert_eq!(caps.len(), 1);
+    assert!(
+        (cap_area(&caps[0]) - 200.0).abs() < 1e-3,
+        "the box is 20 x 10"
+    );
+    assert_eq!(s.starts, 1);
+}
+
+/// An answer line past `MAX_LINE` (a hostile file's section, say) is not
+/// read into memory whole: the kernel is dropped, and restarted.
+#[test]
+fn an_endless_answer_line_is_cut_off() {
+    let mut s =
+        Server::new(&kernel(), &data("box.brep"), limits()).with_env("STEPV_OCCT_TEST_HOOKS", "1");
+    let mb = (stepv::measure::MAX_LINE >> 20) + 1;
+    let e = s
+        .raw(&json!({"id": 1, "op": "test_long", "mb": mb}))
+        .unwrap_err();
+    assert_eq!(e, Error::TooLong);
+    s.raw(&json!({"id": 2, "op": "test_long", "mb": 1}))
+        .expect("a 1 MiB line is fine, from a new kernel");
+    assert_eq!(s.starts, 2);
+}
