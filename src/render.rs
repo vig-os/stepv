@@ -268,16 +268,16 @@ impl std::fmt::Display for EmptyScene {
 
 impl std::error::Error for EmptyScene {}
 
-const DEFAULT_COLOR: Color = Color {
+pub(crate) const DEFAULT_COLOR: Color = Color {
     r: 0.38,
     g: 0.43,
     b: 0.50,
 };
-const APPROX: [f32; 3] = [0.96, 0.62, 0.12];
+pub(crate) const APPROX: [f32; 3] = [0.96, 0.62, 0.12];
 const APPROX_DARK: [f32; 3] = [0.45, 0.27, 0.02];
-const MISSING: [f32; 3] = [0.85, 0.05, 0.10];
-const SKETCH: [f32; 3] = [0.12, 0.13, 0.15];
-const CONSTRUCTION: [f32; 3] = [0.35, 0.45, 0.60];
+pub(crate) const MISSING: [f32; 3] = [0.85, 0.05, 0.10];
+pub(crate) const SKETCH: [f32; 3] = [0.12, 0.13, 0.15];
+pub(crate) const CONSTRUCTION: [f32; 3] = [0.35, 0.45, 0.60];
 
 /// View rotation: azimuth −35° about Y, then elevation 30° about X.
 fn view(cam: &Camera, p: [f32; 3]) -> [f32; 3] {
@@ -298,7 +298,7 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-fn srgb(v: f32) -> u8 {
+pub(crate) fn srgb(v: f32) -> u8 {
     let v = v.clamp(0.0, 1.0);
     let s = if v <= 0.003_130_8 {
         12.92 * v

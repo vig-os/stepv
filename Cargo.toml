@@ -18,6 +18,7 @@ include = [
   "/kernel",
   "/packaging/linux",
   "/tests/cli.rs",
+  "/tests/view.rs",
   "/tests/data",
   "/examples/harness.rs",
   "/README.md",
@@ -66,15 +67,38 @@ blake3 = "1"
 # PNG encoding for `--png` (the rasteriser itself is src/render.rs).
 png = "0.18"
 
-# The `stepv view` window. Pure Rust; on Linux it dlopens X11/Wayland at run
-# time, so building it needs no system libraries.
+# `stepv view --software`, and the fallback when there is no GPU adapter: a
+# window over the software rasteriser. Pure Rust; on Linux it dlopens
+# X11/Wayland at run time, so building it needs no system libraries.
 minifb = { version = "0.29", optional = true }
+
+# `stepv view` on a GPU (#21, #27's verdict: egui + wgpu). Pinned to exact
+# minors: egui and wgpu break their APIs every release (#27 hit three renames),
+# so an upgrade is a deliberate change, not a `cargo update`. eframe brings
+# egui, egui-wgpu and wgpu; we name wgpu through its re-export so there is
+# exactly one copy. No accesskit or persistence: nothing to store, and
+# accesskit doubles the dependency tree.
+eframe = { version = "=0.36.2", optional = true, default-features = false, features = [
+  "wgpu",
+  "default_fonts",
+  "wayland",
+  "x11",
+] }
+# Icons for the toolbar (Phosphor: tracks egui's minors).
+egui-phosphor = { version = "=0.14.0", optional = true }
+# Plain-old-data casts for the GPU buffers.
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+# Blocks on wgpu's async adapter request (the probe before the window opens,
+# and the headless renderer the tests use).
+pollster = { version = "1", optional = true }
 
 [features]
 default = ["viewer"]
-# `stepv view`: an interactive window over the software rasteriser. Off for a
-# headless build (`--no-default-features`): thumbnails and --glb need no window.
-viewer = ["dep:minifb"]
+# `stepv view`: the GPU viewer, and the software window it falls back to. Off
+# for a headless build (`--no-default-features`): thumbnails and --glb need no
+# window, and the Quick Look extensions (stepv-capi) must never link it (CI's
+# capi tripwire, scripts/check-capi-deps.sh).
+viewer = ["dep:minifb", "dep:eframe", "dep:egui-phosphor", "dep:bytemuck", "dep:pollster"]
 
 # proc_pid_rusage: the macOS half of the kernel memory cap (src/occt.rs).
 [target.'cfg(target_os = "macos")'.dependencies]

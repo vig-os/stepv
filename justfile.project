@@ -193,6 +193,27 @@ macos-install: macos-app
     pkill -f '/stepv.app/Contents/PlugIns/' || true
     qlmanage -r >/dev/null 2>&1 || true
 
+# #28: checks stepv-capi's dependency graph and its built archive's symbols.
+# Fail if the Quick Look library links any of the viewer's window/GPU stack
+[group('macos')]
+capi-tripwire:
+    cargo build --release -p stepv-capi
+    scripts/check-capi-deps.sh target/release/libstepv_capi.a
+
+# #28: needs a display; set STEPV_REQUIRE_GPU=1 where a GPU must be found.
+# The GPU viewer's renderer tests on the real kernel, then real windows
+[group('viewer')]
+view-test *shots: kernel
+    cargo test --lib view::
+    cargo test --test view
+    cargo build --release --bin stepv
+    scripts/test-viewer.sh target/release/stepv {{ shots }}
+
+# view-test on Linux, in a container (Mesa's lavapipe and Xvfb)
+[group('viewer')]
+linux-view-test *shots:
+    scripts/test-linux-viewer.sh {{ shots }}
+
 # Headless macOS checks (Swift reader vs Rust, offscreen preview render, and
 # with --quicklook the real Quick Look round trip against /Applications).
 [group('macos')]

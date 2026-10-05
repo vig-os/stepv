@@ -689,6 +689,80 @@ with the mesh (a STEPVMSH v4) once the viewer exists. Point-to-point distances b
 (`BRepExtrema_DistShapeShape`) are kernel queries a viewer would make on demand, not data to
 precompute.
 
+### Viewer stack (#27 spike, 2026-10-05): egui + wgpu
+
+**Decided:** #21's cross-platform viewer (option B) is built on egui + wgpu (eframe), in-process in
+`stepv view`, with the minifb viewer kept as the `--software` fallback. The alternative was
+three.js in a browser fed by a loopback server.
+
+Both were prototyped against the same kernel output (`spikes/` on `feature/27-viewer-stack-spike`)
+and measured. The full table is on #27.
+
+- **Rendering speed did not decide it.** At matched settings (the 1.77M-triangle stress assembly,
+  1280×800, MSAA, GPU-synchronised), both draw a frame in under 1 ms on Apple Silicon. On Linux
+  with no GPU, wgpu runs on lavapipe at about 6 fps for that model.
+- **What decided it:**
+  - No loopback listener beside a kernel that #18 just sandboxed.
+  - One language and toolchain. The minified JS failed the repo's hooks.
+  - No browser launch: 5.6 s cold.
+  - The tested Rust (camera, overlay rules, topology checks) is reused, not re-implemented in JS.
+- **What it costs:**
+  - 188 crates and a 12–20 MB binary, so it stays behind the `viewer` feature, with a CI tripwire
+    keeping it out of the Quick Look capi.
+  - Real API churn: three breaking renames hit in one afternoon. Versions are pinned.
+  - A heavier Linux build: a 4 GiB VM needs `-j2`.
+- **The condition that would have flipped it:** an egui model tree failing at scale. It doesn't when
+  virtualised: 40k nodes cost 2.2 ms per frame. Built naively from nested headers, the same tree
+  costs 38 ms.
+- **Reviews:** two rounds of fresh agent reviews. Round 1 covered graphics, packaging/security and
+  CAD product. Round 2 covered methodology, which caught that the first frame-time comparison was
+  invalid, and productisation, which supplied the follow-ups.
+
+The prototypes' data plane is throwaway. The product is a fresh `view::` module: #28 (scaffold,
+fallback, tripwire), #29 (id-buffer picking), #30 (virtualised tree), #31 (overlay, edges,
+STEPVMSH v4), #32 (CI, packaging), #33 (measurements through a sandboxed kernel query channel),
+and #34 (capping, fat lines).
+
+### Viewer scaffold (#28, 2026-10-05)
+
+`src/view/` replaces `src/viewer.rs`. `stepv view` draws on the GPU, and reports `"backend"`.
+
+- **GPU layout:** struct-of-arrays buffers for positions, normals, a face id per vertex, and
+  indices, with each part a range drawn as its own instance.
+  - Per face: a material (colour and `FaceStatus`) in a storage buffer.
+  - Per part: the first face in that table, and a visibility bitset.
+  - No per-vertex colour.
+  - STEPVMSH writes each face's vertices separately, so a per-vertex face id costs nothing. The
+    layout would split a shared vertex, and `tests/view.rs` checks that every committed file needs
+    none.
+- **The camera** is `render.rs`'s, as an orthographic matrix with the same sphere fit. The tests
+  hold the GPU silhouette to the software one (IoU > 0.95 for every `tests/data` file) and the
+  shading to within 3/255.
+- **Rendering:** into the viewer's own target, 4× MSAA resolved to an `Rgba8Unorm` texture that
+  egui samples. The shaders encode sRGB themselves: egui blends in gamma space, and an `Srgb`
+  target with a `Unorm` view needs view formats, which wgpu's GL backend lacks.
+  - A frame renders only when its `RenderKey` (camera, toggles, size, theme) changes.
+- **Fallback:** `--software` is the minifb window. It is also used when no usable adapter exists,
+  with a note on stderr. A usable adapter needs storage buffers in fragment shaders, so
+  WebGL2-class GL doesn't qualify.
+- **The capi tripwire** (`just capi-tripwire`, CI on both OSes) fails on any eframe, egui, winit,
+  wgpu, naga or minifb crate in stepv-capi's graph, or symbol in `libstepv_capi.a`. It was checked
+  red: a `-p stepv -p stepv-capi` build unifies `viewer` on, and the tripwire names nine crates.
+- **Theme:** shadcn-style tokens (zinc neutrals, one blue accent, radius 6, a 4-pt grid) applied
+  through egui's `Style` and `Visuals`.
+  - Tested for WCAG AA. That caught zinc-500 text on the muted fill at 4.4:1, now a shade darker.
+  - Phosphor icons, and four in-house components.
+- **Measured** on the stress assembly, Apple M3 Ultra, Metal:
+  - 1.77M triangles upload in 43 ms.
+  - A GPU-synchronised frame (1280×800, 4× MSAA) costs p50 0.88 ms and p95 1.37 ms.
+  - The viewer's steady footprint is about 360 MB, 98 MB of it GPU. The rest is system frameworks
+    (CoreUI, ICU, Metal caches): malloc_history shows no stepv allocation of 1 MB or more left
+    after upload.
+  - The 2.1 GB the prototype was charged with is the kernel child's peak (2078 MB), not the
+    viewer's.
+- **Licences:** egui embeds fonts under OFL-1.1 and the Ubuntu Font Licence. They are allowed in
+  `deny.toml`, and their texts are in `licenses/`.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -699,9 +773,10 @@ Agent work, in order:
    `render::Camera::for_scene`; the preview gained scroll zoom and a readable info panel.
 3. **#19 Multi-file assemblies blank in Quick Look** (`priority:medium`, #25): the honest message.
    Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
-4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`, `needs-human`). The
-   kernel side has started: `--topology` (below). The viewer's platform (A native macOS /
-   B cross-platform Rust / C both, staged) still needs a decision.
+4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
+   `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
+   #28 (scaffold, done: "Viewer scaffold" above) → #29 picking → #30 tree → #31 overlay and edges →
+   #32 CI and packaging → #33 measurements → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
 toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.

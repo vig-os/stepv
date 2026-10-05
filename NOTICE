@@ -62,6 +62,18 @@ Their license texts are distributed with their upstream sources at the
 addresses above.
 
 =============================================================================
+Fonts and icons embedded in `stepv view`
+=============================================================================
+
+The viewer window (egui) compiles these fonts into the `stepv` binary:
+
+  Ubuntu Light       Ubuntu Font Licence 1.0   licenses/Ubuntu-font-1.0.txt
+  Noto Emoji         SIL Open Font License 1.1 licenses/OFL-1.1.txt
+  Hack               MIT; Bitstream Vera       licenses/Hack-font.txt
+  emoji-icon-font    MIT (c) 2014 John Slegers
+  Phosphor Icons     MIT (Phosphor Icons)      https://phosphoricons.com
+
+=============================================================================
 Rust dependencies
 =============================================================================
 
