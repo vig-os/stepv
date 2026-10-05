@@ -251,7 +251,7 @@ impl ExactCut {
     }
 
     /// No caps for `plane`, because of `e`. `sticky`: no more for this
-    /// model (see [`Self::off`]).
+    /// model (a timeout, the memory cap, too big).
     pub fn refuse(&mut self, plane: [f32; 4], e: String, sticky: bool) {
         if sticky {
             self.off = Some(e);
