@@ -20,6 +20,7 @@ pub mod inspect;
 pub mod software;
 #[cfg(feature = "viewer")]
 pub mod theme;
+pub mod tree;
 #[cfg(feature = "viewer")]
 pub mod widgets;
 

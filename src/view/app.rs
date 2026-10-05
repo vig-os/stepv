@@ -19,6 +19,7 @@ use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
 use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
+use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, Options, ThemePref, theme};
 use crate::render::Camera;
@@ -39,6 +40,8 @@ pub struct RenderKey {
     /// The section plane, when on.
     pub section: Option<[f32; 4]>,
     pub picked: Option<Pick>,
+    /// The model tree's visibility generation.
+    pub visibility: u64,
 }
 
 /// Whether a frame with `key` must be rendered: only when it differs from
@@ -135,6 +138,12 @@ struct Viewer {
     pick_at: Option<(f32, f32)>,
     /// That click is in flight: report what it hits on stderr.
     report_pick: bool,
+    /// The model tree (#30).
+    tree: Tree,
+    /// The tree generation the GPU's visibility matches.
+    uploaded: u64,
+    /// Scroll the tree to the selection next frame (a pick in the view).
+    reveal: bool,
 }
 
 impl Viewer {
@@ -158,6 +167,16 @@ impl Viewer {
             ));
         }
         theme::install(&cc.egui_ctx, opts.theme);
+        let tree = match &topology {
+            Some(t) => Tree::from_topology(t, scene.parts.len()),
+            None => Tree::flat(
+                &scene
+                    .parts
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        };
         let info = rs.adapter.get_info();
         // A validation error here (a driver that claims more than it does)
         // becomes an Err, and the software fallback, not a panic.
@@ -190,6 +209,9 @@ impl Viewer {
             ids: None,
             pick_at: opts.pick_at,
             report_pick: false,
+            tree,
+            uploaded: 0,
+            reveal: false,
             cut: false,
             section: Section {
                 axis: 0,
@@ -338,6 +360,26 @@ impl Viewer {
             return;
         };
         let (part, face) = (pick.part as usize, pick.face as usize);
+        if pick.is_whole_part() {
+            // Picked in the tree: the part, not one face of it.
+            let name = self
+                .topology
+                .as_ref()
+                .and_then(|t| t.parts.get(part).map(|p| p.name.clone()))
+                .or_else(|| {
+                    self.tree
+                        .row_of(pick.part)
+                        .map(|r| self.tree.rows()[r as usize].name.clone())
+                })
+                .unwrap_or_default();
+            widgets::property_row(ui, "Part", &format!("{name} (#{part})"));
+            if let Some(topo) = &self.topology {
+                for r in super::inspect::part(topo, part) {
+                    widgets::property_row(ui, r.key, &r.value);
+                }
+            }
+            return;
+        }
         match self.topology.as_ref().and_then(|topo| {
             super::inspect::face(topo, part, face)
                 .map(|rows| (rows, super::inspect::part(topo, part)))
@@ -425,13 +467,56 @@ impl Viewer {
             );
     }
 
+    /// Uploads the tree's visibility when it changed, and drops a selection
+    /// whose part was hidden (#29's review).
+    fn sync_visibility(&mut self, rs: &egui_wgpu::RenderState) {
+        if self.tree.generation == self.uploaded {
+            return;
+        }
+        self.uploaded = self.tree.generation;
+        let shown = self.tree.shown_parts();
+        let mut v = super::gpu::Visibility::all(shown.len());
+        for (i, &on) in shown.iter().enumerate() {
+            v.set(i, on);
+        }
+        self.scene.set_visibility(&rs.queue, v);
+        if self
+            .picked
+            .is_some_and(|p| !shown.get(p.part as usize).copied().unwrap_or(false))
+        {
+            self.picked = None;
+        }
+    }
+
+    /// The model tree panel.
+    fn model_tree(&mut self, ui: &mut egui::Ui) {
+        widgets::section_header(ui, "Model");
+        let selected = self.picked.map(|p| p.part);
+        let r = self
+            .tree
+            .panel(ui, selected, std::mem::take(&mut self.reveal));
+        if let Some(part) = r.selected {
+            self.picked = Some(Pick::part(part));
+            self.pending = None;
+        }
+    }
+
     /// Collects a finished pick; asks for another frame while one is out.
     fn finish_pick(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
         let Some(p) = &self.pending else { return };
         match p.poll(&rs.device) {
             Some(hit) => {
+                // A part hidden while the pick was in flight is not picked:
+                // the id pass saw the old visibility (#30 review).
+                let shown = self.tree.shown_parts();
+                let hit = hit.filter(|p| shown.get(p.part as usize).copied().unwrap_or(false));
                 self.picked = hit;
                 self.pending = None;
+                self.reveal = hit.is_some();
+                // The tree drew this frame before the pick landed: one more
+                // frame reveals it and draws the highlight, without waiting
+                // for the pointer to move.
+                ctx.request_repaint();
                 if std::mem::take(&mut self.report_pick) {
                     let what = hit.map_or("nothing".into(), |p| {
                         let surface = self.topology.as_ref().and_then(|t| {
@@ -530,6 +615,7 @@ impl Viewer {
             stripe: (6.0 * ppp).round().max(1.0) as u32,
             section: self.plane(),
             picked: self.picked,
+            visibility: self.tree.generation,
         };
         self.render(rs, key);
         // A click (not the end of a drag) picks what is under it, in the
@@ -663,6 +749,17 @@ impl eframe::App for Viewer {
                 .color(t.muted_foreground),
             );
         });
+        egui::Panel::left("tree")
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.panel)
+                    .inner_margin(egui::Margin::same(theme::space(3) as i8))
+                    .stroke(egui::Stroke::new(1.0, t.border)),
+            )
+            .default_size(260.0)
+            .min_size(180.0)
+            .show(root, |ui| self.model_tree(ui));
+        self.sync_visibility(&rs);
         egui::Panel::right("properties")
             .frame(
                 egui::Frame::NONE
@@ -803,6 +900,7 @@ mod tests {
             stripe: 6,
             section: None,
             picked: None,
+            visibility: 0,
         };
         let mut last = None;
         assert!(needs_render(&mut last, key), "the first frame renders");
@@ -820,6 +918,10 @@ mod tests {
             },
             RenderKey {
                 picked: Some(Pick { part: 0, face: 3 }),
+                ..key
+            },
+            RenderKey {
+                visibility: 1,
                 ..key
             },
             RenderKey {
