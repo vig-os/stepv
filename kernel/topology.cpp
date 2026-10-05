@@ -63,6 +63,7 @@
 #include <gp_Torus.hxx>
 
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -224,6 +225,9 @@ TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape) {
 namespace {
 
 std::string prototype_json(const TopoDS_Shape& shape) {
+    // Test hook (tests/cli.rs, #38): a topology that fails after a good mesh.
+    if (std::getenv("STEPV_OCCT_TEST_TOPOLOGY_FAIL"))
+        throw Standard_Failure("test hook: STEPV_OCCT_TEST_TOPOLOGY_FAIL");
     std::ostringstream o, faces;
     o.precision(17);
     faces.precision(17);

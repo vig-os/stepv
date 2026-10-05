@@ -17,7 +17,9 @@ char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
 
 // stepv_occt_run, also writing the model's exact topology (assembly tree,
 // surface and curve types and parameters, areas, volumes; format at the top
-// of topology.cpp) to `topology_out` (NULL: none).
+// of topology.cpp) to `topology_out` (NULL: none). A topology that fails
+// after a good mesh does not fail the run: the summary's "topology_error"
+// says why, and no topology file is left behind (#38).
 char* stepv_occt_run_topology(const char* input, const char* mesh_out, const char* topology_out,
                               double linear_rel, double angular_deg, int* exit_code);
 

@@ -21,6 +21,9 @@
 #      the sandboxed kernel server.
 #   8. A section (#34): cut through the hole and the pins, capped: the
 #      hatched cap's two greys fill a good part of the window.
+#   9. A file whose exact topology fails (the kernel's
+#      STEPV_OCCT_TEST_TOPOLOGY_FAIL hook) still opens, without the
+#      inspector, after ONE kernel run (#38).
 #
 # STEPV_VIEW_REQUIRE_WINDOW=1 fails a GPU screenshot that fell back to the
 # viewport render: where windows are presented (Xvfb), the panels must be
@@ -219,6 +222,33 @@ if f.get("count") != 30:
 print(f"ok: --frames 30 on {name}: {r['backend']}, p50 {f['p50_ms']:.2f} ms, p95 {f['p95_ms']:.2f} ms")
 PY
 done
+
+# 9. The topology fails after a good mesh: one kernel run, counted by a
+#    wrapper (its --serve server, if any, is not a run).
+kernel=${STEPV_OCCT:-}
+if [ -z "$kernel" ]; then
+  for k in "$(dirname "$stepv")/stepv-occt" "$(dirname "$stepv")/../libexec/stepv/stepv-occt" \
+    "$root/target/kernel/stepv-occt"; do
+    if [ -f "$k" ]; then kernel=$k; break; fi
+  done
+fi
+[ -n "$kernel" ] || fail "topology: no kernel found beside $stepv"
+cat >"$tmp/count-kernel" <<SH
+#!/bin/sh
+case " \$* " in *" --serve "*) ;; *) echo run >>"$tmp/kernel-runs" ;; esac
+exec "$kernel" "\$@"
+SH
+chmod +x "$tmp/count-kernel"
+out=$(STEPV_OCCT="$tmp/count-kernel" STEPV_OCCT_TEST_TOPOLOGY_FAIL=1 \
+  STEPV_VIEW_SCREENSHOT="$tmp/no-topology.png" "$stepv" view "$input" 2>"$tmp/err") || true
+read -r status backend error <<<"$(report <<<"$out")"
+[ "$status" = ok ] || fail "topology: $status $backend ($error): $(cat "$tmp/err")"
+runs=$(wc -l <"$tmp/kernel-runs" | tr -d ' ')
+[ "$runs" = 1 ] || fail "topology: $runs kernel runs, not one"
+grep -q "no exact topology for the inspector: .*test hook" "$tmp/err" \
+  || fail "topology: the failure was not reported: $(cat "$tmp/err")"
+[ -s "$tmp/no-topology.png" ] || fail "topology: no screenshot"
+echo "ok: a failed topology opens the viewer without the inspector, in one kernel run"
 
 if [ -n "$keep" ]; then
   mkdir -p "$keep"

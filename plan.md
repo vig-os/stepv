@@ -684,6 +684,14 @@ The indices line up with the mesh: `parts[i]` is the mesh's part `i`, and a prot
 the numbers against hand calculations: the bracket plate's volume is 6000 − 80π, its hole radius
 is 4, and the pin's volume is 60π.
 
+**A failure is non-fatal** (#38). The topology comes after the mesh. If it fails (an OCCT
+exception in one prototype, an unwritable file), the kernel reports `topology_error`, removes what
+it wrote, and the run still succeeds with its mesh. `stepv --png o.png --topology t.json` writes
+the PNG and reports `topology_error` instead of `topology`; `--topology` alone fails. `stepv view`
+opens without the inspector after one kernel run. The stage shares the run's `--timeout` and
+memory cap: they protect the machine, and a kill cannot keep half a run. A file that fits its
+limits only without the topology fails with it.
+
 Not in v1: edge polylines, which a viewer needs in order to pick edges on screen. They belong
 with the mesh (a STEPVMSH v4) once the viewer exists. Point-to-point distances between shapes
 (`BRepExtrema_DistShapeShape`) are kernel queries a viewer would make on demand, not data to
@@ -784,8 +792,8 @@ and #34 (capping, fat lines).
   it beats its own face and loses to anything in front. The material is untouched.
 - **The inspector** is `view::inspect`: rows from `--topology`, placed into model coordinates by
   the part's transform (a pin's axis is where that pin stands).
-  - `stepv view` now runs the kernel with `--topology`. If the topology fails to parse or match, the
-    viewer still opens, says so, and shows mesh ids only.
+  - `stepv view` now runs the kernel with `--topology`. If the topology fails (in the kernel,
+    #38), or fails to parse or match, the viewer still opens, says so, and shows mesh ids only.
 - **Section plane:** `Section { axis, offset, flip }` across the model box, applied in every pass:
   image, ids, highlight, lines. #34 adds capping.
 - **Acceptance**, headless against the real kernel (`tests/view.rs`), at pixels projected through
