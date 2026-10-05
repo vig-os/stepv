@@ -175,7 +175,8 @@ impl Limits {
     };
 }
 
-/// Runs the kernel on `input`, writing mesh buffers to `mesh_out` if given.
+/// Runs the kernel on `input`, writing mesh buffers to `mesh_out` and the
+/// exact topology ([`crate::topology`]) to `topology_out`, each if given.
 ///
 /// # Errors
 /// Only when the kernel cannot be spawned at all. Every failure of the kernel
@@ -186,6 +187,7 @@ pub fn run(
     deflection: Deflection,
     limits: Limits,
     mesh_out: Option<&Path>,
+    topology_out: Option<&Path>,
 ) -> std::io::Result<Run> {
     let mut cmd = Command::new(kernel);
     cmd.arg(input)
@@ -198,6 +200,9 @@ pub fn run(
         .stderr(Stdio::null());
     if let Some(out) = mesh_out {
         cmd.arg("--mesh").arg(out);
+    }
+    if let Some(out) = topology_out {
+        cmd.arg("--topology").arg(out);
     }
 
     let start = Instant::now();

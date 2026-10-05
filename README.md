@@ -70,6 +70,7 @@ export STEPV_OCCT=$PWD/build/stepv-occt           # or install it as <prefix>/li
 stepv part.step --png part.png --size 512   # thumbnail, with the broken-face overlay
 stepv part.step --glb part.glb              # glTF 2.0: named nodes, per-face colours
 stepv part.step --info                      # header metadata as JSON; never fails
+stepv part.step --topology part.json        # exact B-rep facts: tree, radii, areas, volumes
 stepv view part.step                        # interactive viewer window
 ```
 

@@ -13,9 +13,14 @@
 //   sketch.step    curves only, no surfaces: the sketch path
 //   box.igs        IGES
 //   box.brep       OCCT native BREP
+//   left-handed-plane.brep  one square face on a plane with LEFT-handed
+//                  axes: its Axis() points +z while the surface (and the
+//                  face) faces -z, as mirrored geometry and some .brep do
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <Geom_Plane.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepTools.hxx>
@@ -132,6 +137,16 @@ bool iges_box(const std::string& path) {
     return w.Write(path.c_str());
 }
 
+bool brep_left_handed_plane(const std::string& path) {
+    // Axis() = +z, X = +x, Y = -y: indirect, so the surface normal X x Y
+    // is -z. The face is FORWARD, so it faces -z too.
+    gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    ax.YReverse();
+    Handle(Geom_Plane) plane = new Geom_Plane(ax);
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(plane, 0, 10, -10, 0, 1e-7);
+    return BRepTools::Write(face, path.c_str());
+}
+
 bool brep_box(const std::string& path) {
     return BRepTools::Write(BRepPrimAPI_MakeBox(20, 10, 5).Shape(), path.c_str());
 }
@@ -152,7 +167,8 @@ int main(int argc, char** argv) {
                 {"multifile/bracket.step", step_multifile},
                 {"sketch.step", step_sketch},
                 {"box.igs", iges_box},
-                {"box.brep", brep_box}};
+                {"box.brep", brep_box},
+                {"left-handed-plane.brep", brep_left_handed_plane}};
     for (const auto& j : jobs) {
         if (!j.make(dir + "/" + j.name)) {
             std::fprintf(stderr, "fixture-gen: failed to write %s\n", j.name);

@@ -20,12 +20,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 const char* const kUsage =
-    "usage: stepv-occt <input> [--mesh <out>] [--linear-rel <f>] [--angular-deg <f>]\n";
+    "usage: stepv-occt <input> [--mesh <out>] [--topology <out.json>] [--linear-rel <f>]\n"
+    "                  [--angular-deg <f>]\n";
 
 // realpath(), or "" when it does not resolve.
 std::string canonical(const std::string& p) {
@@ -121,7 +123,7 @@ void escape_attempt(const std::string& spec) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string input, mesh_out;
+    std::string input, mesh_out, topology_out;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -133,6 +135,7 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--mesh") mesh_out = value();
+        else if (a == "--topology") topology_out = value();
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -165,6 +168,17 @@ int main(int argc, char** argv) {
     // Both paths are resolved here, outside it: inside, realpath() of a
     // relative path cannot read the working directory's ancestry (macOS).
     const std::string input_path = canonical(input);
+    // An output that IS the input, or two outputs on one path: creating the
+    // outputs truncates them, so refuse before touching anything.
+    {
+        const std::string m = mesh_out.empty() ? "" : canonical(mesh_out);
+        const std::string t = topology_out.empty() ? "" : canonical(topology_out);
+        if ((!m.empty() && m == input_path) || (!t.empty() && t == input_path) ||
+            (!mesh_out.empty() && (mesh_out == topology_out || (!m.empty() && m == t)))) {
+            std::fputs("stepv-occt: an output path is the input or the other output\n", stderr);
+            return kExitUsage;
+        }
+    }
     const auto slash = input_path.rfind('/');
     const std::string input_dir = slash == std::string::npos ? ""
                                   : slash == 0               ? "/"
@@ -179,20 +193,23 @@ int main(int argc, char** argv) {
         (!home.empty() && !input_dir.empty() &&
          (home == input_dir || home.rfind(input_dir + "/", 0) == 0)))
         read_root = input_path;
-    // The one writable file, granted by the path its descriptor really has.
+    // The writable files (the mesh, the topology), each granted by the path
+    // its descriptor really has.
     // O_NOFOLLOW: through a symlink, whatever it points at would become
     // writable. Not created, not granted: the core then fails to open it.
-    std::string mesh_grant;
-    if (!mesh_out.empty()) {
+    std::vector<std::string> writable;
+    for (std::string* out : {&mesh_out, &topology_out}) {
+        if (out->empty()) continue;
         const int fd =
-            open(mesh_out.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
-        if (fd >= 0) {
-            mesh_grant = fd_path(fd);
-            close(fd);
+            open(out->c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (fd < 0) continue;
+        if (const std::string granted = fd_path(fd); !granted.empty()) {
+            writable.push_back(granted);
+            *out = granted;
         }
-        if (!mesh_grant.empty()) mesh_out = mesh_grant;
+        close(fd);
     }
-    const std::string sandbox = stepv::enter_sandbox(read_root, mesh_grant);
+    const std::string sandbox = stepv::enter_sandbox(read_root, writable);
     // Unresolvable: the core reports it, in its own words.
     if (!input_path.empty()) input = input_path;
 
@@ -206,8 +223,9 @@ int main(int argc, char** argv) {
     dup2(STDERR_FILENO, STDOUT_FILENO);
 
     int code = 3;
-    char* json = stepv_occt_run(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
-                                linear_rel, angular_deg, &code);
+    char* json = stepv_occt_run_topology(
+        input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
+        topology_out.empty() ? nullptr : topology_out.c_str(), linear_rel, angular_deg, &code);
     if (!json) return 3;
     // The summary says which sandbox the run was in.
     std::string line = json;

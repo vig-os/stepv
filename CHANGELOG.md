@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Exact topology export** ([#21](https://github.com/vig-os/stepv/issues/21)): `--topology <path>`
+  writes the assembly tree, and per prototype its faces' surface types and parameters (plane,
+  cylinder radius, …), edges' curves and lengths, vertices, area and volume, as JSON whose indices
+  line up with the mesh's. It is the kernel side of a viewer with a model tree and measurements
 - **Native OCCT kernel** ([#1](https://github.com/vig-os/stepv/issues/1))
   - `kernel/stepv-occt`: STEP/IGES/BREP through XCAF (names, colours, instances), meshed at a
     bbox-relative deflection, run as a subprocess so crashes are contained and the deadline is a kill

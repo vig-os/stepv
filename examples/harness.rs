@@ -222,7 +222,7 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
         timeout: args.timeout,
         memory: args.memory,
     };
-    let run = occt::run(kernel, path, args.deflection, limits, Some(mesh))?;
+    let run = occt::run(kernel, path, args.deflection, limits, Some(mesh), None)?;
     let mut note = run.summary.as_ref().and_then(|s| s.error.clone());
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,

@@ -25,14 +25,14 @@ set(STEPV_OCCT_LIBS
 # The kernel CLI: what the Rust side runs as a subprocess, sandboxed
 # (sandbox.cpp). Core compiled in, so it carries no dependency on libstepvocct
 # at run time.
-add_executable(stepv-occt stepv-occt.cpp sandbox.cpp stepv-occt-core.cpp)
+add_executable(stepv-occt stepv-occt.cpp sandbox.cpp stepv-occt-core.cpp topology.cpp)
 target_include_directories(stepv-occt PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 target_compile_options(stepv-occt PRIVATE -Wall -Wextra)
 target_link_libraries(stepv-occt PRIVATE ${STEPV_OCCT_LIBS})
 
 # The same kernel in-process (stepv_occt.h): the macOS Quick Look extensions,
 # whose sandbox forbids exec.
-add_library(stepvocct SHARED stepv-occt-core.cpp)
+add_library(stepvocct SHARED stepv-occt-core.cpp topology.cpp)
 target_include_directories(stepvocct PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 target_compile_options(stepvocct PRIVATE -Wall -Wextra)
 target_link_libraries(stepvocct PRIVATE ${STEPV_OCCT_LIBS})

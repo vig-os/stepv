@@ -664,6 +664,31 @@ Against the unsandboxed kernel, all seven refusal tests failed. With the sandbox
 
 ---
 
+### Topology export (#21, kernel side): v1
+
+`stepv-occt --topology <out.json>` (and `stepv --topology`) writes the exact facts a viewer needs
+for a model tree and for measuring on the B-rep instead of the mesh. The format is at the top of
+`kernel/topology.cpp`, and its Rust types are in `src/topology.rs`:
+
+- the assembly **tree**, with names, as XCAF has it (the mesh only has the flattened parts);
+- per placed **part**: its prototype and its 3x4 placement;
+- per **prototype**: area, volume (solids only) and bbox;
+- per **face**: its surface type and parameters (a plane's normal, a cylinder's axis and radius,
+  cones, spheres, tori), its area, and the indices of its edges;
+- per **edge**: its curve type and parameters (a circle's centre and radius), its length, and its
+  vertices; and the vertex positions.
+
+The indices line up with the mesh: `parts[i]` is the mesh's part `i`, and a prototype's
+`faces[j]` is mesh face id `j`. A picked triangle therefore names its exact face.
+`Topology::check_against` enforces this, and the CLI refuses a file that fails it. The tests check
+the numbers against hand calculations: the bracket plate's volume is 6000 − 80π, its hole radius
+is 4, and the pin's volume is 60π.
+
+Not in v1: edge polylines, which a viewer needs in order to pick edges on screen. They belong
+with the mesh (a STEPVMSH v4) once the viewer exists. Point-to-point distances between shapes
+(`BRepExtrema_DistShapeShape`) are kernel queries a viewer would make on demand, not data to
+precompute.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -675,8 +700,8 @@ Agent work, in order:
 3. **#19 Multi-file assemblies blank in Quick Look** (`priority:medium`, #25): the honest message.
    Widening Quick Look's read access stays undecided; §6 "Sandbox read scope" has the trade-off.
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`, `needs-human`). The
-   kernel topology export can start; the viewer's platform (A native macOS / B cross-platform Rust
-   / C both, staged) needs a decision first.
+   kernel side has started: `--topology` (below). The viewer's platform (A native macOS /
+   B cross-platform Rust / C both, staged) still needs a decision.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
 toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.

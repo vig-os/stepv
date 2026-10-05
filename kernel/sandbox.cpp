@@ -94,7 +94,7 @@ bool allow(int ruleset, const std::string& path, uint64_t rights) {
 }
 
 // Returns 0, or the errno that kept Landlock out.
-int landlock(const std::string& read_root, const std::string& mesh_out) {
+int landlock(const std::string& read_root, const std::vector<std::string>& writable) {
     const long abi = syscall(kSysCreateRuleset, nullptr, 0, kCreateRulesetVersion);
     if (abi < 1) return errno;
     RulesetAttr attr{fs_rights(static_cast<int>(abi)), 0, 0};
@@ -109,11 +109,11 @@ int landlock(const std::string& read_root, const std::string& mesh_out) {
     // it with fewer rules is only stricter.
     if (!read_root.empty() && !allow(ruleset, read_root, kReadFile | kReadDir))
         warn("cannot grant reading the input", errno);
-    // The mesh exists already (main creates it), so the one file is the rule:
+    // The outputs exist already (main creates them), so each file is a rule:
     // no right to create or replace files anywhere.
     const uint64_t write = kWriteFile | (abi >= 3 ? kTruncate : 0);
-    if (!mesh_out.empty() && !allow(ruleset, mesh_out, write))
-        warn("cannot grant writing the mesh", errno);
+    for (const std::string& w : writable)
+        if (!allow(ruleset, w, write)) warn("cannot grant writing an output", errno);
     const int err = syscall(kSysRestrictSelf, ruleset, 0) == 0 ? 0 : errno;
     close(ruleset);
     return err;
@@ -193,13 +193,13 @@ int seccomp() {
 
 }  // namespace
 
-std::string enter_sandbox(const std::string& read_root, const std::string& mesh_out) {
+std::string enter_sandbox(const std::string& read_root, const std::vector<std::string>& writable) {
     // Both need it, and it is what lets an unprivileged process confine itself.
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         warn("no_new_privs refused: no sandbox", errno);
         return "none";
     }
-    const int ll = landlock(read_root, mesh_out);
+    const int ll = landlock(read_root, writable);
     if (ll) warn("Landlock unavailable: file access is not restricted", ll);
     const int sc = seccomp();
     if (sc) warn("seccomp unavailable: network and exec are not blocked", sc);
@@ -221,7 +221,7 @@ std::string quoted(const std::string& s) {
 
 }  // namespace
 
-std::string enter_sandbox(const std::string& read_root, const std::string& mesh_out) {
+std::string enter_sandbox(const std::string& read_root, const std::vector<std::string>& writable) {
     // Paths must be canonical (/private/var/..., not /var/...): Seatbelt
     // matches the resolved path. main hands us realpath()s.
     std::string profile =
@@ -234,8 +234,8 @@ std::string enter_sandbox(const std::string& read_root, const std::string& mesh_
         "(allow signal (target self))\n";  // abort(); never another process
     // subpath: a directory and below, or a file alone.
     if (!read_root.empty()) profile += "(allow file-read* (subpath " + quoted(read_root) + "))\n";
-    if (!mesh_out.empty())
-        profile += "(allow file-write-data (literal " + quoted(mesh_out) + "))\n";
+    for (const std::string& w : writable)
+        profile += "(allow file-write-data (literal " + quoted(w) + "))\n";
     // Deprecated since 10.8 and still what Chromium, Firefox and the system's
     // own daemons confine themselves with; there is no successor API.
 #pragma clang diagnostic push
@@ -260,7 +260,7 @@ std::string enter_sandbox(const std::string& read_root, const std::string& mesh_
 }
 
 #else
-std::string enter_sandbox(const std::string&, const std::string&) {
+std::string enter_sandbox(const std::string&, const std::vector<std::string>&) {
     warn("no sandbox for this platform", 0);
     return "none";
 }
