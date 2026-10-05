@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::{BBox, Color, Deflection, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
+use crate::{BBox, Color, Deflection, Edges, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
 
 /// The kernel's JSON summary, one line on its stdout. Present on success AND
 /// on a clean failure (exit 3) — the header-level facts survive a failed
@@ -191,6 +191,7 @@ pub fn run(
     limits: Limits,
     mesh_out: Option<&Path>,
     topology_out: Option<&Path>,
+    edges: bool,
 ) -> std::io::Result<Run> {
     let mut cmd = Command::new(kernel);
     cmd.arg(input)
@@ -203,6 +204,10 @@ pub fn run(
         .stderr(Stdio::null());
     if let Some(out) = mesh_out {
         cmd.arg("--mesh").arg(out);
+    }
+    if edges {
+        // STEPVMSH v4: the B-rep edges too (#31).
+        cmd.arg("--edges");
     }
     if let Some(out) = topology_out {
         cmd.arg("--topology").arg(out);
@@ -409,7 +414,7 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
         return Err(MeshError::BadMagic);
     }
     let version = c.u32()?;
-    if version != 3 {
+    if version != 3 && version != 4 {
         return Err(MeshError::UnsupportedVersion(version));
     }
     let mut b = [0.0; 6];
@@ -461,12 +466,35 @@ pub fn read_mesh(bytes: &[u8]) -> Result<Scene, MeshError> {
             positions: c.vec4(segments * 6, f32::from_le_bytes)?,
             kinds: c.enums(segments, line_kind)?,
         };
+        // v4: the B-rep edges (#31).
+        let edges = if version == 4 {
+            let n = c.u32()? as usize;
+            // Each edge is at least 8 bytes of ids and lengths plus 24 of
+            // points: bound the count before allocating.
+            if n > c.0.len() / 32 {
+                return Err(MeshError::Truncated);
+            }
+            let ids = c.vec4(n, u32::from_le_bytes)?;
+            let lens = c.vec4(n, u32::from_le_bytes)?;
+            let total: usize = lens.iter().map(|&l| l as usize).sum();
+            if lens.iter().any(|&l| l < 2) || total > c.0.len() / 12 {
+                return Err(MeshError::Truncated);
+            }
+            Edges {
+                ids,
+                lens,
+                points: c.vec4(total * 3, f32::from_le_bytes)?,
+            }
+        } else {
+            Edges::default()
+        };
         parts.push(Part {
             name: (name_len > 0).then(|| String::from_utf8_lossy(name).into_owned()),
             color: has_color.then_some(Color { r, g, b }),
             mesh,
             faces,
             lines,
+            edges,
         });
     }
     if !c.0.is_empty() {

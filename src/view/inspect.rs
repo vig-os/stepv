@@ -5,7 +5,7 @@
 //! Everything is in model coordinates: a prototype's surfaces are placed by
 //! its part's transform, so a pin's axis is where that pin stands.
 
-use crate::topology::{Point, Surface, Topology};
+use crate::topology::{Curve, Point, Surface, Topology};
 
 /// One `key: value` line of the inspector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +156,66 @@ pub fn face(topo: &Topology, part: usize, face: usize) -> Option<Vec<Row>> {
     Some(rows)
 }
 
+/// The curve's name, as the inspector heads it.
+#[must_use]
+pub fn curve_name(c: &Curve) -> &'static str {
+    match c {
+        Curve::Line => "Line",
+        Curve::Circle { .. } => "Circle",
+        Curve::Ellipse { .. } => "Ellipse",
+        Curve::Hyperbola => "Hyperbola",
+        Curve::Parabola => "Parabola",
+        Curve::Bezier => "Bézier",
+        Curve::Bspline => "B-spline",
+        Curve::Offset => "Offset curve",
+        Curve::Other => "Other",
+    }
+}
+
+/// The rows for edge `edge` of placed part `part` (#31), `None` when the
+/// topology has no such edge.
+#[must_use]
+pub fn edge(topo: &Topology, part: usize, edge: usize) -> Option<Vec<Row>> {
+    let placed = topo.parts.get(part)?;
+    let proto = topo.prototypes.get(placed.prototype)?;
+    let e = proto.edges.get(edge)?;
+    let at = Placement(placed.transform);
+    let k = at.scale();
+    let u = &topo.units;
+    let len = |v: f64| format!("{} {u}", num(v * k));
+    let mut rows = vec![
+        row("Part", format!("{} (#{part})", placed.name)),
+        row("Edge", format!("#{edge}")),
+        row("Curve", curve_name(&e.curve)),
+    ];
+    match e.curve {
+        Curve::Circle {
+            center,
+            normal,
+            radius,
+        } => {
+            rows.push(row("Radius", len(radius)));
+            rows.push(row("Diameter", format!("⌀ {}", len(2.0 * radius))));
+            rows.push(row("Centre", point(at.point(center))));
+            rows.push(row("Normal", dir(at.dir(normal))));
+        }
+        Curve::Ellipse {
+            center,
+            normal,
+            major_radius,
+            minor_radius,
+        } => {
+            rows.push(row("Major radius", len(major_radius)));
+            rows.push(row("Minor radius", len(minor_radius)));
+            rows.push(row("Centre", point(at.point(center))));
+            rows.push(row("Normal", dir(at.dir(normal))));
+        }
+        _ => {}
+    }
+    rows.push(row("Length", len(e.length)));
+    Some(rows)
+}
+
 /// The rows for placed part `part`: volume and its box in the model.
 #[must_use]
 pub fn part(topo: &Topology, part: usize) -> Vec<Row> {
@@ -215,7 +275,11 @@ mod tests {
         {"name": "pin", "prototype": 1, "transform": [0,0,1,6, 0,1,0,15, -1,0,0,5]}
       ],
       "prototypes": [
-        {"area": 1, "volume": 5748.67, "bbox": [0,0,0,40,30,5], "vertices": [], "edges": [],
+        {"area": 1, "volume": 5748.67, "bbox": [0,0,0,40,30,5], "vertices": [],
+         "edges": [
+           {"curve": "line", "length": 40, "vertices": [null, null]},
+           {"curve": "circle", "center": [20,15,5], "normal": [0,0,1], "radius": 4, "length": 25.132741228718345, "vertices": [null, null]}
+         ],
          "faces": [
            {"surface": "plane", "origin": [0,0,5], "normal": [0,0,1], "area": 1149.7345175, "edges": []},
            {"surface": "cylinder", "origin": [20,15,0], "axis": [0,0,1], "radius": 4, "area": 125.66, "edges": []}
@@ -290,6 +354,20 @@ mod tests {
         let get = |k| p.iter().find(|r| r.key == k).unwrap().value.clone();
         assert_eq!(get("Part volume"), "45989.36 mm³");
         assert_eq!(get("Part size"), "80 × 60 × 10 mm");
+    }
+
+    #[test]
+    fn an_edge_shows_its_curve_and_length() {
+        let t = topo(PLATE_AND_PIN);
+        let rows = edge(&t, 0, 1).unwrap();
+        let get = |k| rows.iter().find(|r| r.key == k).unwrap().value.clone();
+        assert_eq!(get("Curve"), "Circle");
+        assert_eq!(get("Radius"), "4 mm");
+        assert_eq!(get("Length"), "25.1327 mm");
+        assert_eq!(get("Normal"), "+z");
+        let line = edge(&t, 0, 0).unwrap();
+        assert!(line.iter().any(|r| r.key == "Length" && r.value == "40 mm"));
+        assert!(edge(&t, 0, 2).is_none());
     }
 
     #[test]

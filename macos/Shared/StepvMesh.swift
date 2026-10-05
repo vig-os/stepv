@@ -55,13 +55,14 @@ enum StepvMeshError: Error, Equatable {
     case badMagic, unsupportedVersion(UInt32), truncated, badEnum(UInt8), trailingBytes(Int)
 }
 
-/// Decodes STEPVMSH v3. Bounds every count against the remaining bytes
-/// before allocating, like the Rust reader.
+/// Decodes STEPVMSH v3, or v4 with its B-rep edges skipped (Quick Look
+/// draws no edges; the extensions ask the kernel for v3 anyway). Bounds every
+/// count against the remaining bytes before allocating, like the Rust reader.
 func decodeStepvMesh(_ data: Data) throws -> StepvScene {
     var c = Cursor(bytes: [UInt8](data))
     guard c.remaining >= 8, Array(c.take(8)) == Array("STEPVMSH".utf8) else { throw StepvMeshError.badMagic }
     let version = try c.u32()
-    guard version == 3 else { throw StepvMeshError.unsupportedVersion(version) }
+    guard version == 3 || version == 4 else { throw StepvMeshError.unsupportedVersion(version) }
     var b = [Double]()
     for _ in 0..<6 { b.append(try c.f64()) }
     let partCount = Int(try c.u32())
@@ -98,6 +99,17 @@ func decodeStepvMesh(_ data: Data) throws -> StepvScene {
         for byte in c.take(segments) {
             guard let k = StepvLineKind(rawValue: byte) else { throw StepvMeshError.badEnum(byte) }
             kinds.append(k)
+        }
+        if version == 4 {
+            // edges u32, edge_ids, edge_lens (u32 each), then 3 f32 per point.
+            let edges = Int(try c.u32())
+            guard edges <= c.remaining / 32 else { throw StepvMeshError.truncated }
+            _ = try c.u32s(edges)
+            let lens = try c.u32s(edges)
+            let points = lens.reduce(0) { $0 + Int($1) }
+            guard points <= c.remaining / 12 else { throw StepvMeshError.truncated }
+            try c.need(points * 12)
+            _ = c.take(points * 12)
         }
         parts.append(StepvPart(name: nameLen > 0 ? name : nil, color: hasColor ? rgb : nil, faces: faces,
                                positions: positions, normals: normals, indices: indices, faceIds: faceIds,

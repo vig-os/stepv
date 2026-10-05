@@ -165,6 +165,30 @@ impl Lines {
     }
 }
 
+/// A part's B-rep edges as polylines (STEPVMSH v4, #31): polyline `i` is
+/// topology edge `ids[i]` of the part's prototype, `lens[i]` points long,
+/// its points next in `points` (xyz each). Empty from a v3 mesh.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Edges {
+    pub ids: Vec<u32>,
+    pub lens: Vec<u32>,
+    pub points: Vec<f32>,
+}
+
+impl Edges {
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.ids.len()
+    }
+
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        self.ids.len() == self.lens.len()
+            && self.lens.iter().all(|&n| n >= 2)
+            && self.lens.iter().map(|&n| n as usize * 3).sum::<usize>() == self.points.len()
+    }
+}
+
 /// One B-rep face: how its triangles were obtained, and its own colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Face {
@@ -196,6 +220,8 @@ pub struct Part {
     /// One entry per B-rep face; `mesh.face_ids` indexes into it.
     pub faces: Vec<Face>,
     pub lines: Lines,
+    /// The B-rep edges, when the mesh carries them (`--edges`).
+    pub edges: Edges,
 }
 
 impl Part {
@@ -205,6 +231,7 @@ impl Part {
     pub fn is_well_formed(&self) -> bool {
         self.mesh.is_well_formed()
             && self.lines.is_well_formed()
+            && self.edges.is_well_formed()
             && self
                 .mesh
                 .face_ids
@@ -361,6 +388,7 @@ mod tests {
             face_ids: vec![1],
         };
         let mut part = Part {
+            edges: Default::default(),
             name: None,
             color: None,
             mesh,

@@ -21,6 +21,12 @@ char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
 char* stepv_occt_run_topology(const char* input, const char* mesh_out, const char* topology_out,
                               double linear_rel, double angular_deg, int* exit_code);
 
+// stepv_occt_run_topology, and with `edges` nonzero the mesh is STEPVMSH v4:
+// every part also carries its B-rep edges as polylines, numbered as the
+// topology numbers them (#31). Quick Look keeps v3 (edges = 0).
+char* stepv_occt_run_ex(const char* input, const char* mesh_out, const char* topology_out,
+                        int edges, double linear_rel, double angular_deg, int* exit_code);
+
 void stepv_occt_free(char* p);
 
 #ifdef __cplusplus

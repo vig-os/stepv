@@ -55,6 +55,8 @@ fn load_with_topology(name: &str) -> (Scene, Topology) {
         Limits::DEFAULT,
         Some(&mesh),
         Some(&topo),
+        // As stepv view asks: with the B-rep edges (STEPVMSH v4).
+        true,
     )
     .expect("start the kernel");
     assert_eq!(run.outcome, Outcome::Ok, "{name}: {:?}", run.summary);
@@ -203,6 +205,74 @@ fn picking_the_plate_names_its_exact_faces() {
     );
 }
 
+/// STEPVMSH v4 (#31): every part's edge polylines are well formed and name
+/// edges the topology has, so a picked edge always has a curve to show.
+#[test]
+fn kernel_edges_are_numbered_as_the_topology() {
+    for name in FILES {
+        let (scene, topo) = load_with_topology(name);
+        for (i, part) in scene.parts.iter().enumerate() {
+            let e = &part.edges;
+            assert!(e.is_well_formed(), "{name} part {i}");
+            let proto = &topo.prototypes[topo.parts[i].prototype];
+            for &id in &e.ids {
+                assert!(
+                    (id as usize) < proto.edges.len(),
+                    "{name} part {i}: edge {id}"
+                );
+            }
+            if !part.faces.is_empty() {
+                assert!(e.count() > 0, "{name} part {i} has faces but no edges");
+            }
+        }
+    }
+}
+
+/// #31's acceptance: clicking the plate's hole edge shows a circle of
+/// r = 4 and length 8π, at a pixel projected from a known camera.
+#[test]
+fn picking_the_hole_rim_names_its_circle() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let (scene, topo) = load_with_topology("assembly.step");
+    let gs = g.upload(&scene);
+    let cam = Camera::default();
+    let (w, h) = (640, 480);
+    let m = clip_matrix(&cam, &gs.fits[0].unwrap(), w, h);
+    let pixel = |p: [f32; 3]| {
+        let c = [0, 1].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]);
+        (
+            ((c[0] + 1.0) / 2.0 * w as f32) as u32,
+            ((1.0 - c[1]) / 2.0 * h as f32) as u32,
+        )
+    };
+    // The top rim (z = 5) on the side nearest the eye: the eye sits at
+    // +x, -y, so the rim point toward it is centre + 4 (sin 35°, -cos 35°).
+    let a = 35f32.to_radians();
+    let (x, y) = pixel([20.0 + 4.0 * a.sin(), 15.0 - 4.0 * a.cos(), 5.0]);
+    // Two pixels off the rim, onto the plate's top: the edge still wins.
+    let hit = g
+        .pick(&gs, &View::new(cam), w, h, x, y + 2)
+        .expect("something under the click");
+    let edge = hit
+        .edge_id()
+        .unwrap_or_else(|| panic!("a face, not the rim: {hit:?}"));
+    let rows = stepv::view::inspect::edge(&topo, hit.part as usize, edge as usize).unwrap();
+    let get = |k: &str| rows.iter().find(|r| r.key == k).map(|r| r.value.clone());
+    assert_eq!(get("Curve").as_deref(), Some("Circle"));
+    assert_eq!(get("Radius").as_deref(), Some("4 mm"));
+    let len: f64 = get("Length")
+        .unwrap()
+        .trim_end_matches(" mm")
+        .parse()
+        .unwrap();
+    assert!(
+        (len - 8.0 * std::f64::consts::PI).abs() < 1e-3,
+        "length {len}"
+    );
+}
+
 #[test]
 fn per_face_colours_reach_the_gpu() {
     let Some(g) = require_gpu(Headless::new()) else {
@@ -247,6 +317,7 @@ fn stress_assembly_draws_at_display_rate() {
         limits,
         Some(&mesh),
         None,
+        true,
     )
     .unwrap();
     assert_eq!(run.outcome, Outcome::Ok);

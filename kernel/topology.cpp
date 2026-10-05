@@ -207,17 +207,26 @@ void edge_json(std::ostream& o, const TopoDS_Edge& edge, const TopTools_IndexedM
     o << ",\"vertices\":[" << index(a) << ',' << index(b) << "]}";
 }
 
+}  // namespace
+
+TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape all, edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, all);
+    for (int i = 1; i <= all.Extent(); ++i)
+        if (!BRep_Tool::Degenerated(TopoDS::Edge(all(i)))) edges.Add(all(i));
+    return edges;
+}
+
+namespace {
+
 std::string prototype_json(const TopoDS_Shape& shape) {
     std::ostringstream o, faces;
     o.precision(17);
     faces.precision(17);
     // Index maps: the same edge or vertex shared by two faces is one entry.
-    TopTools_IndexedMapOfShape edges, vertices;
+    TopTools_IndexedMapOfShape vertices;
     TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
-    TopTools_IndexedMapOfShape all_edges;
-    TopExp::MapShapes(shape, TopAbs_EDGE, all_edges);
-    for (int i = 1; i <= all_edges.Extent(); ++i)
-        if (!BRep_Tool::Degenerated(TopoDS::Edge(all_edges(i)))) edges.Add(all_edges(i));
+    const TopTools_IndexedMapOfShape edges = topology_edges(shape);
 
     // The faces in the order the mesh numbers them: TopExp_Explorer over the
     // prototype (stepv-occt-core.cpp, prototype_geometry).

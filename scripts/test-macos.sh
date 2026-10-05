@@ -85,6 +85,18 @@ PY
   echo "ok: $f — $got"
 done
 
+# STEPVMSH v4 (#31: the viewer's mesh, with B-rep edges) stays readable by
+# the Swift reader: it decodes to the same parts and triangles as v3.
+kernel="${STEPV_OCCT:-$root/target/kernel/stepv-occt}"
+"$kernel" "$root/tests/data/assembly.step" --mesh "$tmp/v4.msh" --edges >/dev/null
+"$kernel" "$root/tests/data/assembly.step" --mesh "$tmp/v3.msh" >/dev/null
+[ "$(head -c 12 "$tmp/v4.msh" | tail -c 4 | od -An -tu4 | tr -d ' ')" = 4 ] || fail "--edges did not write v4"
+v3=$("$tmp/snapshot" "$tmp/v3.msh" "$tmp/v3.png")
+v4=$("$tmp/snapshot" "$tmp/v4.msh" "$tmp/v4.png") || fail "Swift cannot read STEPVMSH v4"
+[ "${v4%% *}" = "${v3%% *}" ] && [ "$(cut -d' ' -f2 <<<"$v4")" = "$(cut -d' ' -f2 <<<"$v3")" ] \
+  || fail "v4 decodes as '$v4', v3 as '$v3'"
+echo "ok: STEPVMSH v4 reads in Swift as v3 does ($v4)"
+
 app="$root/target/macos/stepv.app"
 for x in "$app"/Contents/PlugIns/*.appex; do
   ents=$(codesign -d --entitlements - --xml "$x" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \

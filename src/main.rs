@@ -51,7 +51,7 @@ OPTIONS:
 VIEWER:
     Drag to orbit, right- or shift-drag to pan, scroll to zoom; click a face
     to inspect its exact surface (Esc clears it); R reset, F front, T top,
-    C construction curves, Q or Esc to quit. The Section panel cuts the
+    C construction curves, E edges, Q or Esc to quit. The Section panel cuts the
     model along X, Y or Z. Defaults to
     --quality preview and --timeout 120. Draws on the GPU (Metal, Vulkan
     or GL), or in software when there is no usable adapter; the JSON line
@@ -437,6 +437,9 @@ fn tessellate(
         args.limits,
         Some(&mesh),
         topology_out,
+        // The viewer draws and picks the B-rep edges (STEPVMSH v4, #31);
+        // thumbnails, --glb and --mesh (Quick Look's format) keep v3.
+        args.view,
     );
     let run = match result {
         Ok(r) => r,

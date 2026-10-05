@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **B-rep edges and edge picking** ([#31](https://github.com/vig-os/stepv/issues/31)): `stepv view`
+  draws the model's exact edges (E toggles them), and clicking one shows its curve (a circle's
+  radius, ⌀, centre and normal) and its length
+  - The kernel writes them with `--edges` as STEPVMSH v4, numbered as `--topology` numbers them.
+    Quick Look stays on v3, and its reader also accepts v4
+  - The viewer flags faces by the thumbnails' own rule (`render::overlay`), tested to stripe the
+    same faces
 - **Model tree** ([#30](https://github.com/vig-os/stepv/issues/30)): the assembly tree beside the
   view in `stepv view`
   - Show/hide per node, which carries down to every part below; Isolate and Show all; search by name

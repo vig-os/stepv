@@ -47,7 +47,9 @@ pub struct Material {
     /// Linear RGB.
     pub color: [f32; 3],
     /// A [`FaceStatus`] as `u32`, for #31's overlay.
-    pub status: u32,
+    /// The face's [`render::Overlay`] as `u32`: one rule for the
+    /// thumbnails and the viewer (#31).
+    pub overlay: u32,
 }
 
 #[repr(C)]
@@ -219,6 +221,8 @@ pub struct PartRange {
     pub indices: Range<u32>,
     /// Line vertices, two per segment.
     pub lines: Range<u32>,
+    /// Edge vertices, two per segment.
+    pub edges: Range<u32>,
 }
 
 /// A [`Scene`] flattened into the GPU's layout, before upload. Built on the
@@ -238,6 +242,10 @@ pub struct Layout {
     pub line_positions: Vec<f32>,
     /// A [`LineKind`] per line vertex.
     pub line_kinds: Vec<u32>,
+    /// B-rep edges as a line list (two vertices per segment), with the
+    /// topology edge id per vertex (#31).
+    pub edge_positions: Vec<f32>,
+    pub edge_ids: Vec<u32>,
     pub parts: Vec<PartRange>,
     /// The fit without, and with, construction curves (`render.rs` frames
     /// only what it draws).
@@ -300,7 +308,8 @@ impl Layout {
                 let c = part.face_color(f as u32).unwrap_or(render::DEFAULT_COLOR);
                 Material {
                     color: [c.r, c.g, c.b],
-                    status: part.faces.get(f).map_or(FaceStatus::Ok, |f| f.status) as u32,
+                    overlay: render::overlay(part.faces.get(f).map_or(FaceStatus::Ok, |f| f.status))
+                        as u32,
                 }
             }));
 
@@ -309,10 +318,22 @@ impl Layout {
             for &k in &part.lines.kinds {
                 l.line_kinds.extend([k as u32, k as u32]);
             }
+            let first_edge = (l.edge_positions.len() / 3) as u32;
+            let mut at = 0;
+            for (&id, &n) in part.edges.ids.iter().zip(&part.edges.lens) {
+                let pts = &part.edges.points[at * 3..(at + n as usize) * 3];
+                for w in pts.chunks_exact(3).collect::<Vec<_>>().windows(2) {
+                    l.edge_positions.extend_from_slice(w[0]);
+                    l.edge_positions.extend_from_slice(w[1]);
+                    l.edge_ids.extend([id, id]);
+                }
+                at += n as usize;
+            }
             l.parts.push(PartRange {
                 base_vertex,
                 indices: first_index..l.indices.len() as u32,
                 lines: first_line..(l.line_positions.len() / 3) as u32,
+                edges: first_edge..(l.edge_positions.len() / 3) as u32,
             });
         }
         let points = |construction: bool| {
@@ -377,6 +398,8 @@ pub struct View {
     pub picked: Option<Pick>,
     /// The highlight's colour, linear RGB.
     pub highlight: [f32; 3],
+    /// Draw the B-rep edges (when the mesh has them).
+    pub show_edges: bool,
 }
 
 impl View {
@@ -391,6 +414,7 @@ impl View {
             section: None,
             picked: None,
             highlight: [1.0, 0.75, 0.0],
+            show_edges: true,
         }
     }
 }
@@ -420,6 +444,28 @@ impl Pick {
     #[must_use]
     pub const fn is_whole_part(&self) -> bool {
         self.face == Self::WHOLE_PART
+    }
+
+    /// Set in `face` for an edge: the rest is the topology edge id.
+    pub const EDGE_BIT: u32 = 0x8000_0000;
+
+    /// Edge `edge` of `part`.
+    #[must_use]
+    pub const fn edge(part: u32, edge: u32) -> Self {
+        Self {
+            part,
+            face: Self::EDGE_BIT | edge,
+        }
+    }
+
+    /// The topology edge id, when this is an edge.
+    #[must_use]
+    pub const fn edge_id(&self) -> Option<u32> {
+        if self.face != Self::WHOLE_PART && self.face & Self::EDGE_BIT != 0 {
+            Some(self.face & !Self::EDGE_BIT)
+        } else {
+            None
+        }
     }
 }
 
@@ -504,12 +550,18 @@ impl Target {
     }
 }
 
+/// The B-rep edges' colour, linear: near-black, as CAD viewers draw them.
+const EDGE_COLOR: [f32; 3] = [0.02, 0.022, 0.026];
+/// How far edges are pulled toward the eye, in depth units (the model's
+/// bounding sphere spans 0.5): 0.1% of its radius.
+const EDGE_PULL: f32 = 0.0005;
+
 const SHADER: &str = r"
 struct U {
   clip: mat4x4<f32>, rot: mat4x4<f32>, section: vec4<f32>, highlight: vec4<f32>,
   flags: vec4<u32>, pick: vec4<u32>,
 };
-struct Material { color: vec3<f32>, status: u32 };
+struct Material { color: vec3<f32>, overlay: u32 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> materials: array<Material>;
 @group(0) @binding(2) var<storage, read> face_base: array<u32>;
@@ -569,7 +621,7 @@ struct MeshOut {
   var c = m.color * light;
   // Approximated faces: render.rs's diagonal amber stripes, 75% over the
   // shaded colour (#31 adds the rest of the overlay).
-  if (m.status == STATUS_APPROX) {
+  if (m.overlay == OVERLAY_STRIPES) {
     let band = u32(floor((i.pos.x + i.pos.y) / f32(u.flags.y))) % 2u == 0u;
     c = mix(c, select(APPROX_DARK, APPROX, band), 0.75);
   }
@@ -613,6 +665,39 @@ struct LineOut {
   return o;
 }
 
+struct EdgeOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(flat) id: vec2<u32>,
+  @location(1) world: vec3<f32>,
+};
+
+// B-rep edges (#31). Pulled toward the eye so an edge wins over the faces it
+// bounds: WebGPU has no depth bias for lines. EDGE_PULL is in depth units,
+// where the model's bounding sphere spans 0.5.
+@vertex fn vs_edge(@location(0) p: vec3<f32>, @location(1) edge: u32,
+                   @builtin(instance_index) part: u32) -> EdgeOut {
+  var o: EdgeOut;
+  o.pos = u.clip * vec4(p, 1.0);
+  o.pos.z = o.pos.z - EDGE_PULL;
+  if (u.flags.w == 0u) { o.pos = vec4(2.0, 2.0, 2.0, 1.0); }
+  o.id = vec2(part, edge);
+  o.world = p;
+  return o;
+}
+
+@fragment fn fs_edge(i: EdgeOut) -> @location(0) vec4<f32> {
+  if (!shown(i.id.x) || cut(i.world)) { discard; }
+  if (u.pick.x == i.id.x + 1u && u.pick.y == (EDGE_BIT | i.id.y)) {
+    return encode(u.highlight.rgb);
+  }
+  return encode(EDGE);
+}
+
+@fragment fn fs_id_edge(i: EdgeOut) -> @location(0) vec2<u32> {
+  if (!shown(i.id.x) || cut(i.world)) { discard; }
+  return vec2(i.id.x + 1u, EDGE_BIT | i.id.y);
+}
+
 @fragment fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
   if (!shown(i.kind_part.y) || cut(i.world)) { discard; }
   switch i.kind_part.x {
@@ -629,6 +714,8 @@ pub struct Renderer {
     lines: wgpu::RenderPipeline,
     highlight: wgpu::RenderPipeline,
     id: wgpu::RenderPipeline,
+    edges: wgpu::RenderPipeline,
+    id_edges: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -656,14 +743,18 @@ impl Renderer {
     pub fn new(device: &wgpu::Device) -> Self {
         let rgb = |c: [f32; 3]| format!("vec3({:?}, {:?}, {:?})", c[0], c[1], c[2]);
         let consts = format!(
-            "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\n\
-             const APPROX = {};\nconst APPROX_DARK = {};\nconst STATUS_APPROX = {}u;\n",
+            "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\nconst EDGE_PULL = {:?};\n\
+             const APPROX = {};\nconst APPROX_DARK = {};\nconst OVERLAY_STRIPES = {}u;\n\
+             const EDGE = {};\nconst EDGE_BIT = {}u;\n",
             rgb(render::MISSING),
             rgb(render::CONSTRUCTION),
             rgb(render::SKETCH),
+            EDGE_PULL,
             rgb(render::APPROX),
             rgb(render::APPROX_DARK),
-            FaceStatus::Approx as u32
+            render::Overlay::Stripes as u32,
+            rgb(EDGE_COLOR),
+            Pick::EDGE_BIT
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stepv view"),
@@ -811,11 +902,34 @@ impl Renderer {
                 bias: Default::default(),
             },
         );
+        let edges = pipeline(
+            "stepv edges",
+            "vs_edge",
+            "fs_edge",
+            &[vec3(0), u32_at(1)],
+            wgpu::PrimitiveTopology::LineList,
+            Output::shaded(),
+        );
+        let id_edges = pipeline(
+            "stepv id edges",
+            "vs_edge",
+            "fs_id_edge",
+            &[vec3(0), u32_at(1)],
+            wgpu::PrimitiveTopology::LineList,
+            Output {
+                target: ID.into(),
+                samples: 1,
+                depth_write: true,
+                bias: Default::default(),
+            },
+        );
         Self {
             mesh,
             lines,
             highlight,
             id,
+            edges,
+            id_edges,
             layout,
         }
     }
@@ -869,6 +983,10 @@ impl Renderer {
                     pass.set_pipeline(&self.highlight);
                     draw_mesh(&mut pass, scene, Some(pick.part as usize));
                 }
+            }
+            if scene.has_edges {
+                pass.set_pipeline(&self.edges);
+                draw_edges(&mut pass, scene);
             }
             if scene.has_lines {
                 pass.set_pipeline(&self.lines);
@@ -932,15 +1050,27 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
+            pass.set_bind_group(0, &scene.bind, &[]);
             if scene.has_mesh {
-                pass.set_bind_group(0, &scene.bind, &[]);
                 pass.set_pipeline(&self.id);
                 draw_mesh(&mut pass, scene, None);
             }
+            if scene.has_edges {
+                pass.set_pipeline(&self.id_edges);
+                draw_edges(&mut pass, scene);
+            }
         }
+        // A window around the click, so a one-pixel edge near it can be
+        // picked (PendingPick::poll prefers the nearest edge).
+        let r = PICK_RADIUS;
+        let (x0, y0) = (x.saturating_sub(r), y.saturating_sub(r));
+        let (w, h) = (
+            (x + r + 1).min(target.width) - x0,
+            (y + r + 1).min(target.height) - y0,
+        );
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stepv pick"),
-            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+            size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT * h),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -948,7 +1078,7 @@ impl Renderer {
             wgpu::TexelCopyTextureInfo {
                 texture: &target.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x, y, z: 0 },
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
@@ -956,12 +1086,12 @@ impl Renderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
-                    rows_per_image: Some(1),
+                    rows_per_image: Some(h),
                 },
             },
             wgpu::Extent3d {
-                width: 1,
-                height: 1,
+                width: w,
+                height: h,
                 depth_or_array_layers: 1,
             },
         );
@@ -974,7 +1104,12 @@ impl Renderer {
                 std::sync::atomic::Ordering::Release,
             );
         });
-        PendingPick { buffer, state }
+        PendingPick {
+            buffer,
+            state,
+            window: (w, h),
+            centre: (x - x0, y - y0),
+        }
     }
 }
 
@@ -1003,9 +1138,21 @@ fn uniforms(scene: &GpuScene, view: &View, w: u32, h: u32) -> Uniforms {
             u32::from(view.show_construction),
             view.stripe.max(1),
             u32::from(view.section.is_some()),
-            0,
+            u32::from(view.show_edges),
         ],
         pick: view.picked.map_or([0; 4], |p| [p.part + 1, p.face, 0, 0]),
+    }
+}
+
+/// Draws every shown part's B-rep edges.
+fn draw_edges(pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene) {
+    pass.set_vertex_buffer(0, scene.edge_positions.slice(..));
+    pass.set_vertex_buffer(1, scene.edge_ids.slice(..));
+    for (i, p) in scene.parts.iter().enumerate() {
+        if scene.visibility.get(i) && !p.edges.is_empty() {
+            let i = i as u32;
+            pass.draw(p.edges.clone(), i..i + 1);
+        }
     }
 }
 
@@ -1086,6 +1233,44 @@ pub struct PendingPick {
     buffer: wgpu::Buffer,
     /// 0 pending, 1 mapped, 2 failed.
     state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// The texels read around the click, and the click within them.
+    window: (u32, u32),
+    centre: (u32, u32),
+}
+
+/// How far from the click, in pixels, an edge still wins the pick: a
+/// one-pixel line is otherwise all but unclickable.
+pub const PICK_RADIUS: u32 = 4;
+
+/// What a pick around `centre` of a `w` x `h` window of id texels hit: the
+/// nearest edge within [`PICK_RADIUS`], else whatever is under the centre.
+/// `texel(x, y)` is `(part + 1, face or EDGE_BIT | edge)`.
+#[must_use]
+pub fn resolve_pick(
+    (w, h): (u32, u32),
+    (cx, cy): (u32, u32),
+    texel: impl Fn(u32, u32) -> (u32, u32),
+) -> Option<Pick> {
+    let hit = |(part, face): (u32, u32)| {
+        (part != 0).then(|| Pick {
+            part: part - 1,
+            face,
+        })
+    };
+    let mut best: Option<(u32, Pick)> = None;
+    for y in 0..h {
+        for x in 0..w {
+            let t = texel(x, y);
+            if t.0 == 0 || t.1 & Pick::EDGE_BIT == 0 {
+                continue;
+            }
+            let d2 = x.abs_diff(cx).pow(2) + y.abs_diff(cy).pow(2);
+            if d2 <= PICK_RADIUS * PICK_RADIUS && best.is_none_or(|(b, _)| d2 < b) {
+                best = hit(t).map(|p| (d2, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p).or_else(|| hit(texel(cx, cy)))
 }
 
 impl PendingPick {
@@ -1102,13 +1287,13 @@ impl PendingPick {
                 let Ok(data) = self.buffer.slice(..).get_mapped_range() else {
                     return Some(None);
                 };
-                let word =
-                    |i: usize| u32::from_le_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
-                let (part, face) = (word(0), word(1));
-                Some((part != 0).then(|| Pick {
-                    part: part - 1,
-                    face,
-                }))
+                let row = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+                let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                let texel = |x: u32, y: u32| {
+                    let at = y as usize * row + x as usize * 8;
+                    (word(at), word(at + 4))
+                };
+                Some(resolve_pick(self.window, self.centre, texel))
             }
             _ => Some(None),
         }
@@ -1130,11 +1315,14 @@ pub struct GpuScene {
     indices: wgpu::Buffer,
     line_positions: wgpu::Buffer,
     line_kinds: wgpu::Buffer,
+    edge_positions: wgpu::Buffer,
+    edge_ids: wgpu::Buffer,
     uniforms: wgpu::Buffer,
     visible: wgpu::Buffer,
     bind: wgpu::BindGroup,
     has_mesh: bool,
     has_lines: bool,
+    has_edges: bool,
     pub parts: Vec<PartRange>,
     pub fits: [Option<Fit>; 2],
     /// The model's box, for the section plane.
@@ -1181,6 +1369,12 @@ impl GpuScene {
             bytemuck::cast_slice(&layout.line_kinds),
             vertex,
         );
+        let edge_positions = buf(
+            "edge positions",
+            bytemuck::cast_slice(&layout.edge_positions),
+            vertex,
+        );
+        let edge_ids = buf("edge ids", bytemuck::cast_slice(&layout.edge_ids), vertex);
         let materials = buf(
             "materials",
             bytemuck::cast_slice(&layout.materials),
@@ -1231,11 +1425,14 @@ impl GpuScene {
             indices,
             line_positions,
             line_kinds,
+            edge_positions,
+            edge_ids,
             uniforms,
             visible,
             bind,
             has_mesh: !layout.indices.is_empty(),
             has_lines: !layout.line_kinds.is_empty(),
+            has_edges: !layout.edge_ids.is_empty(),
             parts: layout.parts,
             fits: layout.fits,
             bounds: layout.bounds,
@@ -1501,6 +1698,7 @@ mod tests {
             });
         }
         Part {
+            edges: Default::default(),
             name: None,
             color: None,
             mesh: m,
@@ -1570,6 +1768,7 @@ mod tests {
     fn a_vertex_shared_by_two_faces_is_split() {
         // Two triangles of different faces sharing an edge (vertices 1, 2).
         let part = Part {
+            edges: Default::default(),
             name: None,
             color: None,
             mesh: Mesh {
@@ -1590,7 +1789,7 @@ mod tests {
                 assert_eq!(l.faces[i as usize], f, "triangle {t}");
             }
         }
-        assert_eq!(l.materials[1].status, FaceStatus::Approx as u32);
+        assert_eq!(l.materials[1].overlay, render::Overlay::Stripes as u32);
     }
 
     #[test]
@@ -1790,6 +1989,7 @@ mod tests {
     fn sketches_draw_and_construction_waits_for_its_toggle() {
         let Some(g) = gpu() else { return };
         let part = |kind| Part {
+            edges: Default::default(),
             name: None,
             color: None,
             mesh: Mesh::default(),
@@ -2085,6 +2285,175 @@ mod tests {
             lit.pixel(bx, by),
             "the other box changed"
         );
+    }
+
+    #[test]
+    fn the_viewer_flags_faces_by_the_thumbnails_rule() {
+        // #31: one rule. Every status's material overlay is render.rs's.
+        use FaceStatus::*;
+        for st in [
+            Ok, Remeshed, Healed, Refined, Coarse, Degenerate, Approx, Missing,
+        ] {
+            let mut p = cuboid([0.0; 3], [1.0; 3], [None; 6]);
+            p.faces[0].status = st;
+            let l = Layout::new(&scene(vec![p]));
+            assert_eq!(l.materials[0].overlay, render::overlay(st) as u32, "{st:?}");
+        }
+    }
+
+    #[test]
+    fn the_viewer_and_the_thumbnail_stripe_the_same_faces() {
+        let Some(g) = gpu() else { return };
+        // Two of the box's visible faces approximated, one not.
+        let mut p = cuboid([0.0; 3], [1.0; 3], [None; 6]);
+        for f in [2, 5] {
+            p.faces[f].status = FaceStatus::Approx;
+        }
+        let s = scene(vec![p]);
+        let gs = g.upload(&s);
+        let cam = Camera::default();
+        let (w, h) = (160, 160);
+        let gpu = g.render(&gs, &View::new(cam), w, h);
+        let cpu = render::render(
+            &s,
+            &render::Options {
+                width: w,
+                height: h,
+                show_construction: false,
+                supersample: 1,
+                camera: cam,
+                fit: render::Fit::Sphere,
+            },
+        )
+        .unwrap();
+        // Amber: red well above blue. Striped faces are amber in both bands.
+        let amber = |img: &render::Image| -> Vec<bool> {
+            img.rgba
+                .chunks_exact(4)
+                .map(|p| p[3] > 0 && i32::from(p[0]) - i32::from(p[2]) > 60)
+                .collect()
+        };
+        let score = iou(&amber(&gpu), &amber(&cpu));
+        assert!(score > 0.9, "flagged regions overlap only {score}");
+        assert!(amber(&gpu).iter().filter(|a| **a).count() > 1000);
+    }
+
+    #[test]
+    fn a_pick_prefers_a_nearby_edge() {
+        let face = (1, 5); // part 0, face 5
+        let edge = (1, Pick::EDGE_BIT | 3);
+        // An edge 2 px right of the centre of a 9 x 9 window of face.
+        let near = |x: u32, _y: u32| if x == 6 { edge } else { face };
+        assert_eq!(resolve_pick((9, 9), (4, 4), near), Some(Pick::edge(0, 3)));
+        // Out of reach (a corner, 5.7 px away): the face under the click.
+        let far = |x: u32, y: u32| if (x, y) == (0, 0) { edge } else { face };
+        assert_eq!(
+            resolve_pick((9, 9), (4, 4), far),
+            Some(Pick { part: 0, face: 5 })
+        );
+        // The nearest of two edges.
+        let two = |x: u32, _y: u32| match x {
+            1 => (1, Pick::EDGE_BIT | 7),
+            5 => edge,
+            _ => face,
+        };
+        assert_eq!(resolve_pick((9, 9), (4, 4), two), Some(Pick::edge(0, 3)));
+        assert_eq!(
+            resolve_pick((9, 9), (4, 4), |_, _| (0, 0)),
+            None,
+            "background"
+        );
+        assert_eq!(Pick::edge(2, 3).edge_id(), Some(3));
+        assert_eq!(Pick::part(2).edge_id(), None, "a whole part is no edge");
+        assert_eq!(Pick { part: 0, face: 3 }.edge_id(), None);
+    }
+
+    /// The box with its 12 edges as straight polylines, ids 0..12.
+    fn boxed_edges(lo: [f32; 3], hi: [f32; 3]) -> Part {
+        let mut p = cuboid(lo, hi, [None; 6]);
+        let c = |i: usize| [0, 1, 2].map(|k| if i >> k & 1 == 0 { lo[k] } else { hi[k] });
+        let mut id = 0;
+        for a in 0..8usize {
+            for k in 0..3 {
+                let b = a | 1 << k;
+                if b != a {
+                    p.edges.ids.push(id);
+                    p.edges.lens.push(2);
+                    p.edges.points.extend(c(a));
+                    p.edges.points.extend(c(b));
+                    id += 1;
+                }
+            }
+        }
+        assert_eq!(id, 12);
+        p
+    }
+
+    #[test]
+    fn edges_draw_and_pick() {
+        let Some(g) = gpu() else { return };
+        let gs = g.upload(&scene(vec![boxed_edges([0.0; 3], [1.0; 3])]));
+        let (w, h) = (160, 160);
+        // From the front and above: the front-top edge runs between two
+        // visible faces, not along the silhouette.
+        const TILT: Camera = Camera {
+            elevation_deg: 30.0,
+            ..FRONT
+        };
+        // The front-top edge, from x 0 to 1 at y = 0, z = 1.
+        let (ex, ey) = pixel_of(&gs, &TILT, w, h, [0.5, 0.0, 1.0]);
+        let ey = ey.min(h - 1);
+        let on = g.render(&gs, &View::new(TILT), w, h);
+        let off = g.render(
+            &gs,
+            &View {
+                show_edges: false,
+                ..View::new(TILT)
+            },
+            w,
+            h,
+        );
+        // Within a pixel of the edge, drawing edges darkens the image (a
+        // one-pixel line, MSAA-blended with the faces it separates).
+        let darker = (ey.saturating_sub(1)..=(ey + 1).min(h - 1))
+            .map(|y| i32::from(off.pixel(ex, y)[0]) - i32::from(on.pixel(ex, y)[0]))
+            .max()
+            .unwrap();
+        assert!(darker >= 20, "no edge at ({ex}, {ey}): darker by {darker}");
+        let off2 = g.render(
+            &gs,
+            &View {
+                show_edges: false,
+                ..View::new(TILT)
+            },
+            w,
+            h,
+        );
+        assert_eq!(off.rgba, off2.rgba);
+        let plain = g.upload(&scene(vec![cuboid([0.0; 3], [1.0; 3], [None; 6])]));
+        assert_eq!(
+            off.rgba,
+            g.render(&plain, &View::new(TILT), w, h).rgba,
+            "edges off draws exactly the box without edges"
+        );
+        // A click two pixels below the edge, on the face, picks the edge.
+        let hit = g.pick(&gs, &View::new(TILT), w, h, ex, ey + 2).unwrap();
+        let e = hit.edge_id().expect("an edge");
+        assert_eq!(hit.part, 0);
+        assert!(e < 12);
+        // With edges off, the same click picks the face.
+        let face = g.pick(
+            &gs,
+            &View {
+                show_edges: false,
+                ..View::new(TILT)
+            },
+            w,
+            h,
+            ex,
+            ey + 2,
+        );
+        assert_eq!(face.and_then(|p| p.edge_id()), None);
     }
 
     #[test]

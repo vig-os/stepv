@@ -4,6 +4,7 @@
 // topology.cpp.
 #pragma once
 
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Trsf.hxx>
 
@@ -28,6 +29,13 @@ struct TopoPart {
     std::size_t prototype = 0;  // index into the prototypes
     gp_Trsf placement;
 };
+
+// A prototype's edges as the topology numbers them: every distinct edge,
+// degenerate ones (a cone's apex, a sphere's poles) left out, in
+// TopExp::MapShapes order. Edge i of the JSON is entry i + 1. The mesh's
+// edge polylines (STEPVMSH v4) use the same numbering, so a picked edge
+// names its curve.
+TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape);
 
 // Writes the topology of `prototypes` (each in its own coordinates; a part
 // places one) to `path`. Returns "" on success, else what went wrong.

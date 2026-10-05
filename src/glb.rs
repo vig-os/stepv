@@ -305,6 +305,7 @@ mod tests {
                 max: [1.0, 1.0, 0.0],
             },
             parts: vec![Part {
+                edges: Default::default(),
                 name: Some("bracket".into()),
                 color: Some(Color {
                     r: 0.5,
