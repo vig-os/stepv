@@ -85,6 +85,7 @@ fn the_gpu_frames_every_file_as_the_thumbnail_renderer_does() {
             camera: cam,
             show_construction: false,
             clear: [0.0; 4],
+            stripe: 6,
         };
         let gpu = g.render(&gs, &view, w, h);
         let cpu = render::render(
@@ -154,6 +155,7 @@ fn per_face_colours_reach_the_gpu() {
             camera: Camera::for_scene(&scene),
             show_construction: false,
             clear: [0.0; 4],
+            stripe: 6,
         },
         256,
         192,
@@ -210,6 +212,7 @@ fn stress_assembly_draws_at_display_rate() {
             camera: cam,
             show_construction: false,
             clear: [0.0; 4],
+            stripe: 6,
         };
         let t = std::time::Instant::now();
         let frame = renderer.render(&g.device, &g.queue, &gs, &target, &view);

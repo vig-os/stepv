@@ -742,9 +742,16 @@ and #34 (capping, fat lines).
   egui samples. The shaders encode sRGB themselves: egui blends in gamma space, and an `Srgb`
   target with a `Unorm` view needs view formats, which wgpu's GL backend lacks.
   - A frame renders only when its `RenderKey` (camera, toggles, size, theme) changes.
-- **Fallback:** `--software` is the minifb window. It is also used when no usable adapter exists,
-  with a note on stderr. A usable adapter needs storage buffers in fragment shaders, so
-  WebGL2-class GL doesn't qualify.
+- **Fallback:** `--software` is the minifb window. It is also used, with a note on stderr, when no
+  usable adapter exists.
+  - A usable adapter grants the limits the viewer asks for and reads storage buffers in fragment
+    shaders, so WebGL2-class GL doesn't qualify. It also supports a base vertex.
+  - The probe and eframe's adapter selector apply the same test. When the window's adapter fails
+    after the probe passed, the window fails before it opens, and the scene still reaches the
+    software viewer. The code review caught this path missing; `scripts/test-viewer.sh` exercises
+    it through `STEPV_VIEW_REJECT_ADAPTERS`.
+- **Approximated faces** keep `render.rs`'s amber stripes, drawn from `FaceStatus` in the storage
+  buffer. The rest of the overlay (missing-face badge, edges) is #31.
 - **The capi tripwire** (`just capi-tripwire`, CI on both OSes) fails on any eframe, egui, winit,
   wgpu, naga or minifb crate in stepv-capi's graph, or symbol in `libstepv_capi.a`. It was checked
   red: a `-p stepv -p stepv-capi` build unifies `viewer` on, and the tripwire names nine crates.

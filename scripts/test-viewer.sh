@@ -8,6 +8,8 @@
 #   2. --software opens the minifb window and reports "software".
 #   3. With no usable adapter (WGPU_BACKEND naming one this OS lacks), the
 #      viewer falls back to the software window and says so on stderr.
+#   4. The same when the probe found one but the window's adapter selection
+#      fails (STEPV_VIEW_REJECT_ADAPTERS, a test hook).
 #
 #   scripts/test-viewer.sh [path/to/stepv] [screenshot dir]
 #
@@ -63,12 +65,19 @@ print(w, h, sum(tb) // 3, len(colours))
 PY
 }
 
-report() { python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); print(r.get("status"), r.get("backend"))'; }
+report() {
+  python3 -c 'import json,sys
+try: r = json.loads(sys.stdin.read())
+except ValueError: print("no-json none"); sys.exit()
+print(r.get("status"), r.get("backend"))'
+}
 
 # 1. GPU, both themes.
 for theme in light dark; do
   shot="$tmp/gpu-$theme.png"
-  out=$(STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --theme "$theme" 2>"$tmp/err")
+  # `|| true`: under set -e a failing run would end the script before
+  # `fail` could say why (and the trap would delete the evidence).
+  out=$(STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --theme "$theme" 2>"$tmp/err") || true
   read -r status backend <<<"$(report <<<"$out")"
   [ "$status" = ok ] || fail "gpu $theme: status $status: $(cat "$tmp/err")"
   case "$backend" in
@@ -90,7 +99,7 @@ done
 
 # 2. --software.
 shot="$tmp/software.png"
-out=$(STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --software 2>"$tmp/err")
+out=$(STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" --software 2>"$tmp/err") || true
 read -r status backend <<<"$(report <<<"$out")"
 [ "$status $backend" = "ok software" ] || fail "--software: $status $backend: $(cat "$tmp/err")"
 [ -s "$shot" ] || fail "--software: no screenshot"
@@ -102,12 +111,23 @@ echo "ok: --software"
 missing=gl
 [ "$(uname)" = Linux ] && missing=dx12
 shot="$tmp/fallback.png"
-out=$(WGPU_BACKEND=$missing STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" 2>"$tmp/err")
+out=$(WGPU_BACKEND=$missing STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" 2>"$tmp/err") || true
 read -r status backend <<<"$(report <<<"$out")"
 [ "$status $backend" = "ok software" ] || fail "fallback: $status $backend"
 grep -q "no usable GPU adapter" "$tmp/err" || fail "fallback said nothing: $(cat "$tmp/err")"
 [ -s "$shot" ] || fail "fallback: no screenshot"
 echo "ok: no adapter (WGPU_BACKEND=$missing) falls back to software, and says so"
+
+# 4. The probe finds an adapter but the window cannot use it (the selector
+#    rejects every adapter): the window fails before it opens, and the
+#    scene still reaches the software viewer.
+shot="$tmp/rejected.png"
+out=$(STEPV_VIEW_REJECT_ADAPTERS=1 STEPV_VIEW_SCREENSHOT="$shot" "$stepv" view "$input" 2>"$tmp/err") || true
+read -r status backend <<<"$(report <<<"$out")"
+[ "$status $backend" = "ok software" ] || fail "rejected adapter: $status $backend: $(cat "$tmp/err")"
+grep -q "GPU viewer could not start" "$tmp/err" || fail "rejected adapter said nothing: $(cat "$tmp/err")"
+[ -s "$shot" ] || fail "rejected adapter: no screenshot"
+echo "ok: an adapter the window cannot use falls back to software, and says so"
 
 if [ -n "$keep" ]; then
   mkdir -p "$keep"

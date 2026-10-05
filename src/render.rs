@@ -274,7 +274,7 @@ pub(crate) const DEFAULT_COLOR: Color = Color {
     b: 0.50,
 };
 pub(crate) const APPROX: [f32; 3] = [0.96, 0.62, 0.12];
-const APPROX_DARK: [f32; 3] = [0.45, 0.27, 0.02];
+pub(crate) const APPROX_DARK: [f32; 3] = [0.45, 0.27, 0.02];
 pub(crate) const MISSING: [f32; 3] = [0.85, 0.05, 0.10];
 pub(crate) const SKETCH: [f32; 3] = [0.12, 0.13, 0.15];
 pub(crate) const CONSTRUCTION: [f32; 3] = [0.35, 0.45, 0.60];

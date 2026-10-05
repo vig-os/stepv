@@ -211,13 +211,19 @@ pub fn style(t: &Tokens) -> egui::Style {
 }
 
 /// Installs the fonts (with the Phosphor icons) and both styles on `ctx`, and
-/// picks the theme `pref` asks for.
+/// picks the theme `pref` asks for. Once per window: the fonts rebuild the
+/// atlas.
 pub fn install(ctx: &egui::Context, pref: ThemePref) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
     ctx.set_style_of(Theme::Light, style(&LIGHT));
     ctx.set_style_of(Theme::Dark, style(&DARK));
+    set_theme(ctx, pref);
+}
+
+/// Switches to the theme `pref` asks for; cheap, both styles are installed.
+pub fn set_theme(ctx: &egui::Context, pref: ThemePref) {
     ctx.set_theme(match pref {
         ThemePref::Auto => egui::ThemePreference::System,
         ThemePref::Light => egui::ThemePreference::Light,
@@ -339,7 +345,7 @@ mod tests {
         let ctx = egui::Context::default();
         install(&ctx, ThemePref::Dark);
         assert_eq!(ctx.theme(), Theme::Dark);
-        install(&ctx, ThemePref::Light);
+        set_theme(&ctx, ThemePref::Light);
         assert_eq!(ctx.theme(), Theme::Light);
         assert_eq!(ctx.global_style().visuals.panel_fill, LIGHT.panel);
     }

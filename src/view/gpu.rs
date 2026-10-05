@@ -53,7 +53,8 @@ struct Uniforms {
     clip: [[f32; 4]; 4],
     /// Model space to view space (rotation only), for normals.
     rot: [[f32; 4]; 4],
-    /// x: draw construction curves.
+    /// x: draw construction curves; y: the approximated-face stripe width
+    /// in physical pixels.
     flags: [u32; 4],
 }
 
@@ -248,7 +249,9 @@ impl Layout {
             // mis-coloured.
             let n = m.positions.len() / 3;
             let mut face_of = vec![u32::MAX; n];
-            let mut extra: Vec<(u32, u32, u32)> = Vec::new(); // (vertex, face, copy)
+            // (vertex, face) -> its copy, and the copies in order.
+            let mut copies: std::collections::HashMap<(u32, u32), u32> = Default::default();
+            let mut extra: Vec<(u32, u32)> = Vec::new();
             let first_index = l.indices.len() as u32;
             for (tri, &f) in m.indices.chunks_exact(3).zip(&m.face_ids) {
                 for &v in tri {
@@ -256,14 +259,11 @@ impl Layout {
                     let idx = if face_of[vi] == u32::MAX || face_of[vi] == f {
                         face_of[vi] = f;
                         v
-                    } else if let Some(&(_, _, c)) =
-                        extra.iter().find(|&&(ev, ef, _)| ev == v && ef == f)
-                    {
-                        c
                     } else {
-                        let c = (n + extra.len()) as u32;
-                        extra.push((v, f, c));
-                        c
+                        *copies.entry((v, f)).or_insert_with(|| {
+                            extra.push((v, f));
+                            (n + extra.len() - 1) as u32
+                        })
                     };
                     l.indices.push(idx);
                 }
@@ -272,7 +272,7 @@ impl Layout {
             l.normals.extend_from_slice(&m.normals);
             l.faces
                 .extend(face_of.iter().map(|&f| if f == u32::MAX { 0 } else { f }));
-            for &(v, f, _) in &extra {
+            for &(v, f) in &extra {
                 let v = v as usize;
                 l.positions
                     .extend_from_slice(&m.positions[v * 3..v * 3 + 3]);
@@ -340,6 +340,9 @@ pub struct View {
     pub show_construction: bool,
     /// sRGB-encoded RGBA, premultiplied (`Color32::to_normalized_gamma_f32`).
     pub clear: [f64; 4],
+    /// The approximated-face stripes' width in physical pixels: render.rs's
+    /// 6, times the display scale.
+    pub stripe: u32,
 }
 
 /// The offscreen target the viewer owns.
@@ -445,7 +448,14 @@ struct MeshOut {
   let key = normalize(vec3(0.35, 0.75, 0.55));
   let fill = normalize(vec3(-0.6, 0.2, 0.4));
   let light = 0.22 + 0.62 * abs(dot(n, key)) + 0.16 * abs(dot(n, fill));
-  return encode(m.color * light);
+  var c = m.color * light;
+  // Approximated faces: render.rs's diagonal amber stripes, 75% over the
+  // shaded colour (#31 adds the rest of the overlay).
+  if (m.status == STATUS_APPROX) {
+    let band = u32(floor((i.pos.x + i.pos.y) / f32(u.flags.y))) % 2u == 0u;
+    c = mix(c, select(APPROX_DARK, APPROX, band), 0.75);
+  }
+  return encode(c);
 }
 
 struct LineOut {
@@ -487,10 +497,14 @@ impl Renderer {
     pub fn new(device: &wgpu::Device) -> Self {
         let rgb = |c: [f32; 3]| format!("vec3({:?}, {:?}, {:?})", c[0], c[1], c[2]);
         let consts = format!(
-            "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\n",
+            "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\n\
+             const APPROX = {};\nconst APPROX_DARK = {};\nconst STATUS_APPROX = {}u;\n",
             rgb(render::MISSING),
             rgb(render::CONSTRUCTION),
-            rgb(render::SKETCH)
+            rgb(render::SKETCH),
+            rgb(render::APPROX),
+            rgb(render::APPROX_DARK),
+            FaceStatus::Approx as u32
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stepv view"),
@@ -631,7 +645,7 @@ impl Renderer {
         let u = Uniforms {
             clip: clip_matrix(&view.camera, &fit, target.width, target.height),
             rot,
-            flags: [u32::from(view.show_construction), 0, 0, 0],
+            flags: [u32::from(view.show_construction), view.stripe.max(1), 0, 0],
         };
         queue.write_buffer(&scene.uniforms, 0, bytemuck::bytes_of(&u));
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -821,8 +835,9 @@ impl GpuScene {
     }
 }
 
-/// What the viewer needs from a device: storage buffers in fragment shaders
-/// (WebGL2-class GL has none), and the texture size we render at.
+/// The device limits the viewer requests: WebGPU's downlevel set (which
+/// has the storage buffers fragment shaders read here; WebGL2-class GL has
+/// none), at the adapter's own texture size up to 8192.
 #[must_use]
 pub fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     wgpu::Limits {
@@ -831,17 +846,41 @@ pub fn limits(adapter: &wgpu::Adapter) -> wgpu::Limits {
     }
 }
 
-/// Whether `adapter` can run the viewer at all.
+/// Whether `adapter` can run the viewer: it grants every limit [`limits`]
+/// asks for (so the device request cannot then fail on them), reads storage
+/// buffers in fragment shaders, and offsets indices by a base vertex (each
+/// part's draw does).
 #[must_use]
 pub fn usable(adapter: &wgpu::Adapter) -> bool {
-    let have = adapter.limits();
-    let need = limits(adapter);
-    have.max_storage_buffers_per_shader_stage >= 3
-        && have.max_storage_buffer_binding_size >= need.max_storage_buffer_binding_size.min(1 << 24)
-        && adapter
-            .get_downlevel_capabilities()
-            .flags
-            .contains(wgpu::DownlevelFlags::FRAGMENT_STORAGE)
+    let flags = adapter.get_downlevel_capabilities().flags;
+    limits(adapter).check_limits(&adapter.limits())
+        && flags.contains(wgpu::DownlevelFlags::FRAGMENT_STORAGE)
+        && flags.contains(wgpu::DownlevelFlags::BASE_VERTEX)
+}
+
+/// eframe's adapter choice (#28 review): the first usable adapter that can
+/// present to `surface`, a discrete GPU before an integrated one before a
+/// CPU rasteriser. An error when there is none, so the window fails before
+/// it opens and `stepv view` falls back to software.
+///
+/// # Errors
+/// When no adapter is usable.
+pub fn select(
+    adapters: &[wgpu::Adapter],
+    surface: Option<&wgpu::Surface<'_>>,
+) -> Result<wgpu::Adapter, String> {
+    let rank = |a: &wgpu::Adapter| match a.get_info().device_type {
+        wgpu::DeviceType::DiscreteGpu => 0,
+        wgpu::DeviceType::IntegratedGpu => 1,
+        wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => 2,
+        wgpu::DeviceType::Cpu => 3,
+    };
+    adapters
+        .iter()
+        .filter(|a| usable(a) && surface.is_none_or(|s| a.is_surface_supported(s)))
+        .min_by_key(|a| rank(a))
+        .cloned()
+        .ok_or_else(|| "no usable GPU adapter for this window".to_owned())
 }
 
 fn instance() -> wgpu::Instance {
@@ -1047,6 +1086,7 @@ mod tests {
             camera,
             show_construction: false,
             clear: [0.0; 4],
+            stripe: 6,
         }
     }
 
@@ -1341,6 +1381,35 @@ mod tests {
             ..view(front)
         };
         assert!(drawn(g.render(&construction, &shown, 64, 64)) >= 40);
+    }
+
+    #[test]
+    fn approximated_faces_are_striped() {
+        let Some(g) = gpu() else { return };
+        let mut p = cuboid([0.0; 3], [1.0; 3], [None; 6]);
+        for f in &mut p.faces {
+            f.status = FaceStatus::Approx;
+        }
+        let gs = g.upload(&scene(vec![p]));
+        let top = Camera {
+            azimuth_deg: 0.0,
+            elevation_deg: 89.0,
+            ..Camera::default()
+        };
+        let img = g.render(&gs, &view(top), 64, 64);
+        // Along a row through the middle: amber (red > blue) throughout, in
+        // two alternating shades.
+        let row: Vec<[u8; 4]> = (20..44).map(|x| img.pixel(x, 32)).collect();
+        assert!(row.iter().all(|p| p[0] > p[2] + 40), "{row:?}");
+        let (lo, hi) = row
+            .iter()
+            .fold((255, 0), |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])));
+        assert!(hi - lo > 40, "no stripes: red spans {lo}..{hi}");
+    }
+
+    #[test]
+    fn no_adapter_is_selectable_from_none() {
+        assert!(select(&[], None).is_err());
     }
 
     #[test]

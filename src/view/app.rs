@@ -29,9 +29,11 @@ use crate::{FaceStatus, Scene};
 pub struct RenderKey {
     pub camera: Camera,
     pub show_construction: bool,
-    /// The viewport in physical pixels.
+    /// The viewport in physical pixels, at most the device's texture size.
     pub size: [u32; 2],
     pub dark: bool,
+    /// The approximated-face stripe width in physical pixels.
+    pub stripe: u32,
 }
 
 /// Whether a frame with `key` must be rendered: only when it differs from
@@ -126,10 +128,24 @@ impl Viewer {
             .wgpu_render_state
             .as_ref()
             .ok_or("eframe started without wgpu")?;
+        // eframe's adapter went through gpu::select already; this guards the
+        // contract if a future eframe ignores the selector.
+        if !super::gpu::usable(&rs.adapter) {
+            return Err(format!(
+                "adapter {} cannot run the viewer",
+                rs.adapter.get_info().name
+            ));
+        }
         theme::install(&cc.egui_ctx, opts.theme);
         let info = rs.adapter.get_info();
+        // A validation error here (a driver that claims more than it does)
+        // becomes an Err, and the software fallback, not a panic.
+        let scope = rs.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let renderer = Renderer::new(&rs.device);
         let gpu_scene = GpuScene::upload(&rs.device, &renderer, Layout::new(scene));
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            return Err(format!("the GPU refused the viewer's pipelines: {e}"));
+        }
         Ok(Self {
             renderer,
             scene: gpu_scene,
@@ -209,7 +225,7 @@ impl Viewer {
                     } else {
                         ThemePref::Dark
                     };
-                    theme::install(ui.ctx(), self.theme);
+                    theme::set_theme(ui.ctx(), self.theme);
                 }
                 ui.add_space(theme::space(1));
                 let (text, tone, tip) = match (&self.sandbox, self.sandboxed) {
@@ -251,7 +267,7 @@ impl Viewer {
             let t = widgets::tokens(ui);
             ui.label(
                 egui::RichText::new(format!(
-                    "{} {} faces approximated, {} missing",
+                    "{} approximated faces: {}, missing: {}",
                     icon::WARNING,
                     s.approx,
                     s.missing
@@ -306,6 +322,7 @@ impl Viewer {
             camera: key.camera,
             show_construction: key.show_construction,
             clear: clear.to_normalized_gamma_f32().map(f64::from),
+            stripe: key.stripe,
         };
         let frame = self
             .renderer
@@ -339,11 +356,16 @@ impl Viewer {
             }
         }
         let dark = ui.visuals().dark_mode;
+        let ppp = ui.ctx().pixels_per_point();
+        // Past the texture limit (a window across two 5K displays), render
+        // at the limit and let egui scale it up rather than fail validation.
+        let max = rs.device.limits().max_texture_dimension_2d;
         let key = RenderKey {
             camera: self.controls.camera,
             show_construction: self.controls.show_construction,
-            size: physical(rect.size(), ui.ctx().pixels_per_point()),
+            size: physical(rect.size(), ppp).map(|v| v.min(max)),
             dark,
+            stripe: (6.0 * ppp).round().max(1.0) as u32,
         };
         self.render(rs, key, theme::tokens(dark).viewport);
         if let Some(id) = self.texture {
@@ -380,9 +402,20 @@ impl Viewer {
         if self.frames == 3 {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(Default::default()));
         }
+        // Never spin forever waiting for a screenshot that does not come.
+        if self.frames > SCREENSHOT_FRAMES {
+            *self.error.lock().unwrap() =
+                Some(format!("no screenshot after {SCREENSHOT_FRAMES} frames"));
+            self.screenshot = None;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
         ctx.request_repaint();
     }
 }
+
+/// How long the screenshot hook waits for its image.
+const SCREENSHOT_FRAMES: u32 = 600;
 
 fn save(image: &egui::ColorImage, path: &Path) -> Result<(), String> {
     let img = crate::render::Image {
@@ -474,6 +507,15 @@ pub(super) fn run(
             wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
                 // Storage buffers in fragment shaders: what gpu.rs needs, not
                 // eframe's WebGL2 limits for GL.
+                // Only an adapter the viewer can use, and that presents to
+                // the window: otherwise the window fails before it opens and
+                // view::run falls back to software.
+                native_adapter_selector: Some(Arc::new(|adapters, surface| {
+                    if std::env::var_os("STEPV_VIEW_REJECT_ADAPTERS").is_some() {
+                        return Err("STEPV_VIEW_REJECT_ADAPTERS is set".into());
+                    }
+                    super::gpu::select(adapters, surface)
+                })),
                 device_descriptor: Arc::new(|adapter| wgpu::DeviceDescriptor {
                     label: Some("stepv"),
                     required_limits: super::gpu::limits(adapter),
@@ -552,6 +594,7 @@ mod tests {
             show_construction: false,
             size: [100, 100],
             dark: false,
+            stripe: 6,
         };
         let mut last = None;
         assert!(needs_render(&mut last, key), "the first frame renders");
@@ -562,6 +605,7 @@ mod tests {
                 ..key
             },
             RenderKey { dark: true, ..key },
+            RenderKey { stripe: 12, ..key },
             RenderKey {
                 show_construction: true,
                 ..key

@@ -61,13 +61,18 @@ pub fn section_header(ui: &mut Ui, title: &str) {
 }
 
 /// One `key  value` row: the key muted on the left, the value right-aligned
-/// and selectable (so a measurement can be copied).
+/// and selectable (so a measurement can be copied). A value too long for
+/// the row is cut with an ellipsis, in full on hover.
 pub fn property_row(ui: &mut Ui, key: &str, value: &str) {
     let t = tokens(ui);
     ui.horizontal(|ui| {
         ui.label(RichText::new(key).color(t.muted_foreground));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(RichText::new(value).color(t.foreground)).selectable(true));
+            ui.add(
+                egui::Label::new(RichText::new(value).color(t.foreground))
+                    .selectable(true)
+                    .truncate(),
+            );
         });
     });
 }
