@@ -11,7 +11,7 @@
 //! or when the process dies, it is killed, restarted on the next query, and
 //! the query reports what happened. The caller never hangs on it.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
@@ -115,6 +115,10 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The longest answer line read (a section's caps are the big ones): past
+/// it, the kernel is taken to have gone wrong, as if it crashed.
+pub const MAX_LINE: u64 = 64 << 20;
+
 /// One running kernel.
 struct Process {
     child: Child,
@@ -213,8 +217,14 @@ impl Server {
             let mut buf = Vec::new();
             loop {
                 buf.clear();
-                match r.read_until(b'\n', &mut buf) {
+                match r.by_ref().take(MAX_LINE).read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
+                    // An endless line must not take the caller's memory: no
+                    // answer, then the reader ends, which reads as a crash.
+                    Ok(_) if !buf.ends_with(b"\n") && buf.len() as u64 >= MAX_LINE => {
+                        let _ = tx.send(String::new());
+                        break;
+                    }
                     Ok(_) => {
                         let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
                         if tx.send(line).is_err() {

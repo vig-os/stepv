@@ -392,7 +392,11 @@ impl Layout {
                 }
                 at += n as usize;
             }
-            let c = part.color.unwrap_or(render::DEFAULT_COLOR);
+            // A part coloured only per face: its first face's colour.
+            let c = part
+                .color
+                .or_else(|| part.face_color(0))
+                .unwrap_or(render::DEFAULT_COLOR);
             l.part_colors.push([c.r, c.g, c.b]);
             l.capped.push(
                 !part.mesh.indices.is_empty()
@@ -640,8 +644,11 @@ struct CapVertex {
 
 /// The exact caps' depth step, per rank (NDC depth; the model's bounding
 /// sphere spans 0.5): where two parts overlap (an interference), the later
-/// cap shows, never a mix of both.
+/// cap shows, never a mix of both. Only overlapping caps get a rank above
+/// another's, and ranks stop at [`CAP_RANKS`], so the offset stays under
+/// 0.05% of the model's size however many parts are cut.
 const CAP_STEP: f32 = 1.0 / 262_144.0;
+const CAP_RANKS: u32 = 63;
 
 /// The stencil cap's fill and hatch, linear (#34): neutral, so a cap never
 /// reads as a part's own colour.
@@ -1563,7 +1570,8 @@ fn draw_cap(
 fn draw_exact(pass: &mut wgpu::RenderPass<'_>, caps: &ExactCaps, pipeline: &wgpu::RenderPipeline) {
     pass.set_pipeline(pipeline);
     pass.set_vertex_buffer(0, caps.vertices.slice(..));
-    pass.draw(0..caps.count, 0..1);
+    pass.set_index_buffer(caps.indices.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..caps.count, 0, 0..1);
 }
 
 /// Draws the B-rep edges: one fat-line instance per segment (hidden parts
@@ -1763,10 +1771,34 @@ pub struct GpuScene {
     visibility: Visibility,
 }
 
+/// The exact caps' depth ranks (#43): a cap is drawn one step in front of
+/// the earlier caps whose boxes it overlaps, and of no others, up to
+/// [`CAP_RANKS`].
+#[derive(Debug, Default)]
+struct Ranks(Vec<([f32; 3], [f32; 3], u32)>);
+
+impl Ranks {
+    /// The rank of the next cap, whose box is `lo..hi`.
+    fn next(&mut self, lo: [f32; 3], hi: [f32; 3]) -> u32 {
+        let rank = self
+            .0
+            .iter()
+            .filter(|b| (0..3).all(|k| b.0[k] <= hi[k] && lo[k] <= b.1[k]))
+            .map(|b| b.2 + 1)
+            .max()
+            .unwrap_or(0)
+            .min(CAP_RANKS);
+        self.0.push((lo, hi, rank));
+        rank
+    }
+}
+
 /// The kernel's exact section caps (#43), uploaded for one plane.
 pub struct ExactCaps {
     plane: [f32; 4],
     vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// Indices to draw.
     count: u32,
 }
 
@@ -1914,47 +1946,86 @@ impl GpuScene {
     /// Sets the kernel's exact section caps for `plane` (#43). They are
     /// drawn for that plane only; any other gets the stencil cap. Caps
     /// naming no part of this scene are dropped.
-    pub fn set_exact_caps(&mut self, device: &wgpu::Device, plane: [f32; 4], caps: &[Cap]) {
+    ///
+    /// # Errors
+    /// When the caps are more than the device's buffers hold (the kernel is
+    /// untrusted): nothing is set, and the stencil cap stays.
+    pub fn set_exact_caps(
+        &mut self,
+        device: &wgpu::Device,
+        plane: [f32; 4],
+        caps: &[Cap],
+    ) -> Result<(), String> {
         let mut vertices = Vec::new();
-        let mut rank = 0;
+        let mut indices = Vec::new();
+        let mut ranks = Ranks::default();
         for c in caps {
             let Some(&color) = self.part_colors.get(c.part as usize) else {
                 continue;
             };
-            let at = |i: u32| c.positions.get(i as usize * 3..i as usize * 3 + 3);
-            let before = vertices.len();
-            for t in c.indices.chunks_exact(3) {
-                // A triangle naming a vertex the cap lacks is skipped whole.
-                let (Some(a), Some(b), Some(d)) = (at(t[0]), at(t[1]), at(t[2])) else {
-                    continue;
-                };
-                for p in [a, b, d] {
-                    vertices.push(CapVertex {
-                        position: [p[0], p[1], p[2]],
-                        color,
-                        part: c.part,
-                        rank,
-                    });
+            let n = (c.positions.len() / 3) as u32;
+            let tris: Vec<&[u32]> = c
+                .indices
+                .chunks_exact(3)
+                .filter(|t| t.iter().all(|&i| i < n))
+                .collect();
+            if tris.is_empty() {
+                continue;
+            }
+            let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            for p in c.positions.chunks_exact(3) {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
                 }
             }
-            if vertices.len() > before {
-                rank += 1;
-            }
+            let rank = ranks.next(lo, hi);
+            let base = vertices.len() as u32;
+            vertices.extend(c.positions.chunks_exact(3).map(|p| CapVertex {
+                position: [p[0], p[1], p[2]],
+                color,
+                part: c.part,
+                rank,
+            }));
+            indices.extend(tris.into_iter().flatten().map(|&i| base + i));
         }
+        let max = device.limits().max_buffer_size;
+        let bytes = |n: usize, each: usize| (n as u64).saturating_mul(each as u64);
+        if bytes(vertices.len(), std::mem::size_of::<CapVertex>()) > max
+            || bytes(indices.len(), 4) > max
+        {
+            return Err(format!(
+                "the section has {} vertices, more than the GPU's buffers hold",
+                vertices.len()
+            ));
+        }
+        // wgpu refuses empty buffers; nothing is drawn from these then.
+        let init = |label, contents: &[u8], usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: if contents.is_empty() {
+                    &[0u8; 32][..]
+                } else {
+                    contents
+                },
+                usage,
+            })
+        };
         self.exact = Some(ExactCaps {
             plane,
-            count: vertices.len() as u32,
-            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("exact caps"),
-                // wgpu refuses an empty buffer; nothing is drawn from it.
-                contents: if vertices.is_empty() {
-                    &[0u8; std::mem::size_of::<CapVertex>()][..]
-                } else {
-                    bytemuck::cast_slice(&vertices)
-                },
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
+            count: indices.len() as u32,
+            vertices: init(
+                "exact cap vertices",
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            indices: init(
+                "exact cap indices",
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            ),
         });
+        Ok(())
     }
 
     /// Drops the exact caps: every plane gets the stencil cap again.
@@ -3016,6 +3087,21 @@ mod tests {
             ey + 2,
         );
         assert_eq!(face.and_then(|p| p.edge_id()), None);
+    }
+
+    #[test]
+    fn only_overlapping_exact_caps_step_forward() {
+        let mut r = Ranks::default();
+        let b = |x0: f32, x1: f32| ([x0, 15.0, 0.0], [x1, 15.0, 5.0]);
+        // The plate, then two pins inside it, apart: one step each, not two.
+        assert_eq!(r.next(b(0.0, 40.0).0, b(0.0, 40.0).1), 0);
+        assert_eq!(r.next(b(4.0, 8.0).0, b(4.0, 8.0).1), 1);
+        assert_eq!(r.next(b(32.0, 36.0).0, b(32.0, 36.0).1), 1);
+        // A part beside them all, and a pile of overlaps, capped.
+        assert_eq!(r.next(b(50.0, 60.0).0, b(50.0, 60.0).1), 0);
+        let mut pile = Ranks::default();
+        let last = (0..1000).map(|_| pile.next([0.0; 3], [1.0; 3])).last();
+        assert_eq!(last, Some(CAP_RANKS));
     }
 
     #[test]

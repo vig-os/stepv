@@ -376,7 +376,8 @@ fn exact_caps_show_each_part_in_the_plate_too() {
     let answer = server
         .ask(&Query::Section(plane.map(f64::from)))
         .expect("the kernel cuts the bracket");
-    gs.set_exact_caps(&g.device, plane, &answer.caps.unwrap());
+    gs.set_exact_caps(&g.device, plane, &answer.caps.unwrap())
+        .unwrap();
     let cam = Camera {
         azimuth_deg: 180.0,
         elevation_deg: 0.0,

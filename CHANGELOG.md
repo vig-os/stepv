@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Exact section caps** ([#43](https://github.com/vig-os/stepv/issues/43)): a cut model is capped
   per part, in each part's colour, from the kernel's exact section (`stepv-occt --serve`'s new
-  `section` op). Parts that interfere show both sections, not one grey patch
+  `section` op). Parts that interfere are both capped in their own colours, not as one grey
+  patch, and where they overlap, the later part's cap shows
   - While the slider moves, or if the kernel refuses, the GPU's stencil cap stands in, and the
     Section panel says which one is shown
 - **Section caps and fat edges** ([#34](https://github.com/vig-os/stepv/issues/34)): a cut model

@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use super::gpu::Pick;
-use crate::measure::{Answer, Entity, Error, Query, Server};
+use crate::measure::{Answer, Cap, Entity, Error, Query, Server};
 use crate::occt::Limits;
 
 /// The entity a pick names, `None` for a whole part (the tree's pick).
@@ -151,6 +152,146 @@ impl Measurement {
     }
 }
 
+/// How long the section plane holds still before the kernel is asked for
+/// its exact caps (#43): a moving slider would queue a query per frame.
+pub const SECTION_SETTLE: Duration = Duration::from_millis(150);
+
+/// An answer, sorted by [`ExactCut::take`].
+#[derive(Debug)]
+pub enum Taken {
+    /// The section's: the plane it was asked about, and its caps.
+    Section([f32; 4], Result<Vec<Cap>, Error>),
+    /// Anyone else's (a measurement's).
+    Other(Result<Answer, Error>),
+}
+
+/// What the exact caps want this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Due {
+    Nothing,
+    /// Ask again after this long: the plane has not held still yet.
+    Wait(Duration),
+    /// Ask the kernel about this plane now.
+    Ask([f32; 4]),
+}
+
+/// The exact section caps (#43): asked of the kernel once the plane holds
+/// still; the stencil cap meanwhile, and wherever the kernel says no.
+#[derive(Debug, Default)]
+pub struct ExactCut {
+    /// The capped plane last drawn (`None`: no cut, or uncapped), and since
+    /// when.
+    seen: Option<(Option<[f32; 4]>, Instant)>,
+    /// The query in flight, and the plane it asks about.
+    asked: Option<(u64, [f32; 4])>,
+    /// The kernel said no for this plane. Cleared when the plane moves: the
+    /// next stop asks again.
+    refused: Option<([f32; 4], String)>,
+    /// Too slow or too big for this model (a timeout, the memory cap, more
+    /// than the GPU holds): no more queries this session, so every stop of
+    /// the slider does not cost a kernel restart.
+    off: Option<String>,
+    /// How many times caps have landed: a render key's generation.
+    pub landed: u64,
+}
+
+impl ExactCut {
+    /// What to do for `plane` (`None`: no capped cut) this frame; `have`:
+    /// the scene has its exact caps.
+    pub fn due(&mut self, plane: Option<[f32; 4]>, have: bool, now: Instant) -> Due {
+        if self.seen.is_none_or(|(p, _)| p != plane) {
+            self.seen = Some((plane, now));
+            self.refused = None;
+        }
+        let Some(p) = plane else {
+            return Due::Nothing;
+        };
+        if have
+            || self.off.is_some()
+            || self.asked.is_some_and(|(_, a)| a == p)
+            || self.refused.is_some()
+        {
+            return Due::Nothing;
+        }
+        let held = self
+            .seen
+            .map_or(Duration::ZERO, |(_, t)| now.saturating_duration_since(t));
+        if held < SECTION_SETTLE {
+            Due::Wait(SECTION_SETTLE - held)
+        } else {
+            Due::Ask(p)
+        }
+    }
+
+    pub fn sent(&mut self, id: u64, plane: [f32; 4]) {
+        self.asked = Some((id, plane));
+    }
+
+    /// Whether the query in flight is still waited for.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        self.asked.is_some()
+    }
+
+    /// Sorts answer `id`: the section's, with its plane and caps, or any
+    /// other, untouched.
+    pub fn take(&mut self, id: u64, r: Result<Answer, Error>) -> Taken {
+        match self.asked {
+            Some((asked, plane)) if asked == id => {
+                self.asked = None;
+                Taken::Section(plane, r.map(|a| a.caps.unwrap_or_default()))
+            }
+            _ => Taken::Other(r),
+        }
+    }
+
+    /// The caps for `plane` were set.
+    pub fn landed(&mut self) {
+        self.landed += 1;
+    }
+
+    /// No caps for `plane`, because of `e`. `sticky`: no more for this
+    /// model (see [`Self::off`]).
+    pub fn refuse(&mut self, plane: [f32; 4], e: String, sticky: bool) {
+        if sticky {
+            self.off = Some(e);
+        } else {
+            self.refused = Some((plane, e));
+        }
+    }
+
+    /// Whether `plane`'s cap is the last it will be (the screenshot hook
+    /// waits for it): exact, refused, or no cap at all.
+    #[must_use]
+    pub fn settled(&self, plane: Option<[f32; 4]>, have: bool) -> bool {
+        plane.is_none_or(|p| {
+            have || self.off.is_some() || self.refused.as_ref().is_some_and(|(r, _)| *r == p)
+        })
+    }
+
+    /// The Section panel's line about `plane`'s cap, and why when it is not
+    /// exact.
+    #[must_use]
+    pub fn status(&self, plane: [f32; 4], have: bool) -> (&'static str, Option<&str>) {
+        if have {
+            ("Exact section", None)
+        } else if let Some(e) = &self.off {
+            ("Approximate section", Some(e.as_str()))
+        } else if let Some((_, e)) = self.refused.as_ref().filter(|(r, _)| *r == plane) {
+            ("Approximate section", Some(e.as_str()))
+        } else {
+            ("Approximate section, exact on its way", None)
+        }
+    }
+}
+
+/// Whether a section that failed with `e` should stop the asking: a kernel
+/// killed for its time or memory will be again.
+#[must_use]
+pub fn sticky(e: &Error) -> bool {
+    matches!(e, Error::Timeout | Error::MemoryCap | Error::Load(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +327,66 @@ mod tests {
         // A third pick starts over.
         assert!(m.pick(Pick { part: 2, face: 0 }, &mut next).is_empty());
         assert!(m.b.is_none() && m.distance.is_none());
+    }
+
+    #[test]
+    fn a_section_is_asked_once_the_plane_holds_still() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let (p, q) = ([0.0, 1.0, 0.0, 15.0], [0.0, 1.0, 0.0, 14.0]);
+        let mut x = ExactCut::default();
+        assert_eq!(x.due(None, false, t0), Due::Nothing);
+        assert_eq!(x.due(Some(p), false, ms(0)), Due::Wait(SECTION_SETTLE));
+        // The slider moves on: the wait starts over.
+        assert_eq!(x.due(Some(q), false, ms(100)), Due::Wait(SECTION_SETTLE));
+        assert_eq!(x.due(Some(q), false, ms(260)), Due::Ask(q));
+        x.sent(7, q);
+        assert_eq!(
+            x.due(Some(q), false, ms(300)),
+            Due::Nothing,
+            "asked already"
+        );
+        assert!(!x.settled(Some(q), false), "the screenshot waits");
+        // Another query's answer is not the section's.
+        assert!(matches!(
+            x.take(6, Ok(Answer::default())),
+            Taken::Other(Ok(_))
+        ));
+        let Taken::Section(plane, caps) = x.take(7, Ok(Answer::default())) else {
+            panic!("the section's answer");
+        };
+        assert_eq!((plane, caps), (q, Ok(Vec::new())));
+        assert!(!x.waiting());
+        assert!(x.settled(Some(q), true));
+        assert_eq!(x.status(q, true).0, "Exact section");
+    }
+
+    #[test]
+    fn a_refusal_holds_until_the_plane_moves_and_a_timeout_for_good() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let (p, q) = ([0.0, 1.0, 0.0, 15.0], [0.0, 1.0, 0.0, 14.0]);
+        let mut x = ExactCut::default();
+        x.due(Some(p), false, ms(0));
+        assert_eq!(x.due(Some(p), false, ms(200)), Due::Ask(p));
+        x.sent(1, p);
+        let Taken::Section(plane, Err(e)) = x.take(1, Err(Error::Refused("no".into()))) else {
+            panic!("the section's refusal");
+        };
+        x.refuse(plane, e.to_string(), false);
+        assert_eq!(x.due(Some(p), false, ms(400)), Due::Nothing);
+        assert!(x.settled(Some(p), false));
+        assert_eq!(x.status(p, false), ("Approximate section", Some("no")));
+        // Moved away and back: asked again.
+        x.due(Some(q), false, ms(500));
+        x.due(Some(p), false, ms(600));
+        assert_eq!(x.due(Some(p), false, ms(800)), Due::Ask(p));
+        // A timeout stops the asking for this model.
+        assert!(sticky(&Error::Timeout) && !sticky(&Error::Refused(String::new())));
+        x.refuse(p, Error::Timeout.to_string(), true);
+        x.due(Some(q), false, ms(900));
+        assert_eq!(x.due(Some(q), false, ms(1200)), Due::Nothing);
+        assert!(x.settled(Some(q), false));
     }
 
     #[test]

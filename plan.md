@@ -970,6 +970,8 @@ exactly, and the viewer draws one cap per part in that part's colour.
     which loop is a hole and has a mesher, so the viewer gets triangles and needs no
     triangulator.
   - Sheets and sketches have no cap, as under the stencil. A zero normal is refused.
+  - If one part's Boolean fails, the whole query fails, so every part keeps the stencil cap. A
+    missing exact cap would show that part's inside as if it were hollow.
   - Cost: 900 parts (the fixture × 300) in 0.27 s for 144 caps, about 2 ms a cap. A query is held
     to the run's limits, as a measurement is.
 - **The viewer:** the plane must hold still for 150 ms before the query is sent, so a dragged
@@ -977,10 +979,18 @@ exactly, and the viewer draws one cap per part in that part's colour.
   the newest measurement pair.
   - Exact caps are drawn only for the plane they were cut by. Any other plane, while a query is in
     flight or after the kernel refuses, gets the stencil cap. The panel says "Exact section" or
-    "Approximate section".
+    "Approximate section", with the reason on hover.
+  - A refusal holds for its plane until the plane moves. A timeout, the memory cap, or caps larger
+    than the GPU's buffers turn exact caps off for the session. Otherwise every stop of the slider
+    would cost another kernel restart.
+  - The kernel is untrusted: the server reads at most `MAX_LINE` (64 MiB) per answer line, and
+    kills a kernel that writes more.
   - Each cap is hatched in its part's colour (fill ×0.6, hatch ×0.22).
-  - Each later cap is drawn `CAP_STEP` (2⁻¹⁸ of NDC depth) nearer the eye. Where two parts
-    overlap, the later one shows cleanly, with no z-fighting mix of the two.
+  - Each cap is drawn `CAP_STEP` (2⁻¹⁸ of NDC depth) nearer the eye than the earlier caps whose
+    boxes it overlaps, and no others. Ranks stop at 63, so the offset stays under 0.05% of the
+    model however many parts are cut. Where two parts overlap, the later one shows cleanly, with
+    no z-fighting mix of the two.
+  - The caps are an index buffer, sized against the device's limit.
   - The id pass draws exact caps as "nothing", as it does the stencil cap.
 - **Acceptance:**
   - `tests/measure.rs`: at y = 15, the plate's cap is 160 mm² (40 × 5 less the 8 × 5 hole) and

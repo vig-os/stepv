@@ -418,6 +418,11 @@ std::string answer_query(const std::string& line, const Resolve& resolve,
             std::this_thread::sleep_for(std::chrono::seconds(2));
             return "{\"id\":" + id + ",\"ok\":true,\"distance\":" + num(balloon[0]) + "}";
         }
+        // And one whose answer is one `mb`-MiB line, for the caller's line cap.
+        if (op->string == "test_long" && std::getenv("STEPV_OCCT_TEST_HOOKS")) {
+            const std::size_t bytes = static_cast<std::size_t>(clamped("mb", 1024)) << 20;
+            return "{\"id\":" + id + ",\"ok\":true,\"pad\":\"" + std::string(bytes, 'x') + "\"}";
+        }
         if (op->string == "section") return section(id, q.get("plane"), part);
         std::string why;
         const auto a = entity(q.get("a"), resolve, why);

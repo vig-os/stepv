@@ -19,7 +19,7 @@ use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
 use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
-use super::measuring::{Measurement, Measurer};
+use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, FrameStats, Options, Ran, ThemePref, theme};
@@ -173,25 +173,8 @@ struct Viewer {
     /// The exact section caps (#43): asked of the kernel once the plane
     /// holds still, the stencil cap meanwhile.
     exact: ExactCut,
-}
-
-/// How long the section plane holds still before the kernel is asked for
-/// its exact caps: a moving slider would queue a query per frame.
-const SECTION_SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
-
-/// The exact caps' state (#43).
-#[derive(Debug, Default)]
-struct ExactCut {
-    /// The plane last drawn (`None`: no cut, or uncapped), and since when.
-    seen: Option<(Option<[f32; 4]>, std::time::Instant)>,
-    /// The query in flight, and the plane it asks about.
-    asked: Option<(u64, [f32; 4])>,
-    /// The kernel said no for this plane: the stencil cap stays.
-    refused: Option<([f32; 4], String)>,
-    /// How many times caps have landed (the render key's generation).
-    landed: u64,
     /// STEPV_VIEW_SECTION: report the caps on stderr when they land.
-    report: bool,
+    report_section: bool,
 }
 
 impl Viewer {
@@ -287,10 +270,8 @@ impl Viewer {
             tree,
             uploaded: 0,
             reveal: false,
-            exact: ExactCut {
-                report: opts.section.is_some(),
-                ..ExactCut::default()
-            },
+            exact: ExactCut::default(),
+            report_section: opts.section.is_some(),
             cut: opts.section.is_some(),
             cap: true,
             section: Section {
@@ -618,38 +599,34 @@ impl Viewer {
         self.measurer.as_ref()
     }
 
-    /// Asks the kernel for the exact caps (#43) once the plane has held
-    /// still for [`SECTION_SETTLE`], unless it has them, or said no, already.
-    fn ask_section(&mut self, ctx: &egui::Context) {
+    /// The capped section plane, and whether the scene has its exact caps.
+    fn capped_plane(&self) -> (Option<[f32; 4]>, bool) {
         let plane = self.plane().filter(|_| self.cap);
-        let now = std::time::Instant::now();
-        if self.exact.seen.is_none_or(|(p, _)| p != plane) {
-            self.exact.seen = Some((plane, now));
+        (
+            plane,
+            plane.is_some_and(|p| self.scene.exact_caps(p).is_some()),
+        )
+    }
+
+    /// Asks the kernel for the exact caps (#43) once the plane has held
+    /// still, unless it has them, or said no, already.
+    fn ask_section(&mut self, ctx: &egui::Context) {
+        let (plane, have) = self.capped_plane();
+        match self.exact.due(plane, have, std::time::Instant::now()) {
+            Due::Nothing => {}
+            Due::Wait(d) => ctx.request_repaint_after(d),
+            Due::Ask(p) => {
+                let id = self.next_query;
+                match self.measurer() {
+                    Some(m) => {
+                        m.send(id, crate::measure::Query::Section(p.map(f64::from)));
+                        self.next_query += 1;
+                        self.exact.sent(id, p);
+                    }
+                    None => self.exact.refuse(p, "no file to cut".into(), true),
+                }
+            }
         }
-        let Some(plane) = plane else { return };
-        let done = self.scene.exact_caps(plane).is_some()
-            || self.exact.asked.is_some_and(|(_, p)| p == plane)
-            || self
-                .exact
-                .refused
-                .as_ref()
-                .is_some_and(|(p, _)| *p == plane);
-        if done {
-            return;
-        }
-        let held = self.exact.seen.map_or(now, |(_, t)| t).elapsed();
-        if held < SECTION_SETTLE {
-            ctx.request_repaint_after(SECTION_SETTLE - held);
-            return;
-        }
-        let id = self.next_query;
-        let Some(m) = self.measurer() else {
-            self.exact.refused = Some((plane, "no file to cut".into()));
-            return;
-        };
-        m.send(id, crate::measure::Query::Section(plane.map(f64::from)));
-        self.next_query += 1;
-        self.exact.asked = Some((id, plane));
     }
 
     /// Files the kernel's caps for the plane they were asked about.
@@ -657,22 +634,26 @@ impl Viewer {
         &mut self,
         rs: &egui_wgpu::RenderState,
         plane: [f32; 4],
-        r: Result<crate::measure::Answer, crate::measure::Error>,
+        r: Result<Vec<crate::measure::Cap>, crate::measure::Error>,
     ) {
-        match r.map(|a| a.caps.unwrap_or_default()) {
-            Ok(caps) => {
-                self.scene.set_exact_caps(&rs.device, plane, &caps);
-                self.exact.landed += 1;
-                if self.exact.report {
-                    eprintln!(
-                        "stepv: STEPV_VIEW_SECTION exact caps for {} parts",
-                        caps.len()
-                    );
+        let set = match r {
+            Ok(caps) => self
+                .scene
+                .set_exact_caps(&rs.device, plane, &caps)
+                .map(|()| caps.len())
+                .map_err(|e| (e, true)),
+            Err(e) => Err((e.to_string(), sticky(&e))),
+        };
+        match set {
+            Ok(n) => {
+                self.exact.landed();
+                if self.report_section {
+                    eprintln!("stepv: STEPV_VIEW_SECTION exact caps for {n} parts");
                 }
             }
-            Err(e) => {
+            Err((e, sticky)) => {
                 eprintln!("stepv: no exact section caps ({e}); the stencil cap stays");
-                self.exact.refused = Some((plane, e.to_string()));
+                self.exact.refuse(plane, e, sticky);
             }
         }
     }
@@ -684,13 +665,13 @@ impl Viewer {
             answers.extend(std::iter::from_fn(|| m.try_recv()));
         }
         for (id, r) in answers {
-            if let Some((asked, plane)) = self.exact.asked
-                && asked == id
-            {
-                self.exact.asked = None;
-                self.section_answer(rs, plane, r);
-                continue;
-            }
+            let r = match self.exact.take(id, r) {
+                Taken::Section(plane, caps) => {
+                    self.section_answer(rs, plane, caps);
+                    continue;
+                }
+                Taken::Other(r) => r,
+            };
             let complete = self.measurement.answer(id, r);
             if self.report_measure && complete {
                 let show = |r: &Option<Result<crate::measure::Answer, String>>| match r {
@@ -707,7 +688,7 @@ impl Viewer {
                 );
             }
         }
-        if self.measurement.waiting.is_some() || self.exact.asked.is_some() {
+        if self.measurement.waiting.is_some() || self.exact.waiting() {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     }
@@ -760,14 +741,8 @@ impl Viewer {
                 ui.checkbox(&mut self.section.flip, "Flip");
             });
             ui.add(egui::Slider::new(&mut self.section.offset, 0.0..=1.0).show_value(false));
-            if let Some(p) = self.plane().filter(|_| self.cap) {
-                let (text, why) = if self.scene.exact_caps(p).is_some() {
-                    ("Exact section", None)
-                } else if let Some((_, e)) = self.exact.refused.as_ref().filter(|(r, _)| *r == p) {
-                    ("Approximate section", Some(e.as_str()))
-                } else {
-                    ("Approximate section, exact on its way", None)
-                };
+            if let (Some(p), have) = self.capped_plane() {
+                let (text, why) = self.exact.status(p, have);
                 let label = ui.weak(text);
                 if let Some(why) = why {
                     label.on_hover_text(why);
@@ -779,10 +754,8 @@ impl Viewer {
     /// Whether the cap drawn is the last it will be: exact, refused, or no
     /// cap at all (the screenshot hook waits for it).
     fn section_settled(&self) -> bool {
-        self.plane().filter(|_| self.cap).is_none_or(|p| {
-            self.scene.exact_caps(p).is_some()
-                || self.exact.refused.as_ref().is_some_and(|(r, _)| *r == p)
-        })
+        let (plane, have) = self.capped_plane();
+        self.exact.settled(plane, have)
     }
 
     /// The section plane, when it is on.

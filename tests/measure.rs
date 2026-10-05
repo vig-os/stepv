@@ -419,3 +419,19 @@ fn a_degenerate_section_plane_is_refused() {
     );
     assert_eq!(s.starts, 1);
 }
+
+/// An answer line past `MAX_LINE` (a hostile file's section, say) is not
+/// read into memory whole: the kernel is dropped as crashed, and restarted.
+#[test]
+fn an_endless_answer_line_is_cut_off() {
+    let mut s =
+        Server::new(&kernel(), &data("box.brep"), limits()).with_env("STEPV_OCCT_TEST_HOOKS", "1");
+    let mb = (stepv::measure::MAX_LINE >> 20) + 1;
+    let e = s
+        .raw(&json!({"id": 1, "op": "test_long", "mb": mb}))
+        .unwrap_err();
+    assert!(matches!(e, Error::Crashed(_)), "{e:?}");
+    s.raw(&json!({"id": 2, "op": "test_long", "mb": 1}))
+        .expect("a 1 MiB line is fine, from a new kernel");
+    assert_eq!(s.starts, 2);
+}
