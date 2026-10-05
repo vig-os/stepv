@@ -71,8 +71,18 @@ stepv part.step --png part.png --size 512   # thumbnail, with the broken-face ov
 stepv part.step --glb part.glb              # glTF 2.0: named nodes, per-face colours
 stepv part.step --info                      # header metadata as JSON; never fails
 stepv part.step --topology part.json        # exact B-rep facts: tree, radii, areas, volumes
-stepv view part.step                        # interactive viewer window
+stepv view part.step                        # interactive viewer window (GPU, or software)
 ```
+
+`stepv view` draws on the GPU (Metal, Vulkan or GL) with a model tree, a section plane, B-rep
+edges, and an inspector that names a clicked face or edge exactly: a cylinder's radius, a circle's
+length.
+- **Without a usable GPU**, for example on a headless VM or with no drivers, it opens the
+  software window and says why on stderr. `--software` asks for that window directly.
+- **`"backend"`** in the JSON line says which one ran.
+- **`--frames N`** orbits for N frames, then exits and reports the frame intervals.
+- **The Linux tarball** takes the window and GPU libraries (X11/Wayland, libvulkan, libGL) from the
+  host.
 
 Every run prints one line of JSON on stdout, describing the outcome, the header metadata and the
 kernel summary. Exit codes are `0` ok, `2` usage error, `3` no geometry (the metadata is still

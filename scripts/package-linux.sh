@@ -54,8 +54,12 @@ wrapper() { # $1 target .bin under libexec, $2 output path
 self=\$(readlink -f "\$0")
 here=\$(dirname "\$(dirname "\$self")")
 export STEPV_OCCT="\$here/libexec/stepv-occt"
-# Ours first; the host's after, for what only the host has (X11/Wayland for
-# \`stepv view\`, which the viewer dlopens).
+# Ours first; the host's after, for what only the host has: what
+# \`stepv view\` dlopens at run time (X11/Wayland/xkbcommon for the window,
+# libvulkan.so.1 / libGL / libEGL and the GPU drivers for wgpu). They load
+# against the bundled glibc; a host library that needs a newer glibc fails
+# to load, and the viewer then falls back to its software window, saying
+# so (#32; test-linux-tarball.sh checks it exits cleanly without a display).
 libs="\$here/lib:/usr/lib/$arch-linux-gnu:/usr/lib64:/usr/lib:/lib/$arch-linux-gnu:/lib64:/lib"
 exec "\$here/lib/ld.so" --library-path "\$libs" "\$here/libexec/$1" "\$@"
 EOF

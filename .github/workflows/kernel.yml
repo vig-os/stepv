@@ -95,12 +95,26 @@ jobs:
       - name: GPU viewer on Metal
         if: runner.os == 'macOS'
         # The renderer's headless tests against the real kernel, then real
-        # windows: both themes, --software, and the no-adapter fallback (#28).
-        # STEPV_REQUIRE_GPU makes a missing adapter a failure, not a skip.
-        # Linux gets the same on lavapipe in #32.
+        # windows: both themes, --software, the fallbacks, a click, and
+        # --frames on every fixture (#28, #32). STEPV_REQUIRE_GPU makes a
+        # missing adapter a failure, not a skip. The runner never presents a
+        # window, so screenshots are the viewport's render here; the Linux
+        # viewer job checks whole windows. Then the size budget (#32).
         env:
           STEPV_REQUIRE_GPU: "1"
-        run: nix develop --command just view-test
+        run: |
+          nix develop --command just view-test
+          scripts/check-size.sh target/release/stepv 16
+
+      - name: Closure size of the product (nix)
+        if: runner.os == 'Linux'
+        # #32: stepv view's runtime libraries (vulkan-loader, libGL,
+        # libxkbcommon, X11, Wayland) are now in the product's closure.
+        run: |
+          nix path-info --closure-size --human-readable .#default
+          bytes=$(nix path-info --closure-size --json .#default | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d if isinstance(d, list) else list(d.values()); print(v[0]["closureSize"])')
+          echo "closure: $((bytes / 1048576)) MiB"
+          [ "$bytes" -le $((1536 * 1048576)) ] || { echo "the product closure is over 1.5 GiB"; exit 1; }
 
       - name: Linux release tarball, proven on distros without nix
         if: runner.os == 'Linux'
@@ -119,3 +133,25 @@ jobs:
         run: |
           nix shell .#default nixpkgs#shared-mime-info nixpkgs#desktop-file-utils nixpkgs#python3 \
             --command scripts/test-linux-integration.sh
+
+  viewer-linux:
+    # #32: stepv view on Linux without a GPU: Mesa's lavapipe and Xvfb in a
+    # Debian container (scripts/test-linux-viewer.sh, also `just
+    # linux-view-test`). The renderer's tests with an adapter required; real,
+    # presented windows (whole-window screenshots required) with both
+    # themes, the fallbacks and a click; --frames on every fixture on
+    # Vulkan; the 24 MB size budget; then the GPU drivers deleted, and the
+    # viewer must fall back to software and say so.
+    name: Viewer (Linux, lavapipe)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Viewer on lavapipe and Xvfb, then with no GPU at all
+        env:
+          CARGO_BUILD_JOBS: "4"
+        run: scripts/test-linux-viewer.sh

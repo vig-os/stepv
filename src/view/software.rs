@@ -13,10 +13,17 @@ use crate::render;
 
 /// Opens a window on `scene` and runs until the user closes it. With
 /// `screenshot`, it draws one frame, saves it there as PNG, and returns.
+/// With `frames`, it orbits one degree a frame for that many frames and
+/// returns their intervals.
 ///
 /// # Errors
 /// When no window can be opened (no display) or the scene is empty.
-pub fn run(scene: &Scene, title: &str, screenshot: Option<&Path>) -> Result<(), String> {
+pub fn run(
+    scene: &Scene,
+    title: &str,
+    screenshot: Option<&Path>,
+    frames: Option<u32>,
+) -> Result<Option<super::FrameStats>, String> {
     use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 
     let mut window = Window::new(
@@ -37,6 +44,15 @@ pub fn run(scene: &Scene, title: &str, screenshot: Option<&Path>) -> Result<(), 
     let mut moving_frames = 0u32;
     let (mut w, mut h) = window.get_size();
     let mut frame: Vec<u32> = vec![0; w * h];
+    // N + 1 intervals: the first, which includes opening the window, is
+    // dropped, leaving N frames.
+    let mut bench = frames.map(|n| {
+        (
+            n + 1,
+            Vec::with_capacity(n as usize + 1),
+            std::time::Instant::now(),
+        )
+    });
 
     while window.is_open() && !window.is_key_down(Key::Escape) && !window.is_key_down(Key::Q) {
         let size = window.get_size();
@@ -84,6 +100,14 @@ pub fn run(scene: &Scene, title: &str, screenshot: Option<&Path>) -> Result<(), 
                 dirty = true;
             }
         }
+        if let Some((left, times, last)) = &mut bench {
+            controls.apply(Input::Orbit(-1.0 / 0.4, 0.0), short);
+            dirty = true;
+            let now = std::time::Instant::now();
+            times.push((now - *last).as_secs_f64() * 1e3);
+            *last = now;
+            *left = left.saturating_sub(1);
+        }
         if moved {
             moving_frames = 6;
         }
@@ -100,10 +124,14 @@ pub fn run(scene: &Scene, title: &str, screenshot: Option<&Path>) -> Result<(), 
             .update_with_buffer(&frame, w, h)
             .map_err(|e| format!("window update failed: {e}"))?;
         if let Some(path) = screenshot {
-            return save(&frame, w, h, path);
+            return save(&frame, w, h, path).map(|()| None);
+        }
+        if let Some((0, times, _)) = &mut bench {
+            // The first interval includes opening the window: not a frame.
+            return Ok(super::FrameStats::of(times.split_off(1.min(times.len()))));
         }
     }
-    Ok(())
+    Ok(bench.and_then(|(_, times, _)| super::FrameStats::of(times)))
 }
 
 /// Writes a 0RGB frame as an opaque PNG.

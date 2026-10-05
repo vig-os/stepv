@@ -3,14 +3,19 @@
 # the kernel and stepv in a Debian container, then on Mesa's lavapipe (a
 # Vulkan driver on the CPU) and Xvfb:
 #   - the GPU renderer's tests, required to find an adapter (STEPV_REQUIRE_GPU);
-#   - scripts/test-viewer.sh: real windows, light and dark, --software, and the
-#     fallback with no adapter.
+#   - scripts/test-viewer.sh: real windows, light and dark, --software, the
+#     fallbacks, a click, and --frames on every fixture; Xvfb presents, so the
+#     full window is required (STEPV_VIEW_REQUIRE_WINDOW);
+#   - the size budget: 24 MB stripped (scripts/check-size.sh);
+#   - then with the GPU drivers removed (Mesa's Vulkan ICDs, EGL vendor and
+#     DRI drivers deleted): `stepv view --frames 5` falls back to the
+#     software window and says so (#32).
 #
 #   scripts/test-linux-viewer.sh [screenshot dir]
 #
-# CI's Linux smoke test on lavapipe is #32; this is the local loop. Builds
-# with CARGO_BUILD_JOBS=2: podman's default 4 GiB VM runs out of memory
-# compiling `ash` at full parallelism. The cache lives in the
+# The local loop, and CI's Linux viewer job (kernel.yml). Builds with
+# CARGO_BUILD_JOBS=2 by default: podman's default 4 GiB VM runs out of
+# memory compiling `ash` at full parallelism (CI sets more). The cache lives in the
 # `stepv-linux-viewer` volume.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,7 +37,8 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
 [ -n "$shots" ] && mkdir -p "$shots" && mounts+=(-v "$shots:/shots")
 # shellcheck disable=SC2016 # expanded by the container's shell, not this one
 "$engine" run --rm "${mounts[@]}" -w /src \
-  -e CARGO_TARGET_DIR=/build/target -e RUSTUP_HOME=/build/rustup -e CARGO_BUILD_JOBS=2 \
+  -e CARGO_TARGET_DIR=/build/target -e RUSTUP_HOME=/build/rustup -e CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+  -e STEPV_VIEW_REQUIRE_WINDOW=1 \
   -e STEPV_OCCT=/build/kernel/stepv-occt -e STEPV_REQUIRE_GPU=1 \
   "$image" sh -euc '
     cmake -S kernel -B /build/kernel -DCMAKE_BUILD_TYPE=Release >/dev/null
@@ -42,4 +48,14 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
     cargo test -q --release --test view
     xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-viewer.sh /build/target/release/stepv \
       "$([ -d /shots ] && echo /shots/linux)"
+    scripts/check-size.sh /build/target/release/stepv 24
+    # No GPU at all: the drivers gone, the viewer must still open, in
+    # software, and say why.
+    rm -rf /usr/share/vulkan/icd.d /usr/share/glvnd/egl_vendor.d /usr/lib/*/dri
+    out=$(xvfb-run -a -s "-screen 0 1280x800x24" /build/target/release/stepv view \
+      tests/data/assembly.step --frames 5 2>/tmp/err) || true
+    echo "$out" | grep -q "\"backend\":\"software\"" \
+      || { echo "FAIL: no GPU: $out $(cat /tmp/err)" >&2; exit 1; }
+    grep -q "no usable GPU adapter" /tmp/err || { echo "FAIL: no GPU, and no note: $(cat /tmp/err)" >&2; exit 1; }
+    echo "ok: without GPU drivers, stepv view falls back to software and says so"
   '
