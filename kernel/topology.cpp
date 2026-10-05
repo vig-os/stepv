@@ -62,7 +62,9 @@
 #include <gp_Sphere.hxx>
 #include <gp_Torus.hxx>
 
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -224,6 +226,9 @@ TopTools_IndexedMapOfShape topology_edges(const TopoDS_Shape& shape) {
 namespace {
 
 std::string prototype_json(const TopoDS_Shape& shape) {
+    // Test hook (tests/cli.rs, #38): a topology that fails after a good mesh.
+    if (std::getenv("STEPV_OCCT_TEST_TOPOLOGY_FAIL"))
+        throw Standard_Failure("test hook: STEPV_OCCT_TEST_TOPOLOGY_FAIL");
     std::ostringstream o, faces;
     o.precision(17);
     faces.precision(17);
@@ -320,15 +325,19 @@ std::string write_topology(const std::string& path, const std::vector<TopoNode>&
     }
     // Prototypes are independent: in parallel, each into its own string.
     std::vector<std::string> json(prototypes.size()), errors(prototypes.size());
+    std::atomic<bool> oom{false};
     OSD_Parallel::For(0, static_cast<int>(prototypes.size()), [&](int i) {
         try {
             json[i] = prototype_json(prototypes[i]);
+        } catch (const std::bad_alloc&) {
+            oom = true;  // rethrown below: no exception crosses a worker thread
         } catch (const Standard_Failure& e) {
             errors[i] = e.GetMessageString();
         } catch (const std::exception& e) {
             errors[i] = e.what();
         }
     });
+    if (oom) throw std::bad_alloc();
     o << "],\"prototypes\":[";
     for (std::size_t i = 0; i < prototypes.size(); ++i) {
         if (!errors[i].empty())
@@ -341,7 +350,12 @@ std::string write_topology(const std::string& path, const std::vector<TopoNode>&
     const std::string text = o.str();
     f.write(text.data(), static_cast<std::streamsize>(text.size()));
     f.close();
-    return f ? "" : "topology output write failed";
+    if (f) return "";
+    // No partial file for a reader to take for a topology (#38). Inside the
+    // CLI's sandbox it can only be emptied, not removed: its parent does.
+    std::ofstream(path, std::ios::binary | std::ios::trunc).close();
+    std::remove(path.c_str());
+    return "topology output write failed";
 }
 
 }  // namespace stepv

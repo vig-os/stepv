@@ -189,6 +189,9 @@ struct Summary {
     // references, and how many of them could not be read (missing, or
     // outside what a sandbox lets this process open).
     std::size_t external_files = 0, external_missing = 0;
+    // The exact topology failed after a good mesh (#38): not fatal, the
+    // mesh is still written and the run still succeeds.
+    std::optional<std::string> topology_error;
     double t_read_ms = 0, t_transfer_ms = 0, t_mesh_ms = 0, t_extract_ms = 0, t_topology_ms = 0;
 };
 
@@ -234,6 +237,8 @@ std::string to_json(const Summary& s) {
       << ",\"segments\":" << s.segments << ",\"edges\":" << s.edges;
     o << ",\"external_files\":" << s.external_files
       << ",\"external_missing\":" << s.external_missing;
+    o << ",\"topology_error\":";
+    if (s.topology_error) o << '"' << json_escape(*s.topology_error) << '"'; else o << "null";
     o << ",\"t_read_ms\":" << s.t_read_ms << ",\"t_transfer_ms\":" << s.t_transfer_ms
       << ",\"t_mesh_ms\":" << s.t_mesh_ms << ",\"t_extract_ms\":" << s.t_extract_ms
       << ",\"t_topology_ms\":" << s.t_topology_ms;
@@ -1047,11 +1052,20 @@ int run(const std::string& input_arg, const std::string& mesh_out,
             if (fresh) shapes.push_back(prototypes.at(entry(p.prototype)));
             placed.push_back({p.name, it->second, p.location.Transformation()});
         }
-        if (const std::string err = stepv::write_topology(topology_out, tree, placed, shapes);
-            !err.empty()) {
-            s.error = err;
-            return kExitFailed;
+        // A failure here costs the topology alone: the mesh is written, and
+        // write_topology leaves no partial file. Out of memory is the run's
+        // memory cap, as anywhere else: it stays fatal.
+        std::string err;
+        try {
+            err = stepv::write_topology(topology_out, tree, placed, shapes);
+        } catch (const std::bad_alloc&) {
+            throw;
+        } catch (const Standard_Failure& e) {
+            err = std::string("OCCT: ") + e.GetMessageString();
+        } catch (const std::exception& e) {
+            err = e.what();
         }
+        if (!err.empty()) s.topology_error = err;
         s.t_topology_ms = ms_since(t0);
     }
 

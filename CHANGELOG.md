@@ -101,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failed topology no longer fails the run** ([#38](https://github.com/vig-os/stepv/issues/38)):
+  the kernel reports `topology_error` and keeps the mesh, so `--png --topology` still writes the
+  PNG; `--topology` alone still fails
+  - `stepv view` opens such a file without the inspector after one kernel run, not two
 - Quick Look preview ([#20](https://github.com/vig-os/stepv/issues/20)): flat parts and sketches
   open face-on, not edge-on (also in thumbnails, `stepv --png` and `stepv view`); the scroll wheel
   zooms; the info text sits on a light panel and reads in dark mode

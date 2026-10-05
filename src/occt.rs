@@ -68,6 +68,11 @@ pub struct Summary {
     pub external_files: usize,
     #[serde(default)]
     pub external_missing: usize,
+    /// Why the exact topology (`--topology`) failed, when it did after a
+    /// good mesh (#38): the run still succeeds, without the topology file.
+    /// Absent from older kernels, which failed the run instead.
+    #[serde(default)]
+    pub topology_error: Option<String>,
     pub t_read_ms: f64,
     pub t_transfer_ms: f64,
     pub t_mesh_ms: f64,

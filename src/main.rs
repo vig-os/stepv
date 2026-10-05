@@ -36,6 +36,8 @@ OPTIONS:
     --mesh <path>        Write the raw STEPVMSH buffers (for front-ends)
     --topology <path>    Also write the exact topology as JSON: assembly tree,
                          surface/curve types and parameters, areas, volumes
+                         (if it fails beside --png/--glb/--mesh, the output is
+                         still written, with \"topology_error\" in the report)
     --size <px>          PNG edge length, 16..=4096 (default 512)
     --quality <q>        thumbnail | preview (default thumbnail)
     --timeout <secs>     Hard wall-clock cap (default 20)
@@ -247,20 +249,8 @@ fn run(args: &Args) -> (u8, Value) {
     if args.view {
         // The exact B-rep for the inspector (#29) comes with the mesh.
         let topo_tmp = temp_path("json");
-        let mut result = tessellate(args, &mut report, None, Some(&topo_tmp));
-        let mut topo_bytes = std::fs::read(&topo_tmp);
-        let _ = std::fs::remove_file(&topo_tmp);
-        // The kernel failed in the topology stage, after the mesh: open the
-        // viewer without the inspector rather than not at all (#29 review).
-        if result.is_err() && topology_failed(&report) {
-            eprintln!(
-                "stepv: the exact topology failed ({}); opening without the inspector",
-                report["error"].as_str().unwrap_or("unknown error")
-            );
-            report = json!({ "stepv": report["stepv"], "info": report["info"] });
-            result = tessellate(args, &mut report, None, None);
-            topo_bytes = Err(std::io::Error::other("the kernel's topology stage failed"));
-        }
+        let result = tessellate(args, &mut report, None, Some(&topo_tmp));
+        let topo_bytes = topology_bytes(&report, &topo_tmp);
         let scene = match result {
             Ok((s, _)) => s,
             Err(code) => return (code, report),
@@ -355,18 +345,31 @@ fn run(args: &Args) -> (u8, Value) {
         cache_path.as_deref(),
         topology_tmp.as_deref(),
     );
-    let topology = topology_tmp.as_ref().map(|t| {
-        let bytes = std::fs::read(t);
-        let _ = std::fs::remove_file(t);
-        bytes
-    });
+    let topology = topology_tmp.as_ref().map(|t| topology_bytes(&report, t));
     let (scene, raw) = match result {
         Ok(s) => s,
         Err(code) => return (code, report),
     };
     report["worst_face"] = json!(scene.worst_face().map(|s| format!("{s:?}").to_lowercase()));
 
-    if let (Some(bytes), Some(dest)) = (topology, &args.topology) {
+    // The topology failed after a good mesh (#38): with an output, reported
+    // beside it; asked for alone, the run failed.
+    let topology_error = report["kernel"]["topology_error"]
+        .as_str()
+        .map(str::to_owned);
+    if let Some(e) = &topology_error {
+        if args.output.is_none() {
+            return fail(report, EXIT_FAILED, "error", &format!("topology: {e}"));
+        }
+        report["topology_error"] = json!(e);
+        // An older topology at the destination would pass for this model's.
+        if let Some(dest) = &args.topology {
+            let _ = std::fs::remove_file(dest);
+        }
+    }
+    if topology_error.is_none()
+        && let (Some(bytes), Some(dest)) = (topology, &args.topology)
+    {
         // The kernel wrote it: a file that does not parse, or does not match
         // the mesh it came with, is a stepv bug.
         let checked = bytes.map_err(|e| e.to_string()).and_then(|b| {
@@ -443,10 +446,17 @@ fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
     code
 }
 
-/// Whether a failed kernel run got as far as the topology, its last stage:
-/// the mesh was fine, only `--topology` failed.
-fn topology_failed(report: &Value) -> bool {
-    report["kernel"]["stage"] == "topology"
+/// The topology the kernel wrote to `tmp`, which is removed: an error when
+/// the kernel reported the topology failed (#38), whatever the file holds.
+fn topology_bytes(report: &Value, tmp: &Path) -> std::io::Result<Vec<u8>> {
+    let bytes = std::fs::read(tmp);
+    let _ = std::fs::remove_file(tmp);
+    match report["kernel"]["topology_error"].as_str() {
+        Some(e) => Err(std::io::Error::other(format!(
+            "the kernel's topology failed: {e}"
+        ))),
+        None => bytes,
+    }
 }
 
 /// Runs the kernel and decodes its buffers. On failure, fills `report` and
@@ -497,6 +507,7 @@ fn tessellate(
         "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
         "peak_rss_bytes": s.peak_rss_bytes, "sandbox": s.sandbox,
         "external_files": s.external_files, "external_missing": s.external_missing,
+        "topology_error": s.topology_error,
     })));
     // Loudly: the run worked, but less contained than it should have been.
     if let Some(s) = run.summary.as_ref().filter(|s| !s.sandboxed()) {
@@ -716,18 +727,6 @@ mod tests {
                 .limits
                 .timeout,
             Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn only_a_topology_stage_failure_is_retried() {
-        assert!(topology_failed(&json!({"kernel": {"stage": "topology"}})));
-        for stage in ["read", "transfer", "mesh", "done"] {
-            assert!(!topology_failed(&json!({"kernel": {"stage": stage}})));
-        }
-        assert!(
-            !topology_failed(&json!({"kernel": null})),
-            "no summary: a crash, not this"
         );
     }
 
