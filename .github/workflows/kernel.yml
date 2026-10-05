@@ -52,6 +52,20 @@ jobs:
       - name: Build the product and the kernel
         run: nix build --print-build-logs .#default .#kernel
 
+      - name: Closure size of the product (nix)
+        if: runner.os == 'Linux'
+        # #32: stepv view's runtime libraries (vulkan-loader, libGL,
+        # libxkbcommon, X11, Wayland) are now in the product's closure. Here,
+        # straight after the build and on the path it printed: later steps
+        # fetch the corpus into tests/fixtures, which is part of the flake's
+        # source, so `.#default` would name a different, unbuilt derivation.
+        run: |
+          out=$(nix build --no-link --print-out-paths .#default)
+          nix path-info --closure-size --human-readable "$out"
+          bytes=$(nix path-info --closure-size --json "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d if isinstance(d, list) else list(d.values()); print(v[0]["closureSize"])')
+          echo "closure: $((bytes / 1048576)) MiB"
+          [ "$bytes" -le $((1536 * 1048576)) ] || { echo "the product closure is over 1.5 GiB"; exit 1; }
+
       - name: Build the Dolphin thumbnail plugin
         if: runner.os == 'Linux'
         run: nix build --print-build-logs .#kde-thumbnailer
@@ -105,16 +119,6 @@ jobs:
         run: |
           nix develop --command just view-test
           scripts/check-size.sh target/release/stepv 16
-
-      - name: Closure size of the product (nix)
-        if: runner.os == 'Linux'
-        # #32: stepv view's runtime libraries (vulkan-loader, libGL,
-        # libxkbcommon, X11, Wayland) are now in the product's closure.
-        run: |
-          nix path-info --closure-size --human-readable .#default
-          bytes=$(nix path-info --closure-size --json .#default | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d if isinstance(d, list) else list(d.values()); print(v[0]["closureSize"])')
-          echo "closure: $((bytes / 1048576)) MiB"
-          [ "$bytes" -le $((1536 * 1048576)) ] || { echo "the product closure is over 1.5 GiB"; exit 1; }
 
       - name: Linux release tarball, proven on distros without nix
         if: runner.os == 'Linux'
