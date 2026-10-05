@@ -248,6 +248,10 @@
                   install -Dm644 ${./LICENSE} $out/share/doc/stepv/LICENSE
                   install -Dm644 ${./licenses/OCCT-LGPL-2.1.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-2.1.txt
                   install -Dm644 ${./licenses/OCCT-LGPL-EXCEPTION-1.0.txt} $out/share/doc/stepv/licenses/OCCT-LGPL-EXCEPTION-1.0.txt
+                  # The viewer's embedded fonts (#28).
+                  for f in OFL-1.1 Ubuntu-font-1.0 Hack-font; do
+                    install -Dm644 ${./licenses}/$f.txt $out/share/doc/stepv/licenses/$f.txt
+                  done
                 '';
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

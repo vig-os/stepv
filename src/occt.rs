@@ -84,11 +84,14 @@ impl Summary {
     /// Whether the kernel ran fully sandboxed.
     #[must_use]
     pub fn sandboxed(&self) -> bool {
-        matches!(
-            self.sandbox.as_deref(),
-            Some("landlock+seccomp" | "macos-profile")
-        )
+        self.sandbox.as_deref().is_some_and(full_sandbox)
     }
+}
+
+/// Whether a reported `"sandbox"` is the complete one.
+#[must_use]
+pub fn full_sandbox(sandbox: &str) -> bool {
+    matches!(sandbox, "landlock+seccomp" | "macos-profile")
 }
 
 /// How a kernel run ended.

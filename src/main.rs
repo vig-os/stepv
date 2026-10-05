@@ -17,7 +17,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::{Value, json};
 use stepv::occt::{self, Limits, Outcome};
 use stepv::topology::Topology;
-use stepv::{Deflection, Scene, cache, glb, header, render, viewer};
+use stepv::{Deflection, Scene, cache, glb, header, render, view};
 
 const USAGE: &str = "\
 stepv — STEP/IGES/BREP preview and thumbnails
@@ -43,13 +43,17 @@ OPTIONS:
     --show-construction  Draw construction curves beside solids
     --no-cache           Neither read nor write the cache
     --info               Print header metadata as JSON and exit
+    --software           view: the software window, not the GPU
+    --theme <t>          view: auto | light | dark (default auto: the OS's)
     -V, --version        Print the version
     -h, --help           Print this help
 
 VIEWER:
     Drag to orbit, right- or shift-drag to pan, scroll to zoom; R reset,
     F front, T top, C construction curves, Q or Esc to quit. Defaults to
-    --quality preview and --timeout 120.
+    --quality preview and --timeout 120. Draws on the GPU (Metal, Vulkan
+    or GL), or in software when there is no usable adapter; the JSON line
+    says which as \"backend\".
 
 OUTPUT:
     One JSON line on stdout for every run past argument parsing, success
@@ -90,6 +94,9 @@ struct Args {
     show_construction: bool,
     cache: bool,
     view: bool,
+    /// `view --software`.
+    software: bool,
+    theme: view::ThemePref,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -104,6 +111,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         show_construction: false,
         cache: true,
         view: false,
+        software: false,
+        theme: view::ThemePref::Auto,
     };
     let argv = match argv.split_first() {
         Some((first, rest)) if first == "view" => {
@@ -165,6 +174,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--show-construction" => a.show_construction = true,
             "--no-cache" => a.cache = false,
+            "--software" => a.software = true,
+            "--theme" => a.theme = value(arg)?.parse()?,
             "--info" => a.info = true,
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             _ if input.is_some() => return Err(format!("unexpected argument {arg:?}")),
@@ -177,6 +188,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     if a.view && (a.output.is_some() || a.topology.is_some()) {
         return Err("view takes no --png/--glb/--mesh/--topology".into());
+    }
+    if !a.view && (a.software || a.theme != view::ThemePref::Auto) {
+        return Err("--software and --theme are for `stepv view`".into());
     }
     if !a.info && !a.view && a.output.is_none() && a.topology.is_none() {
         return Err("nothing to do: give --png, --glb, --topology or --info".into());
@@ -230,9 +244,19 @@ fn run(args: &Args) -> (u8, Value) {
             _ => "",
         };
         let title = format!("stepv — {name} ({} parts){warn}", scene.parts.len());
-        return match viewer::run(&scene, &title) {
-            Ok(()) => {
+        let sandbox = report["kernel"]["sandbox"].as_str().map(str::to_owned);
+        let opts = view::Options {
+            software: args.software,
+            theme: args.theme,
+            sandboxed: sandbox.as_deref().is_some_and(occt::full_sandbox),
+            sandbox,
+            file: name,
+            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT").map(PathBuf::from),
+        };
+        return match view::run(scene, &title, &opts) {
+            Ok(backend) => {
                 report["status"] = json!("ok");
+                report["backend"] = json!(backend.name());
                 (EXIT_OK, report)
             }
             Err(e) => fail(report, EXIT_FAILED, "error", &e),
@@ -587,6 +611,15 @@ mod tests {
         assert_eq!(a.deflection, Deflection::PREVIEW);
         assert_eq!(a.limits.timeout, Duration::from_secs(120));
         assert!(args(&["view", "m.step", "--png", "o.png"]).is_err());
+        assert!(!a.software);
+        assert_eq!(a.theme, view::ThemePref::Auto);
+        let a = args(&["view", "m.step", "--software", "--theme", "dark"]).unwrap();
+        assert!(a.software);
+        assert_eq!(a.theme, view::ThemePref::Dark);
+        assert!(args(&["view", "m.step", "--theme", "blue"]).is_err());
+        // Viewer options make no sense without the viewer.
+        assert!(args(&["m.step", "--png", "o.png", "--software"]).is_err());
+        assert!(args(&["m.step", "--info", "--theme", "dark"]).is_err());
         // An explicit option still wins over the view default.
         assert_eq!(
             args(&["view", "m.step", "--timeout", "5"])

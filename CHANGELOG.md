@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPU viewer** ([#28](https://github.com/vig-os/stepv/issues/28), for
+  [#21](https://github.com/vig-os/stepv/issues/21)): `stepv view` draws on the GPU through egui +
+  wgpu (Metal, Vulkan or GL)
+  - Per-face colours come from a storage buffer, and parts can be hidden, without touching the
+    geometry. The framing is the thumbnails' own, and approximated faces keep their amber stripes
+  - A toolbar, a properties panel and a status bar
+  - Light and dark themes from shadcn-style design tokens, following the OS or `--theme`
+  - The pre-#28 software window is kept as `--software`, and taken automatically, with a note, when
+    there is no usable GPU adapter. The JSON line reports `"backend"`
+  - CI checks that the Quick Look library never links the window or GPU stack
 - **Exact topology export** ([#21](https://github.com/vig-os/stepv/issues/21)): `--topology <path>`
   writes the assembly tree, and per prototype its faces' surface types and parameters (plane,
   cylinder radius, …), edges' curves and lengths, vertices, area and volume, as JSON whose indices

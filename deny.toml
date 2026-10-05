@@ -24,6 +24,15 @@ allow = [
   "MIT",
   "Unicode-3.0",
   "Zlib",
+  # #28, the GPU viewer: clipboard-win (arboard, egui's clipboard; Windows
+  # only) is Boost-licensed, permissive.
+  "BSL-1.0",
+  # #28: the fonts egui embeds in `stepv view` (epaint_default_fonts):
+  # Noto Emoji under the SIL Open Font License, Ubuntu Light under the
+  # Ubuntu Font Licence. Both allow embedding and redistribution with the
+  # licence text, which ships in licenses/ (NOTICE lists them).
+  "OFL-1.1",
+  "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.9
 

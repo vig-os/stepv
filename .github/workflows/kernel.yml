@@ -86,6 +86,22 @@ jobs:
         # register extensions; it runs locally via `just macos-test --quicklook`.
         run: nix develop --command just macos-test
 
+      - name: capi tripwire (no viewer stack in the Quick Look library)
+        # #28: libstepv_capi.a must never carry eframe, egui, winit, wgpu,
+        # naga or minifb. Checks the dependency graph and the built archive's
+        # symbols (the macOS step above built it; on Linux the script does).
+        run: nix develop --command just capi-tripwire
+
+      - name: GPU viewer on Metal
+        if: runner.os == 'macOS'
+        # The renderer's headless tests against the real kernel, then real
+        # windows: both themes, --software, and the no-adapter fallback (#28).
+        # STEPV_REQUIRE_GPU makes a missing adapter a failure, not a skip.
+        # Linux gets the same on lavapipe in #32.
+        env:
+          STEPV_REQUIRE_GPU: "1"
+        run: nix develop --command just view-test
+
       - name: Linux release tarball, proven on distros without nix
         if: runner.os == 'Linux'
         # The release artefact: binaries + every library + nix's own loader,
