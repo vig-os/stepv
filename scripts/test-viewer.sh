@@ -14,6 +14,12 @@
 #      fails (STEPV_VIEW_REJECT_ADAPTERS, a test hook).
 #   5. A click (STEPV_VIEW_PICK) in the window picks the plate's top face,
 #      and the inspector's topology names it a plane.
+#   6. `stepv view --frames 30` on every tests/data file: the GPU backend, and
+#      30 frames reported (#32's smoke test).
+#
+# STEPV_VIEW_REQUIRE_WINDOW=1 fails a GPU screenshot that fell back to the
+# viewport render: where windows are presented (Xvfb), the panels must be
+# in the picture.
 #
 #   scripts/test-viewer.sh [path/to/stepv] [screenshot dir]
 #
@@ -99,7 +105,10 @@ for theme in light dark; do
     [ "$bright" -le 60 ] || fail "dark theme toolbar is light ($bright)"
   fi
   how=window
-  grep -q "never presented" "$tmp/err" && how="viewport render: the window was never presented"
+  if grep -q "never presented" "$tmp/err"; then
+    [ "${STEPV_VIEW_REQUIRE_WINDOW:-}" = 1 ] && fail "gpu $theme: the window was never presented"
+    how="viewport render: the window was never presented"
+  fi
   echo "ok: gpu $theme on $backend (${w}x$h, $colours colours; $how)"
 done
 
@@ -143,6 +152,21 @@ read -r status backend error <<<"$(report <<<"$out")"
 grep -q "STEPV_VIEW_PICK hit part 0 face [0-9]* (Plane)" "$tmp/err" \
   || fail "the click did not pick the plate's top: $(cat "$tmp/err")"
 echo "ok: a click picks the plate's top face ($(grep -o 'face [0-9]* (Plane)' "$tmp/err"))"
+
+# 6. --frames on every committed file.
+for f in "$root"/tests/data/*.step "$root"/tests/data/*.brep "$root"/tests/data/*.igs; do
+  out=$("$stepv" view "$f" --frames 30 2>"$tmp/err") || true
+  python3 - "$out" "$(basename "$f")" "$(cat "$tmp/err")" <<'PY' || exit 1
+import json, sys
+r, name, err = json.loads(sys.argv[1] or "{}"), sys.argv[2], sys.argv[3]
+if r.get("status") != "ok" or r.get("backend") in (None, "software"):
+    sys.exit(f"FAIL: --frames on {name}: {r.get('status')} {r.get('backend')} ({r.get('error')}): {err}")
+f = r.get("frames") or {}
+if f.get("count") != 30:
+    sys.exit(f"FAIL: --frames on {name}: reported {f}")
+print(f"ok: --frames 30 on {name}: {r['backend']}, p50 {f['p50_ms']:.2f} ms, p95 {f['p95_ms']:.2f} ms")
+PY
+done
 
 if [ -n "$keep" ]; then
   mkdir -p "$keep"

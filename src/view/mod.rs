@@ -104,9 +104,46 @@ pub struct Options {
     /// `STEPV_VIEW_SCREENSHOT`: draw, save the window as PNG here, and quit.
     /// The tests' and the PR screenshots' hook.
     pub screenshot: Option<PathBuf>,
+    /// `--frames N`: orbit one degree a frame for N frames, then close and
+    /// report the frame intervals (#32's CI smoke test and a quick bench).
+    pub frames: Option<u32>,
     /// `STEPV_VIEW_PICK=x,y`: click there (fractions of the viewport) once
     /// the first frame is drawn. With `screenshot`, it waits for the pick.
     pub pick_at: Option<(f32, f32)>,
+}
+
+/// What a `--frames` run measured: wall-clock intervals between frames,
+/// as the window loop ran them (vsync-bound on a real display).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameStats {
+    pub count: u32,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+}
+
+impl FrameStats {
+    /// The statistics of `ms`, `None` when empty.
+    #[must_use]
+    pub fn of(mut ms: Vec<f64>) -> Option<Self> {
+        if ms.is_empty() {
+            return None;
+        }
+        ms.sort_by(f64::total_cmp);
+        let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
+        Some(Self {
+            count: ms.len() as u32,
+            p50_ms: at(0.5),
+            p95_ms: at(0.95),
+        })
+    }
+}
+
+/// What a viewer run did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ran {
+    pub backend: Backend,
+    /// With `--frames`.
+    pub frames: Option<FrameStats>,
 }
 
 /// Parses `STEPV_VIEW_PICK`'s `x,y`, each 0..1.
@@ -142,24 +179,28 @@ pub fn run(
     topology: Option<crate::topology::Topology>,
     title: &str,
     opts: &Options,
-) -> Result<Backend, String> {
+) -> Result<Ran, String> {
     let probe = if opts.software { None } else { gpu::probe() };
     let (backend, note) = choose(opts.software, probe);
     if let Some(note) = note {
         eprintln!("stepv: {note}");
     }
+    let software = |scene: &crate::Scene| {
+        software::run(scene, title, opts.screenshot.as_deref(), opts.frames).map(|frames| Ran {
+            backend: Backend::Software,
+            frames,
+        })
+    };
     if backend == Backend::Software {
-        software::run(&scene, title, opts.screenshot.as_deref())?;
-        return Ok(Backend::Software);
+        return software(&scene);
     }
     match app::run(scene, topology, title, opts) {
-        Ok(b) => Ok(b),
+        Ok(ran) => Ok(ran),
         // The window never opened: the probe found an adapter the window
         // could not use (a surface it cannot present to, a device it refused).
         Err((e, Some(scene))) => {
             eprintln!("stepv: the GPU viewer could not start ({e}); using the software viewer");
-            software::run(&scene, title, opts.screenshot.as_deref())?;
-            Ok(Backend::Software)
+            software(&scene)
         }
         Err((e, None)) => Err(e),
     }
@@ -175,7 +216,7 @@ pub fn run(
     _topology: Option<crate::topology::Topology>,
     _title: &str,
     _opts: &Options,
-) -> Result<Backend, String> {
+) -> Result<Ran, String> {
     Err("this stepv was built without the `viewer` feature".into())
 }
 
@@ -217,6 +258,15 @@ mod tests {
             names,
             ["metal", "vulkan", "gl", "dx12", "other", "software"]
         );
+    }
+
+    #[test]
+    fn frame_stats_take_quantiles() {
+        let s = FrameStats::of((1..=100).map(f64::from).collect()).unwrap();
+        assert_eq!((s.count, s.p50_ms, s.p95_ms), (100, 51.0, 95.0));
+        assert_eq!(FrameStats::of(vec![]), None);
+        let one = FrameStats::of(vec![7.0]).unwrap();
+        assert_eq!((one.p50_ms, one.p95_ms), (7.0, 7.0));
     }
 
     #[test]

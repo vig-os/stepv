@@ -232,12 +232,38 @@
             default =
               pkgs.runCommand "stepv-${kernel.version}"
                 {
+                  # `stepv view` dlopens its window and GPU libraries at run
+                  # time (winit, wgpu): on Linux the wrapper puts nix's on the
+                  # library path, so the product's viewer works from the
+                  # store. On NixOS the drivers come from /run/opengl-driver;
+                  # elsewhere the loader reads the host's ICD files and loads
+                  # host drivers against nix's glibc, which may fail (the
+                  # nixGL problem): the viewer then falls back to software.
+                  nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                    pkgs.makeWrapper
+                  ];
                   meta.mainProgram = "stepv";
                   meta.description = "STEP/IGES/BREP previews and thumbnails: the CLI plus its OCCT kernel";
                 }
                 ''
                     mkdir -p $out/bin $out/libexec/stepv
                     cp ${rust.packages.stepv}/bin/stepv $out/bin/stepv
+                    ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                      # The real binary stays in bin/ (.stepv-wrapped), so
+                      # occt::kernel_path() still finds ../libexec/stepv.
+                      wrapProgram $out/bin/stepv --prefix LD_LIBRARY_PATH : ${
+                        pkgs.lib.makeLibraryPath [
+                          pkgs.vulkan-loader
+                          pkgs.libGL
+                          pkgs.libxkbcommon
+                          pkgs.wayland
+                          pkgs.libx11
+                          pkgs.libxcursor
+                          pkgs.libxrandr
+                          pkgs.libxi
+                        ]
+                      }
+                    ''}
                     cp ${kernel}/libexec/stepv/stepv-occt $out/libexec/stepv/stepv-occt
                     # Linux desktop integration (S4): harmless elsewhere.
                     install -Dm644 ${./packaging/linux/stepv.thumbnailer} $out/share/thumbnailers/stepv.thumbnailer

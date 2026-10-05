@@ -21,7 +21,7 @@ use super::controls::{Controls, Input};
 use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
-use super::{Backend, Options, ThemePref, theme};
+use super::{Backend, FrameStats, Options, Ran, ThemePref, theme};
 use crate::render::Camera;
 use crate::topology::Topology;
 use crate::{FaceStatus, Scene};
@@ -142,6 +142,10 @@ struct Viewer {
     report_pick: bool,
     /// Draw the B-rep edges (#31).
     show_edges: bool,
+    /// `--frames`: frames left, their intervals, the last frame's time.
+    bench: Option<(u32, Vec<f64>, std::time::Instant)>,
+    /// What the bench measured, for `run` to report.
+    measured: Arc<Mutex<Option<FrameStats>>>,
     /// The model tree (#30).
     tree: Tree,
     /// The tree generation the GPU's visibility matches.
@@ -157,6 +161,7 @@ impl Viewer {
         topology: Option<Topology>,
         opts: &Options,
         error: Arc<Mutex<Option<String>>>,
+        measured: Arc<Mutex<Option<FrameStats>>>,
     ) -> Result<Self, String> {
         let rs = cc
             .wgpu_render_state
@@ -214,6 +219,10 @@ impl Viewer {
             pick_at: opts.pick_at,
             report_pick: false,
             show_edges: true,
+            bench: opts
+                .frames
+                .map(|n| (n, Vec::with_capacity(n as usize), std::time::Instant::now())),
+            measured,
             tree,
             uploaded: 0,
             reveal: false,
@@ -533,6 +542,28 @@ impl Viewer {
         }
     }
 
+    /// `--frames`: one degree of orbit and one interval a frame; at the
+    /// count, report and close.
+    fn bench_step(&mut self, ctx: &egui::Context) {
+        let Some((left, times, last)) = &mut self.bench else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        times.push((now - *last).as_secs_f64() * 1e3);
+        *last = now;
+        if *left == 0 {
+            // The first interval includes opening the window: not a frame.
+            let ms = times.split_off(1.min(times.len()));
+            *self.measured.lock().unwrap() = FrameStats::of(ms);
+            self.bench = None;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        *left -= 1;
+        self.controls.camera.azimuth_deg = (self.controls.camera.azimuth_deg + 1.0) % 360.0;
+        ctx.request_repaint();
+    }
+
     /// Collects a finished pick; asks for another frame while one is out.
     fn finish_pick(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
         let Some(p) = &self.pending else { return };
@@ -770,6 +801,7 @@ impl eframe::App for Viewer {
         };
         let short = ctx.content_rect().size().min_elem();
         self.keys(&ctx, short);
+        self.bench_step(&ctx);
         let t = theme::tokens(root.visuals().dark_mode);
         let bar = |fill| {
             egui::Frame::NONE
@@ -839,10 +871,12 @@ pub(super) fn run(
     topology: Option<Topology>,
     title: &str,
     opts: &Options,
-) -> Result<Backend, (String, Option<Scene>)> {
+) -> Result<Ran, (String, Option<Scene>)> {
     let slot = Arc::new(Mutex::new(Some(scene)));
     let used = Arc::new(Mutex::new(None::<Backend>));
     let error = Arc::new(Mutex::new(None::<String>));
+    let measured = Arc::new(Mutex::new(None::<FrameStats>));
+    let measured2 = measured.clone();
     let native = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
@@ -880,7 +914,7 @@ pub(super) fn run(
         native,
         Box::new(move |cc| {
             let scene = slot2.lock().unwrap().take().ok_or("no scene")?;
-            match Viewer::new(cc, &scene, topology, &opts2, error2) {
+            match Viewer::new(cc, &scene, topology, &opts2, error2, measured2) {
                 // The GPU has it; the CPU copy goes now (#28: the prototype
                 // held both, 2.1 GB on the stress assembly).
                 Ok(v) => {
@@ -900,7 +934,10 @@ pub(super) fn run(
         return Err((e, None));
     }
     match (result, backend) {
-        (Ok(()), Some(b)) => Ok(b),
+        (Ok(()), Some(backend)) => Ok(Ran {
+            backend,
+            frames: *measured.lock().unwrap(),
+        }),
         (Ok(()), None) => Err((
             "the viewer closed before it opened".into(),
             slot.lock().unwrap().take(),

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Viewer CI and packaging** ([#32](https://github.com/vig-os/stepv/issues/32))
+  - `stepv view --frames N`: orbit for N frames, exit, and report the frame intervals in the JSON
+    line
+  - A Linux CI job on Mesa's lavapipe and Xvfb runs the viewer for real: whole windows,
+    `--frames` on every fixture, and the software fallback with the GPU drivers removed
+  - A stripped binary-size budget: 16 MB on macOS (11.7 today), 24 MB on Linux (15.3)
+  - The nix product's viewer finds its window and GPU libraries on Linux, and the tarball's
+    launcher documents why the host's come after its own
 - **B-rep edges and edge picking** ([#31](https://github.com/vig-os/stepv/issues/31)): `stepv view`
   draws the model's exact edges (E toggles them), and clicking one shows its curve (a circle's
   radius, ⌀, centre and normal) and its length

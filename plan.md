@@ -844,6 +844,40 @@ and #34 (capping, fat lines).
   - Another checks that both renderers stripe the same pixels (IoU > 0.9).
   - Missing faces are a line (their outline), drawn on top in both.
 
+### Viewer CI and packaging (#32, 2026-10-05)
+
+- **`--frames N`** is the bench mode that exits. Both windows orbit 1° a frame for N frames and
+  report the wall-clock intervals as `"frames": {count, p50_ms, p95_ms}`. The first interval,
+  which opens the window, is dropped.
+  - On a display these are vsync-bound: about 16.7 ms on Metal.
+  - On lavapipe under Xvfb they are p50 6–7 ms for the fixtures.
+- **CI, `Viewer (Linux, lavapipe)`** (kernel.yml) runs `scripts/test-linux-viewer.sh`, a Debian
+  trixie container with mesa-vulkan-drivers and Xvfb:
+  - the renderer's tests, with an adapter required;
+  - the window checks, where Xvfb presents, so whole-window screenshots are required
+    (`STEPV_VIEW_REQUIRE_WINDOW`);
+  - `--frames 30` on every fixture, asserting a GPU backend;
+  - the 24 MB budget;
+  - then the Vulkan ICDs, EGL vendor files and DRI drivers are deleted, and `--frames 5` must
+    report `software` with the "no usable GPU adapter" note.
+  - The macOS lane already ran the same window checks on Metal (#28). It adds the `--frames` smoke
+    test and the 16 MB budget.
+- **Size**, stripped (`scripts/check-size.sh`): macOS 11.7 MB, Linux 15.3 MB. The GPU stack
+  roughly doubled the CLI.
+- **`cargo deny`:** bans, licenses and sources already run over the whole tree in `nix flake
+  check` (all features), and advisories in their own step. The viewer's licences were settled in
+  #28.
+- **Linux tarball:** the launcher runs our binary through our loader with
+  `--library-path ours:host`.
+  - The viewer's dlopened window and GPU libraries come from the host and load against our glibc.
+  - One that needs a newer glibc fails to load, and the viewer falls back to software.
+  - `test-linux-tarball.sh` now checks that `stepv view` exits cleanly (3, with its JSON line) in
+    the display-less distro containers.
+- **nix:** on Linux, the product's `bin/stepv` is wrapped with `LD_LIBRARY_PATH` for
+  vulkan-loader, libGL, libxkbcommon, Wayland and the X11 libraries. The real binary stays in
+  `bin/`, so the kernel is still found at `../libexec`. CI prints the closure size and holds it to
+  1.5 GiB.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -857,7 +891,7 @@ Agent work, in order:
 4. **#21 Viewer: model tree, sections, measurements** (`priority:medium`). The kernel side is
    `--topology`. The platform is decided: B, egui + wgpu ("Viewer stack" above). The work is
    #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges (done: "Edges and the overlay" above) →
-   #32 CI and packaging → #33 measurements → #34 capping.
+   #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements → #34 capping.
 
 Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
 toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.

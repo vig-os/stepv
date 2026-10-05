@@ -45,6 +45,8 @@ OPTIONS:
     --info               Print header metadata as JSON and exit
     --software           view: the software window, not the GPU
     --theme <t>          view: auto | light | dark (default auto: the OS's)
+    --frames <n>         view: orbit for n frames, then exit and report the
+                         frame intervals (\"frames\" in the JSON)
     -V, --version        Print the version
     -h, --help           Print this help
 
@@ -98,6 +100,8 @@ struct Args {
     view: bool,
     /// `view --software`.
     software: bool,
+    /// `view --frames N`.
+    frames: Option<u32>,
     theme: view::ThemePref,
 }
 
@@ -114,6 +118,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         cache: true,
         view: false,
         software: false,
+        frames: None,
         theme: view::ThemePref::Auto,
     };
     let argv = match argv.split_first() {
@@ -177,6 +182,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--show-construction" => a.show_construction = true,
             "--no-cache" => a.cache = false,
             "--software" => a.software = true,
+            "--frames" => {
+                let n: u32 = value(arg)?.parse().map_err(|_| "--frames needs a number")?;
+                if !(1..=100_000).contains(&n) {
+                    return Err("--frames must be within 1..=100000".into());
+                }
+                a.frames = Some(n);
+            }
             "--theme" => a.theme = value(arg)?.parse()?,
             "--info" => a.info = true,
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
@@ -191,8 +203,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if a.view && (a.output.is_some() || a.topology.is_some()) {
         return Err("view takes no --png/--glb/--mesh/--topology".into());
     }
-    if !a.view && (a.software || a.theme != view::ThemePref::Auto) {
-        return Err("--software and --theme are for `stepv view`".into());
+    if !a.view && (a.software || a.frames.is_some() || a.theme != view::ThemePref::Auto) {
+        return Err("--software, --frames and --theme are for `stepv view`".into());
     }
     if !a.info && !a.view && a.output.is_none() && a.topology.is_none() {
         return Err("nothing to do: give --png, --glb, --topology or --info".into());
@@ -284,15 +296,31 @@ fn run(args: &Args) -> (u8, Value) {
             sandboxed: sandbox.as_deref().is_some_and(occt::full_sandbox),
             sandbox,
             file: name,
-            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT").map(PathBuf::from),
+            // --frames closes the window itself: with a screenshot too,
+            // whichever came first would win, and the other go missing.
+            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT")
+                .filter(|_| {
+                    let keep = args.frames.is_none();
+                    if !keep {
+                        eprintln!("stepv: --frames ignores STEPV_VIEW_SCREENSHOT");
+                    }
+                    keep
+                })
+                .map(PathBuf::from),
+            frames: args.frames,
             pick_at: std::env::var("STEPV_VIEW_PICK")
                 .ok()
                 .and_then(|s| view::parse_pick_at(&s)),
         };
         return match view::run(scene, topology, &title, &opts) {
-            Ok(backend) => {
+            Ok(ran) => {
                 report["status"] = json!("ok");
-                report["backend"] = json!(backend.name());
+                report["backend"] = json!(ran.backend.name());
+                if let Some(f) = ran.frames {
+                    report["frames"] = json!({
+                        "count": f.count, "p50_ms": f.p50_ms, "p95_ms": f.p95_ms,
+                    });
+                }
                 (EXIT_OK, report)
             }
             Err(e) => fail(report, EXIT_FAILED, "error", &e),
@@ -662,6 +690,12 @@ mod tests {
         assert!(a.software);
         assert_eq!(a.theme, view::ThemePref::Dark);
         assert!(args(&["view", "m.step", "--theme", "blue"]).is_err());
+        assert_eq!(
+            args(&["view", "m.step", "--frames", "30"]).unwrap().frames,
+            Some(30)
+        );
+        assert!(args(&["view", "m.step", "--frames", "0"]).is_err());
+        assert!(args(&["m.step", "--png", "o.png", "--frames", "3"]).is_err());
         // Viewer options make no sense without the viewer.
         assert!(args(&["m.step", "--png", "o.png", "--software"]).is_err());
         assert!(args(&["m.step", "--info", "--theme", "dark"]).is_err());

@@ -24,6 +24,12 @@ for image in debian:11 ubuntu:22.04 ubuntu:24.04 fedora:41; do
     printf "ISO-10303-21;\nHEADER;\nENDSEC;\n" > /tmp/bad.step
     set +e; $s /tmp/bad.step --png /tmp/bad.png --no-cache >/dev/null; rc=$?; set -e
     test "$rc" = 3
+    # The viewer with no display (#32): a clean exit 3 and its JSON line,
+    # whatever the GPU libraries the host has or lacks; never a crash or
+    # a hang.
+    set +e; out=$(timeout 120 $s view /data/assembly.step --frames 1 2>/dev/null); rc=$?; set -e
+    test "$rc" = 3
+    echo "$out" | grep -q "\"status\":\"error\""
     echo ok
   '
 done

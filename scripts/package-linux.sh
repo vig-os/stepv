@@ -28,7 +28,13 @@ trap 'rm -rf "$stage"' EXIT
 pkg="$stage/stepv"
 mkdir -p "$pkg/bin" "$pkg/libexec" "$pkg/lib"
 
-install -m755 "$result/bin/stepv" "$pkg/libexec/stepv.bin"
+# The real binary: on Linux the nix product's bin/stepv is makeWrapper's
+# script (LD_LIBRARY_PATH for the viewer's libraries, #32), and the binary is
+# bin/.stepv-wrapped. The tarball has its own launcher (below), which takes
+# those libraries from the host instead.
+bin="$result/bin/stepv"
+[ -e "$result/bin/.stepv-wrapped" ] && bin="$result/bin/.stepv-wrapped"
+install -m755 "$bin" "$pkg/libexec/stepv.bin"
 install -m755 "$result/libexec/stepv/stepv-occt" "$pkg/libexec/stepv-occt.bin"
 cp -r "$result/share" "$pkg/share"
 chmod -R u+w "$pkg/share"
@@ -54,8 +60,12 @@ wrapper() { # $1 target .bin under libexec, $2 output path
 self=\$(readlink -f "\$0")
 here=\$(dirname "\$(dirname "\$self")")
 export STEPV_OCCT="\$here/libexec/stepv-occt"
-# Ours first; the host's after, for what only the host has (X11/Wayland for
-# \`stepv view\`, which the viewer dlopens).
+# Ours first; the host's after, for what only the host has: what
+# \`stepv view\` dlopens at run time (X11/Wayland/xkbcommon for the window,
+# libvulkan.so.1 / libGL / libEGL and the GPU drivers for wgpu). They load
+# against the bundled glibc; a host library that needs a newer glibc fails
+# to load, and the viewer then falls back to its software window, saying
+# so (#32; test-linux-tarball.sh checks it exits cleanly without a display).
 libs="\$here/lib:/usr/lib/$arch-linux-gnu:/usr/lib64:/usr/lib:/lib/$arch-linux-gnu:/lib64:/lib"
 exec "\$here/lib/ld.so" --library-path "\$libs" "\$here/libexec/$1" "\$@"
 EOF
