@@ -1002,6 +1002,20 @@ fn draw_mesh(pass: &mut wgpu::RenderPass<'_>, scene: &GpuScene, only: Option<usi
     }
 }
 
+/// The texel of a `w` × `h` target under point `at` of a viewport whose
+/// top-left is `min` and size is `size` (any units, both alike): the target
+/// may be smaller than the viewport in pixels (clamped to the texture limit),
+/// so the mapping goes through the viewport fraction, not the display scale.
+#[must_use]
+pub fn texel_at(min: [f32; 2], size: [f32; 2], at: [f32; 2], w: u32, h: u32) -> (u32, u32) {
+    let fx = ((at[0] - min[0]) / size[0].max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+    let fy = ((at[1] - min[1]) / size[1].max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+    (
+        ((fx * w as f32) as u32).min(w.saturating_sub(1)),
+        ((fy * h as f32) as u32).min(h.saturating_sub(1)),
+    )
+}
+
 /// The id pass's target: single-sample ids and depth.
 pub struct IdTarget {
     texture: wgpu::Texture,
@@ -1061,7 +1075,11 @@ impl PendingPick {
         match self.state.load(std::sync::atomic::Ordering::Acquire) {
             0 => None,
             1 => {
-                let data = self.buffer.slice(..).get_mapped_range().ok()?;
+                // A mapped buffer that will not read is a miss, not "still
+                // pending": a pending pick asks for frames forever.
+                let Ok(data) = self.buffer.slice(..).get_mapped_range() else {
+                    return Some(None);
+                };
                 let word =
                     |i: usize| u32::from_le_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
                 let (part, face) = (word(0), word(1));
@@ -1867,14 +1885,14 @@ mod tests {
         let gs = g.upload(&two_boxes());
         let (w, h) = (160, 90);
         let (px, py) = pixel_of(&gs, &FRONT, w, h, [0.5, 0.0, 0.5]);
-        // Cut away y > 0.5: the front of box 0 goes, and the pick goes
-        // through the cut to the inside of its back face (face 3, y = 1).
+        // Cut away y > 0.5: only the back half goes, so the front face
+        // (face 2, y = 0) is still what the pick hits.
         let view = View {
             section: Some([0.0, 1.0, 0.0, 0.5]),
             ..View::new(FRONT)
         };
-        // dot(p, (0,1,0)) > 0.5 is cut: the front face (y = 0) stays, so
-        // flip the plane to cut y < 0.5 instead.
+        // Flipped, the cut takes y < 0.5: the front face goes, and the pick
+        // goes through to the inside of the back face (face 3, y = 1).
         let flipped = View {
             section: Some(
                 Section {
@@ -1912,6 +1930,62 @@ mod tests {
         assert!(
             a[0] < 200 && b[0] > 150 && b[1] < 60,
             "front {a:?}, through the cut {b:?}"
+        );
+    }
+
+    #[test]
+    fn clicks_map_through_the_viewport_fraction() {
+        // A 400 x 300 viewport at (100, 50) in points, rendered at 2x, or
+        // clamped to half that: the same fraction lands on the same texel.
+        let (min, size) = ([100.0, 50.0], [400.0, 300.0]);
+        assert_eq!(texel_at(min, size, [100.0, 50.0], 800, 600), (0, 0));
+        assert_eq!(texel_at(min, size, [300.0, 200.0], 800, 600), (400, 300));
+        assert_eq!(texel_at(min, size, [300.0, 200.0], 400, 300), (200, 150));
+        assert_eq!(
+            texel_at(min, size, [500.0, 350.0], 800, 600),
+            (799, 599),
+            "the far edge"
+        );
+        assert_eq!(
+            texel_at(min, size, [0.0, 0.0], 800, 600),
+            (0, 0),
+            "outside clamps"
+        );
+        // y runs down, as egui's points and the texture's rows do.
+        assert!(texel_at(min, size, [300.0, 330.0], 800, 600).1 > 500);
+    }
+
+    #[test]
+    fn the_highlight_loses_to_whatever_is_in_front() {
+        let Some(g) = gpu() else { return };
+        // From the front (looking along +y), box 1 at y 2..3 sits behind box 0.
+        let gs = g.upload(&scene(vec![
+            cuboid([0.0; 3], [1.0; 3], [None; 6]),
+            cuboid([-1.0, 2.0, -1.0], [2.0, 3.0, 2.0], [None; 6]),
+        ]));
+        let (w, h) = (160, 120);
+        let (fx, fy) = pixel_of(&gs, &FRONT, w, h, [0.5, 0.0, 0.5]);
+        let (bx, by) = pixel_of(&gs, &FRONT, w, h, [1.6, 2.0, 1.6]);
+        let plain = g.render(&gs, &View::new(FRONT), w, h);
+        let lit = g.render(
+            &gs,
+            &View {
+                picked: Some(Pick { part: 1, face: 2 }),
+                highlight: [1.0, 0.0, 0.0],
+                ..View::new(FRONT)
+            },
+            w,
+            h,
+        );
+        assert_eq!(
+            plain.pixel(fx, fy),
+            lit.pixel(fx, fy),
+            "the highlight bled through box 0"
+        );
+        assert_ne!(
+            plain.pixel(bx, by),
+            lit.pixel(bx, by),
+            "box 1's visible rim is highlighted"
         );
     }
 

@@ -218,9 +218,10 @@ impl Viewer {
                 self.apply(input, short);
             }
         }
-        // Esc clears a selection first, then quits.
-        if pressed(Key::Escape) && self.picked.is_some() {
+        // Esc clears a selection (or one being picked) first, then quits.
+        if pressed(Key::Escape) && (self.picked.is_some() || self.pending.is_some()) {
             self.picked = None;
+            self.pending = None;
         } else if pressed(Key::Q) || pressed(Key::Escape) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
@@ -408,8 +409,13 @@ impl Viewer {
         {
             self.ids = Some(IdTarget::new(&rs.device, w, h));
         }
-        let rel = (at - rect.min) / rect.size();
-        let (x, y) = ((rel.x * w as f32) as u32, (rel.y * h as f32) as u32);
+        let (x, y) = super::gpu::texel_at(
+            [rect.min.x, rect.min.y],
+            [rect.width(), rect.height()],
+            [at.x, at.y],
+            w,
+            h,
+        );
         let view = self.view(&key, key.dark);
         let ids = self.ids.as_ref().expect("created above");
         self.pending =

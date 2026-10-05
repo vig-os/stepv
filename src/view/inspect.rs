@@ -62,6 +62,17 @@ impl Placement {
         let m = &self.0;
         [0, 1, 2].map(|r| m[4 * r] * d[0] + m[4 * r + 1] * d[1] + m[4 * r + 2] * d[2])
     }
+
+    /// The placement's uniform scale (OCCT's `gp_Trsf` folds it into the
+    /// matrix): `|det|^(1/3)`, 1 for rotations and mirrors. The topology's
+    /// radii, areas and volumes are the prototype's, so a scaled instance's
+    /// are scaled by this, as its mesh is.
+    fn scale(&self) -> f64 {
+        let m = &self.0;
+        let det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8])
+            + m[2] * (m[4] * m[9] - m[5] * m[8]);
+        det.abs().cbrt()
+    }
 }
 
 /// The surface's name, as the inspector heads it.
@@ -90,8 +101,9 @@ pub fn face(topo: &Topology, part: usize, face: usize) -> Option<Vec<Row>> {
     let proto = topo.prototypes.get(placed.prototype)?;
     let f = proto.faces.get(face)?;
     let at = Placement(placed.transform);
+    let k = at.scale();
     let u = &topo.units;
-    let len = |v: f64| format!("{} {u}", num(v));
+    let len = |v: f64| format!("{} {u}", num(v * k));
     let mut rows = vec![
         row("Part", format!("{} (#{part})", placed.name)),
         row("Face", format!("#{face}")),
@@ -140,7 +152,7 @@ pub fn face(topo: &Topology, part: usize, face: usize) -> Option<Vec<Row>> {
         }
         _ => {}
     }
-    rows.push(row("Face area", format!("{} {u}²", num(f.area))));
+    rows.push(row("Face area", format!("{} {u}²", num(f.area * k * k))));
     Some(rows)
 }
 
@@ -154,15 +166,16 @@ pub fn part(topo: &Topology, part: usize) -> Vec<Row> {
         return Vec::new();
     };
     let u = &topo.units;
+    let at = Placement(placed.transform);
+    let k = at.scale();
     let mut rows = vec![row(
         "Part volume",
         proto
             .volume
-            .map_or("—".into(), |v| format!("{} {u}³", num(v))),
+            .map_or("—".into(), |v| format!("{} {u}³", num(v * k * k * k))),
     )];
     if let Some(b) = proto.bbox {
         // The prototype's box, placed: the box around its eight corners.
-        let at = Placement(placed.transform);
         let mut lo = [f64::INFINITY; 3];
         let mut hi = [f64::NEG_INFINITY; 3];
         for c in 0..8 {
@@ -258,6 +271,25 @@ mod tests {
         let get = |k| p.iter().find(|r| r.key == k).unwrap().value.clone();
         assert_eq!(get("Part size"), "15 × 4 × 4 mm");
         assert_eq!(get("Part volume"), "—");
+    }
+
+    #[test]
+    fn a_scaled_instance_reports_scaled_sizes() {
+        // The plate placed at twice its size: radius, area and volume follow
+        // the mesh, which the kernel placed with the same matrix.
+        let scaled = PLATE_AND_PIN.replace(
+            r#""transform": [1,0,0,0, 0,1,0,0, 0,0,1,0]"#,
+            r#""transform": [2,0,0,0, 0,2,0,0, 0,0,2,0]"#,
+        );
+        let t = topo(&scaled);
+        let rows = face(&t, 0, 1).unwrap();
+        let get = |k| rows.iter().find(|r| r.key == k).unwrap().value.clone();
+        assert_eq!(get("Radius"), "8 mm");
+        assert_eq!(get("Face area"), "502.64 mm²");
+        let p = part(&t, 0);
+        let get = |k| p.iter().find(|r| r.key == k).unwrap().value.clone();
+        assert_eq!(get("Part volume"), "45989.36 mm³");
+        assert_eq!(get("Part size"), "80 × 60 × 10 mm");
     }
 
     #[test]

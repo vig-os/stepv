@@ -181,11 +181,9 @@ fn picking_the_plate_names_its_exact_faces() {
     // side from the eye, which sits at +x, -y, +z, is visible from above.
     let a = (-35f32).to_radians();
     let away = [a.sin(), a.cos()]; // the eye's horizontal direction, negated
-    let wall = [
-        20.0 + 4.0 * away[0] * 0.98,
-        15.0 + 4.0 * away[1] * 0.98,
-        4.5,
-    ];
+    // 0.9 r and z = 4: well inside the wall's silhouette, whatever the
+    // deflection does to the facets.
+    let wall = [20.0 + 4.0 * away[0] * 0.9, 15.0 + 4.0 * away[1] * 0.9, 4.0];
     let hole = rows_at(wall);
     assert_eq!(hole("Surface").as_deref(), Some("Cylinder"));
     assert_eq!(hole("Radius").as_deref(), Some("4 mm"));

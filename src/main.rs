@@ -234,9 +234,20 @@ fn run(args: &Args) -> (u8, Value) {
     if args.view {
         // The exact B-rep for the inspector (#29) comes with the mesh.
         let topo_tmp = temp_path("json");
-        let result = tessellate(args, &mut report, None, Some(&topo_tmp));
-        let topo_bytes = std::fs::read(&topo_tmp);
+        let mut result = tessellate(args, &mut report, None, Some(&topo_tmp));
+        let mut topo_bytes = std::fs::read(&topo_tmp);
         let _ = std::fs::remove_file(&topo_tmp);
+        // The kernel failed in the topology stage, after the mesh: open the
+        // viewer without the inspector rather than not at all (#29 review).
+        if result.is_err() && topology_failed(&report) {
+            eprintln!(
+                "stepv: the exact topology failed ({}); opening without the inspector",
+                report["error"].as_str().unwrap_or("unknown error")
+            );
+            report = json!({ "stepv": report["stepv"], "info": report["info"] });
+            result = tessellate(args, &mut report, None, None);
+            topo_bytes = Err(std::io::Error::other("the kernel's topology stage failed"));
+        }
         let scene = match result {
             Ok((s, _)) => s,
             Err(code) => return (code, report),
@@ -392,6 +403,12 @@ fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
     report["status"] = json!(status);
     report["error"] = json!(msg);
     code
+}
+
+/// Whether a failed kernel run got as far as the topology, its last stage:
+/// the mesh was fine, only `--topology` failed.
+fn topology_failed(report: &Value) -> bool {
+    report["kernel"]["stage"] == "topology"
 }
 
 /// Runs the kernel and decodes its buffers. On failure, fills `report` and
@@ -652,6 +669,18 @@ mod tests {
                 .limits
                 .timeout,
             Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn only_a_topology_stage_failure_is_retried() {
+        assert!(topology_failed(&json!({"kernel": {"stage": "topology"}})));
+        for stage in ["read", "transfer", "mesh", "done"] {
+            assert!(!topology_failed(&json!({"kernel": {"stage": stage}})));
+        }
+        assert!(
+            !topology_failed(&json!({"kernel": null})),
+            "no summary: a crash, not this"
         );
     }
 
