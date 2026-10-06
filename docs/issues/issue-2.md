@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-04T11:16:29Z
-updated: 2026-10-04T17:05:17Z
+updated: 2026-10-05T18:42:55Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/stepv/issues/2
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:45:55.004Z
+synced: 2026-10-06T08:48:28.410Z
 ---
 
 # [Issue 2]: [Dependency Dashboard](https://github.com/vig-os/stepv/issues/2)
@@ -56,10 +56,12 @@ The following updates are awaiting their schedule. To get an update now, click o
 
 </details>
 
-<details><summary>.github/workflows/kernel.yml (2)</summary>
+<details><summary>.github/workflows/kernel.yml (4)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24`
+ - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
+ - `ubuntu 26.04`
 
 </details>
 
