@@ -1016,8 +1016,11 @@ Agent work, in order:
    #28 (scaffold, done: "Viewer scaffold" above) → #29 picking (done: "Picking" above) → #30 tree (done: "Model tree" above) → #31 overlay and edges (done: "Edges and the overlay" above) →
    #32 CI and packaging (done: "Viewer CI and packaging" above) → #33 measurements (done: "Measurements" above) → #34 capping (done: "Section caps and fat lines" above).
 
-Needs a human (`needs-human`): #3 org-secret grants (`priority:blocking`), #16 dependency-graph
-toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the upstream report.
+#21 is closed (2026-10-11), with the viewer built and #43's exact caps on top. Its open parts are
+#48 (free and multiple section planes) and #49 (vertex picking).
+
+Needs a human (`needs-human`): #16 dependency-graph toggle, #10 the Apple and crates.io
+credentials, #12 corpus collection. #3's grants are made (§6), and #14 is filed upstream.
 
 ## 6. Open questions
 
@@ -1083,11 +1086,13 @@ toggle, #10 the Apple and crates.io credentials, #12 corpus collection, #14 the 
 Everything else is built and tested. Each item below needs a credential, an account or a click
 that an agent must not take. Each one is the last step before something ships.
 
-1. **Approve the org-config apply** (org-config#317's `Apply` run waits on the `production`
-   environment). It gives stepv its rulesets: branch and tag protection, signed commits.
-2. **Grant the workflow credentials** (#3): add `stepv` to the six org-secret repository lists by
-   hand. The apply does not do this (org-config#318), and devkit's sync, upgrade and release
-   workflows need it.
+1. ~~**Approve the org-config apply**~~: done. org-config#317 applied, and stepv has its four
+   rulesets (Main, Release and Tag protection, Signed commits).
+2. ~~**Grant the workflow credentials** (#3)~~: done. `stepv` is in all six org-secret lists
+   (checked 2026-10-11).
+   - The commit App proves it: Sync Issues has pushed verified `commit-action-bot` commits to
+     `sync/issue-mirror` every day since 2026-10-06.
+   - The release App's grant is in place, but only a release run will exercise it.
 3. **Enable the dependency graph** (#16): the repo-settings toggle, which has no API. Until then
    Dependency Review is red on every PR.
 4. **Apple Developer ID** (#10), for a notarised macOS release. Store these as repo or org secrets:
@@ -1103,7 +1108,13 @@ that an agent must not take. Each one is the last step before something ships.
 6. **Corpus** (#12): the full CAx-IF rounds (registration) and real SolidWorks, NX, CATIA, Fusion
    and FreeCAD exports, collected by hand. They're needed before the pass rate can be claimed for
    those exporters.
-7. **Upstream report** (#14): file the occt-wasm STEP-import gap with andymai/occt-wasm, if wanted.
+7. ~~**Upstream report** (#14)~~: filed as
+   [andymai/occt-wasm#393](https://github.com/andymai/occt-wasm/issues/393), re-checked on its
+   `main` @ `89fb058` (2026-10-08):
+   - crates.io is still at 4.0.0, which can't instantiate;
+   - STEP import still traps with `uninitialized element`, and upstream ignores its own STEP tests
+     for the same `/tmp` reason;
+   - `new()` still JIT-compiles every time, in 2.6–2.9 s.
 8. **Devkit fixes** to watch, not do:
    - vig-os/devkit#1810: `mkRustProject` drops hook knobs, and the scaffold fails its own lint. It's
      worked around here with `# deadnix: skip`.
@@ -1135,19 +1146,19 @@ declaration lands.
 
 The declaration merged as [`vig-os/org-config#317`](https://github.com/vig-os/org-config/pull/317)
 on 2026-10-04 (content reproduced in §8). It superseded #316, which was closed by a branch rename,
-not deliberately. As of 2026-10-04 its `Apply` run is **waiting on the human-gated `production`
-environment**. Until someone approves that deployment, stepv has **no branch protection, no
-signed-commit rule and no tag protection** (`gh api repos/vig-os/stepv/rulesets` returns 0).
+not deliberately. Its apply ran on 2026-10-04. stepv now has its four rulesets: Main protection,
+Release protection, Tag protection and Signed commits.
 
-**Approving the apply will not deliver the workflow credentials either** (stepv#3). This plan used
-to say the opposite. `otterdog apply` does not reconcile `selected_repositories` for org secrets
+**The apply did not deliver the workflow credentials** (stepv#3). This plan once said it would. `otterdog apply` does not reconcile `selected_repositories` for org secrets
 whose declared value is a `'********'` dummy, and the #317 plan is "4 to add, 11 to change", with
 zero secret actions. `revkit` proves it: it was added to the same six lists in org-config#312 and
 is still absent from them days after a successful apply. That is tracked upstream as
-[`vig-os/org-config#318`](https://github.com/vig-os/org-config/issues/318). Until an org owner
-adds stepv to the six lists by hand (read-modify-write: the endpoint replaces the whole list; the
-commands are in stepv#3), the devkit workflows fail with an **empty credential and no error
-message**. That is this gap, not a bug in the workflows. Nothing in S2–S3 needs them.
+[`vig-os/org-config#318`](https://github.com/vig-os/org-config/issues/318), since closed.
+
+The six grants were then made, and stepv is in every list (checked 2026-10-11). Sync Issues proves
+the commit App: its token step succeeds, and it pushes verified commits daily. A future repo
+still needs the same check. Without the grants, the devkit workflows fail with an **empty
+credential and no error message**.
 
 ---
 
