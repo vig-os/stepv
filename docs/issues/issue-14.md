@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-04T14:47:25Z
-updated: 2026-10-04T19:00:50Z
+updated: 2026-10-10T23:29:53Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/14
-comments: 0
+comments: 1
 labels: chore, priority:low, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:45:50.651Z
+synced: 2026-10-11T08:35:01.289Z
 ---
 
 # [Issue 14]: [Report the occt-wasm STEP-import gap upstream](https://github.com/vig-os/stepv/issues/14)
@@ -39,4 +39,15 @@ repo, so it's left for a human to decide and file.
 
 Plan B is the kernel and it works. These three are exactly the conditions under which Plan A would
 come back (better containment, no C++ toolchain). Low priority.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 10, 2026 at 11:29 PM_
+
+Filed upstream as https://github.com/andymai/occt-wasm/issues/393, after re-checking all three claims on its `main` @ `89fb058` (2026-10-08), with a probe build of the crate:
+1. crates.io is still at 4.0.0 (`main` is 4.1.0, unpublished).
+2. `import_step` and `xcaf_import_step` trap with `uninitialized element`. Upstream ignores its own STEP tests for the same `/tmp` reason.
+3. `new()` only ever calls `Module::new`, which takes 2.6–2.9 s, and there's no store limiter.
 

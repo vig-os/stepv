@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-04T18:57:35Z
-updated: 2026-10-08T10:55:57Z
+updated: 2026-10-10T23:07:29Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/21
-comments: 2
+comments: 3
 labels: feature, priority:medium, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-09T08:46:05.751Z
+synced: 2026-10-11T08:35:00.536Z
 ---
 
 # [Issue 21]: [Viewer: model tree with show/hide, cross sections, measurements on the exact B-rep](https://github.com/vig-os/stepv/issues/21)
@@ -74,4 +74,31 @@ _Posted on October 8, 2026 at 10:55 AM_
 The topology export described here should make measurement provenance visible in the viewer: preserve the assembly instance transform when mapping a picked triangle back to its prototype, and show the witness points or segment for shape-to-shape queries. It may also help to distinguish per-part values from assembly totals for bounding box, area, and volume, and to label any mesh fallback separately from exact B-Rep results.
 
 The [CADProps STEP measurement guide](https://www.cadprops.com/guides/measure-step-file/) uses similar user-facing terminology. Disclosure: I contribute to CADProps. It is a separate hosted tool and processes uploaded files on its servers.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on October 10, 2026 at 11:07 PM_
+
+## Done: closing; the open parts continue in #48 and #49
+
+**The decision:** option B, a cross-platform viewer on egui + wgpu, inside `stepv view` (the #27 spike, plan.md "Viewer stack"). Quick Look stays on SceneKit.
+
+**Built and merged:**
+- **The kernel's topology** (#26).
+- **#28:** the viewer scaffold.
+- **#29:** picking faces against the exact topology, with the inspector.
+- **#30:** the model tree, with show, hide and isolate.
+- **#31:** B-rep edges and the overlay.
+- **#32:** CI on lavapipe, and packaging.
+- **#33:** measurements on the exact B-rep through `stepv-occt --serve`: distance, axis distance and angle.
+- **#34:** capped sections.
+- **#43:** exact caps for each part.
+
+The inspector gives radii and diameters, axes and centres, face areas, edge lengths, and each part's volume and box.
+
+**Still open from this issue's list, now filed on their own:**
+- #48: free (non-axis-aligned) section planes, and more than one at a time.
+- #49: vertex picking, with coordinates and distances to vertices.
 

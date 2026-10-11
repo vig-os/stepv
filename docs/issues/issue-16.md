@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-04T14:50:47Z
-updated: 2026-10-04T19:00:40Z
+updated: 2026-10-10T23:56:07Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/16
-comments: 0
+comments: 1
 labels: chore, priority:high, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:45:50.305Z
+synced: 2026-10-11T08:35:00.953Z
 ---
 
 # [Issue 16]: [Enable the dependency graph: Dependency Review fails on every PR](https://github.com/vig-os/stepv/issues/16)
@@ -42,4 +42,12 @@ Optionally, make org-config declare it so the next repo cannot drift the same wa
 ## Acceptance
 
 `gh api repos/vig-os/stepv/dependency-graph/sbom` returns an SBOM, and Dependency Review passes.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 10, 2026 at 11:56 PM_
+
+The dependency graph is on: the SBOM endpoint returns 373 packages, and Dependency Review passes on #50 (run 38096639181). Closing.
 
