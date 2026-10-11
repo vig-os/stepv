@@ -69,6 +69,7 @@ precommit:
 [group('test')]
 test *args:
     @if [ -f Cargo.toml ]; then just _rust-test {{ args }}; fi
+    @python3 -m unittest -q scripts/test_fetch_fixtures.py
     @if [ ! -f pyproject.toml ]; then [ -f Cargo.toml ] || echo "just test: no pyproject.toml or Cargo.toml — skipping"; elif uv run pytest {{ args }}; then :; else rc=$?; if [ "$rc" -eq 5 ] && [ ! -d tests ]; then echo "just test: no tests collected and no tests/ directory — skipping"; else exit "$rc"; fi; fi
 
 # The CLI tests run the REAL kernel and fail without it (tests/cli.rs), so it
@@ -77,6 +78,7 @@ test *args:
 [private]
 _rust-test *args: kernel _rust-lint
     cargo test --workspace {{ args }}
+    cargo test --release --example harness
 
 # Run tests with coverage (same exit-5 rule as `test` above)
 [group('test')]

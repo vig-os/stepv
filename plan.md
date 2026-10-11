@@ -4,7 +4,9 @@
 (§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and
 in-process inside the macOS Quick Look extensions, whose sandbox forbids exec. With the per-face
 recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn with a
-flagged overlay, and nothing crashes or hangs. The CLI, the Linux thumbnailer, MIME and KF6 plugin,
+flagged overlay, and nothing crashes or hangs. With seven CAD writers and a real 143 MB assembly
+added (#12, 2026-10-11) it is 99.2% of 400 (faithful or wireframe; 99.0% fully faithful). The one
+new non-pass is the real assembly, which loads correctly but takes 101 s (#51). The CLI, the Linux thumbnailer, MIME and KF6 plugin,
 the viewer window, and the macOS preview and thumbnail extensions all work. On macOS that was
 proven through Quick Look itself.
 **Audience:** the next agent or human picking this up cold. Read §1–§4, then §5 for what was
@@ -470,7 +472,8 @@ are **not yet in the corpus**. The CAx-IF rounds are covered only through the pu
 `occt-import-js`. The stress assembly is synthetic. ABC is all Onshape output. 97.2% is
 therefore a lower bound on robustness against one exporter and a sample of the standard, not a
 claim about CATIA. Exact bytes are in `tests/fixtures/corpus.sha256`; per-file results are in
-`harness-out/results.jsonl` after a run.
+`harness-out/results.jsonl` after a run. (Since #12, the exporter matrix and a real large
+assembly are in: "Corpus fill (#12)" below.)
 
 ### S1 follow-up — recovery ladder, sketch handling, broken-face overlay (2026-10-04)
 
@@ -532,6 +535,56 @@ Result, same corpus, same settings:
 latency: p95 for files under 1 MB is 335 ms (was 337 ms). The two rungs that never fired on this
 corpus, re-mesh and coarse, are kept as cheap first attempts; nothing here argues for them, and
 the next exporter might.
+
+### Corpus fill (#12, 2026-10-11)
+
+Three gaps in the corpus caveats above, filled as far as public sources allow. Every file is
+fetched by `just fixtures`, pinned by sha256, and never committed:
+
+- **`exporter-matrix`**: one file per writer, each writer read from the file's own `FILE_NAME`
+  header. They are SolidWorks 2015, Siemens NX 9.0, CATIA V5 R14, Fusion 360 (Autodesk
+  Translation Framework), FreeCAD/OCC (KiCad StepUp), Inventor 2021 and Creo (Pro/ENGINEER).
+  All come from public repositories, each pinned to a commit URL; the licences are in the
+  manifest. The fetcher gained a `files` kind for this.
+- **`real-assembly`**: the whole Ultimaker 3 printer, a single 143 MB SolidWorks 2016 STEP
+  (AP214) with 258 products, 523 occurrences and every part named and coloured. **CC BY-NC
+  3.0**: fine to fetch and test against, never to redistribute. Its zip carries a
+  `__MACOSX/._9066.STEP` resource fork, which the fetcher now skips.
+- **`mbx-if-public`**: the one AP242 model MBx-IF (the renamed CAx-IF) publishes openly. The full
+  CAx-IF rounds are **not** public: they are shared only in the implementor group's members area,
+  by invitation. `cax-if` stays hand-collected and reported MISSING.
+
+`just harness`, same settings as S1 (default 60 s per file), sage:
+
+<!-- pyml disable-num-lines 11 line-length -->
+| Source | Files | Pass | Wireframe | Degraded | Partial | Clean fail | Bad mesh | Crash | Timeout | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | Max RSS MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| abc-dataset | 300 | 298 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 99.7% | 100.0% | 0.0% / 99.2% | 107 | 4963 | 7252 |
+| exporter-matrix | 7 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% | 75.0% | 50.0% / 12.5% | 120 | 257 | 96 |
+| mbx-if-public | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% | 0.0% | 50.0% / 0.0% | 65 | 65 | 34 |
+| nist-pmi | 33 | 33 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% | 9.9% | 45.1% / 11.3% | 168 | 364 | 156 |
+| occt-import-js | 57 | 56 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 98.2% | 58.7% | 76.1% / 0.0% | 77 | 119 | 60 |
+| real-assembly | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** | 0.0% | — | — / — | — | — | — |
+| stress-assembly | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 100.0% | 100.0% | 0.0% / 0.0% | 23458 | 23458 | 2078 |
+| **all but malformed** | **400** | **396** | **1** | **2** | **0** | 0 | 0 | **0** | **1** | **99.2%** | 94.4% | 7.3% / 80.7% | 101 | 3570 | 7252 |
+| malformed (want clean fail) | 10 | — | — | — | — | **10** | 0 | 0 | 0 | — | — | — | — | — | 28 |
+
+- **Every writer loads, fully faithful.** Names and colours vary by writer, as expected; this is
+  the first time the columns measure more than Onshape and NIST.
+- **The real assembly is correct but slow.** With `--timeout 900` it passes: **100.7 s**,
+  1.56 GB peak RSS, 62,011 faces (2 degenerate), 1.25M triangles, and 523/523 parts named and
+  coloured. **92.2 s of that is STEP transfer** (read 4.4 s, mesh 3.7 s), against 23 s in total
+  for the 221 MB synthetic file. Bytes are not the cost; this file's structure is. At the
+  CLI's 20 s default and the thumbnailer's 15 s, the file cannot be previewed today. That is #51.
+- No other row moved beyond run-to-run timing noise. *Pass rate* is faithful or wireframe, as in
+  the S1 tables: 397/400 here, 396 fully faithful.
+- **`corpus.sha256` was not byte-exact for `stress-assembly` until now.** OCCT's writer stamps the
+  wall clock into `FILE_NAME`, so every regeneration hashed differently. `stress-gen` now writes a
+  fixed time stamp, and a test in `tests/cli.rs` generates twice and compares bytes. The lock's
+  `stress-assembly` line changes once, here.
+- The fetcher and the harness agree on what a corpus file is: both skip macOS `__MACOSX/` and
+  `._*` entries. The harness's own unit tests never ran before (`cargo test` skips example
+  tests); `just test` now runs `cargo test --example harness`.
 
 ### S2 — The CLI for real (#5): done
 
@@ -1019,8 +1072,10 @@ Agent work, in order:
 #21 is closed (2026-10-11), with the viewer built and #43's exact caps on top. Its open parts are
 #48 (free and multiple section planes) and #49 (vertex picking).
 
-Needs a human (`needs-human`): #16 dependency-graph toggle, #10 the Apple and crates.io
-credentials, #12 corpus collection. #3's grants are made (§6), and #14 is filed upstream.
+Needs a human (`needs-human`): #10 the Apple and crates.io credentials. #16's graph is on,
+#3's grants are made (§6), and #14 is filed upstream. #12 is filled from public sources ("Corpus
+fill (#12)" above); only the full CAx-IF rounds, which are members-only, are still missing, and
+the real assembly's transfer time is #51.
 
 ## 6. Open questions
 

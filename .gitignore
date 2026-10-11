@@ -75,6 +75,9 @@ data/
 # this one is source, so re-include it.
 !/tests/data/
 
+# Python bytecode from scripts/ (the fixture fetcher and its tests).
+__pycache__/
+
 # flake-hooks opt-in (#1092): the generated .pre-commit-config.yaml is a
 # /nix/store symlink — never commit it.
 .pre-commit-config.yaml
