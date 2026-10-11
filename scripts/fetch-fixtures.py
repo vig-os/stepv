@@ -61,12 +61,25 @@ def pinned(url: str, want: str) -> bytes:
     return data
 
 
+def corpus_name(path: Path) -> bool:
+    """A corpus file by name: a CAD extension, and not macOS archive metadata.
+
+    Zips made in the Finder carry `__MACOSX/._<name>` AppleDouble entries whose
+    names end in the original extension but which hold no STEP at all.
+    """
+    return (
+        path.suffix.lower() in CORPUS_EXTS
+        and "__MACOSX" not in path.parts
+        and not path.name.startswith("._")
+    )
+
+
 def fetch_zip(dest: Path, spec: dict) -> None:
     data = pinned(spec["url"], spec["sha256"])
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for info in z.infolist():
             name = Path(info.filename)
-            if info.is_dir() or name.suffix.lower() not in CORPUS_EXTS:
+            if info.is_dir() or not corpus_name(name):
                 continue
             out = dest / Path(*name.parts[spec.get("strip", 0) :])
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -112,11 +125,28 @@ def fetch_git(dest: Path, spec: dict) -> None:
     run("git", "checkout", "-q", "FETCH_HEAD")
     src = tmp / spec["path"]
     for p in src.rglob("*"):
-        if p.is_file() and p.suffix.lower() in CORPUS_EXTS:
+        if p.is_file() and corpus_name(p.relative_to(src)):
             out = dest / p.relative_to(src)
             out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(p, out)
     shutil.rmtree(tmp)
+
+
+def fetch_files(dest: Path, spec: dict) -> None:
+    """Single files, each pinned by sha256, saved as `name` under `dest`.
+
+    For a corpus drawn one file at a time from many places (the exporter
+    matrix): a commit-pinned raw URL per file, and the hash in the manifest.
+    """
+    for f in spec["files"]:
+        out = (dest / f["name"]).resolve()
+        if not out.is_relative_to(dest.resolve()):
+            sys.exit(f"fixtures: {f['name']!r} escapes {dest}")
+        if out.is_file() and sha256(out.read_bytes()) == f["sha256"]:
+            continue
+        data = pinned(f["url"], f["sha256"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
 
 
 def generate_malformed(dest: Path) -> None:
@@ -178,7 +208,7 @@ def generate_stress(dest: Path, spec: dict) -> None:
 def write_lock() -> int:
     lines = []
     for p in sorted(FIXTURES.rglob("*")):
-        if p.is_file() and p.suffix.lower() in CORPUS_EXTS:
+        if p.is_file() and corpus_name(p.relative_to(FIXTURES)):
             lines.append(
                 f"{sha256(p.read_bytes())}  {p.relative_to(FIXTURES).as_posix()}"
             )
@@ -215,6 +245,8 @@ def main() -> int:
             fetch_abc_index(dest, spec, src["sample"])
         elif kind == "git":
             fetch_git(dest, spec)
+        elif kind == "files":
+            fetch_files(dest, spec)
         elif kind == "generate":
             generate_malformed(dest)
         elif kind == "stress":

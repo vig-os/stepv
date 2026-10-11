@@ -25,9 +25,24 @@ url = "https://www.cax-if.org/cax/cax_testRounds.php"
 # Redistribution-restricted: fetch, never commit, never mirror.
 license = "see site terms"
 expect = "high pass rate; failures here are blockers"
-# No fetch table: the test-round files sit behind CAx-IF registration. A
-# public subset (as1, dm1, io1, s1, sg1 rounds) arrives via `occt-import-js`
-# below; drop the full rounds in tests/fixtures/cax-if/ by hand.
+# No fetch table: the test-round models are shared only in the implementor
+# group's members area (CAx-IF is now MBx-IF, run with PROSTEP; access is by
+# invitation, for CAD vendors and large users), and no public page links them
+# (checked 2026-10-11, #12). Public coverage instead: the as1/dm1/io1/s1/sg1
+# subset via `occt-import-js`, and MBx-IF's one public AP242 model via
+# `mbx-if-public`. Drop full rounds in tests/fixtures/cax-if/ by hand.
+
+[[source]]
+name = "mbx-if-public"
+why = """
+The one STEP model MBx-IF (the renamed CAx-IF) publishes openly: the AP242
+part behind its 2026 PID/QIF trace tests, carrying persistent IDs (UUIDs) on
+its shape elements. The TEST8 zip holds byte-identical STEP, so one is pinned.
+"""
+url = "https://www.mbx-if.org/home/cax/resources/"
+license = "publicly downloadable from mbx-if.org; fetch, never commit"
+expect = "must load; AP242 with PID attributes"
+fetch = { kind = "zip", url = "https://www.mbx-if.org/home/wp-content/uploads/2026/03/PID_Trace_TEST7.zip", sha256 = "1644a1b2756e7815a66d048ee92c149b93846e896accf532fc38abf8bf0af5b9" }
 
 [[source]]
 name = "occt-import-js"
@@ -78,9 +93,63 @@ previewer: SolidWorks, NX, CATIA, Fusion 360, FreeCAD, Onshape. AP242
 interoperability breaks between WRITERS, not in the abstract, so a corpus with
 no exporter diversity cannot find the bugs that matter. Collect by hand.
 """
-url = "hand-collected"
-license = "n/a — keep to files we are allowed to hold"
+url = "hand-picked from public repositories; each file pinned below"
+license = "per file (below); fetch, never commit"
 expect = "names and colours resolve; this is where XCAF metadata is really tested"
+# One small file per writer, each writer verified from the file's own
+# FILE_NAME header (2026-10-11, #12). Real assemblies from these writers are
+# what is still missing; drop more in tests/fixtures/exporter-matrix/ by hand.
+[source.fetch]
+kind = "files"
+
+[[source.fetch.files]]
+name = "solidworks-2015/1012-D.STEP"
+writer = "SolidWorks 2015 (SwSTEP 2.0), AP214"
+license = "CC BY-NC 3.0 (Ultimaker) — non-commercial"
+url = "https://raw.githubusercontent.com/Ultimaker/Ultimaker2ExtendedPlus/2c9bd49dd562e6d5974d0ed5b4fb57d2ee41cb5e/1012-D.STEP"
+sha256 = "8b440b2266f8cfffcb1c4c5ce932cc34f84644794cd2b56c1e3622796f2a9cf4"
+
+[[source.fetch.files]]
+name = "nx-9/Mid_Leg.step"
+writer = "SIEMENS PLM Software NX 9.0 (ST-DEVELOPER v15), AP214"
+license = "MIT (OpenBot)"
+url = "https://raw.githubusercontent.com/ob-f/OpenBot/216ecb018ebe26cfae68f15ed42397493d5861c6/body/mtv/cad/Legs/Mid_Leg.step"
+sha256 = "97dc9470c360d6d4ac86d24d0ffae776f6a7b6dc5ceae362e117ee650894fad4"
+
+[[source.fetch.files]]
+name = "catia-v5r14/Schenkel.stp"
+writer = "CATIA Version 5 Release 14, AP203"
+license = "FreeCAD example data (CC BY-SA 4.0)"
+url = "https://raw.githubusercontent.com/FreeCAD/FreeCAD/ef63368faf49b9850823f556a5eed96da3349df8/data/examples/Schenkel.stp"
+sha256 = "69df4cb83831b2e0b9e9d7a04c72c893c6dcc82f2c18c4dd2f3280144a6c8088"
+
+[[source.fetch.files]]
+name = "fusion-360/MIC6_Bed_300.step"
+writer = "Autodesk Translation Framework v10.9 (Fusion 360), AP214"
+license = "GPL-3.0 (Voron Design)"
+url = "https://raw.githubusercontent.com/VoronDesign/Voron-Trident/a8628f48546948ce1fc15511b7765b7f31f80722/Drawings_DXFs/Build_Plate/MIC6_Bed_300.step"
+sha256 = "2218e40dd8467fe84327c206416dfbd181a681b11e5923fea4074dbe64242c60"
+
+[[source.fetch.files]]
+name = "freecad-ksu/BatteryHolder_Keystone_1058_1x2032.step"
+writer = "kicad StepUp on FreeCAD (OCC), AP214"
+license = "CC BY-SA 4.0 with the KiCad library exception"
+url = "https://raw.githubusercontent.com/KiCad/packages3D/b8b3cfdfad88ba66f21002b3de51dc6f7d55ba5a/Battery.3dshapes/BatteryHolder_Keystone_1058_1x2032.step"
+sha256 = "bfe25e361483fb1350eca3a79dfde5a35766b9210d5ce48235baba3f37bc2579"
+
+[[source.fetch.files]]
+name = "inventor-2021/extruder-body.stp"
+writer = "Autodesk Inventor 2021 (ST-DEVELOPER v18.1), AP214"
+license = "GPL-3.0 (Prusa Research)"
+url = "https://raw.githubusercontent.com/prusa3d/Original-Prusa-i3/529e5ad6892ce3b25015b7cca7f0481b8335a76c/Printed-Parts/STEP/extruder-body.stp"
+sha256 = "2fb2879ee5e7993de2fe7c820cd297458d8a28d4b16f4812cb86dabf812446c7"
+
+[[source.fetch.files]]
+name = "creo/Conn_Molex_Nano-Fit_1x2_1053131102.step"
+writer = "PRO/ENGINEER (PTC) 2016010, AP203"
+license = "Apache-2.0 (antmicro)"
+url = "https://raw.githubusercontent.com/antmicro/cvbs-mipi-bridge/7cbcec2bceaf6e1efd25cce1d73ff4989dfcfe02/lib/3d-models/Conn_Molex_Nano-Fit_1x2_1053131102.step"
+sha256 = "e6f4fbe32371de8b482f4983f92796d62910c90b648d137d45d3ea0462506ba7"
 
 [[source]]
 name = "stress-assembly"
@@ -98,6 +167,20 @@ expect = "must fail CLEANLY — never hang, never OOM the host"
 # B-rep count and the mesher. Drop real ones in tests/fixtures/stress-assembly/
 # beside it. Needs `just kernel` first. Must stay AFTER nist-pmi.
 fetch = { kind = "stress", donor = "AP203 geometry only/nist_ctc_02_asme1_rc.stp", copies = 60 }
+
+[[source]]
+name = "real-assembly"
+why = """
+A real product, not a synthetic one: the whole Ultimaker 3 printer as one
+143 MB STEP from SolidWorks 2016 (AP214) — 258 products, 523 assembly
+occurrences, ~8000 colours. Where stress-assembly stresses bytes, this
+stresses the XCAF tree, names and colours, the way a user's top-level
+assembly does.
+"""
+url = "https://github.com/Ultimaker/Ultimaker3"
+license = "CC BY-NC 3.0 (Ultimaker) — non-commercial; fetch, never commit"
+expect = "must load with its tree, names and colours; record time and peak RSS"
+fetch = { kind = "zip", url = "https://raw.githubusercontent.com/Ultimaker/Ultimaker3/c417f37bb34a8bfd0dc6b1fc28b0b381417ce9cb/3D%20model%20Ultimaker%203/9066.STEP.zip", sha256 = "055efe088c4d3b5d66cf0b59bfcd47546303e5517d3a3593885be82de524926e" }
 
 [[source]]
 name = "malformed"

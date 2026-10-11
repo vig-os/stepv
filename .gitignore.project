@@ -31,3 +31,6 @@
 # managed .gitignore ignores every `data/` directory (process-compose state);
 # this one is source, so re-include it.
 !/tests/data/
+
+# Python bytecode from scripts/ (the fixture fetcher and its tests).
+__pycache__/

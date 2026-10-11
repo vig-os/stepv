@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Corpus: seven CAD writers and a real large assembly** ([#12](https://github.com/vig-os/stepv/issues/12)):
+  `just fixtures` now fetches one file each from SolidWorks, NX, CATIA, Fusion 360, FreeCAD,
+  Inventor and Creo, the whole Ultimaker 3 printer (143 MB, 523 parts) and MBx-IF's public AP242
+  model, each pinned by sha256. The harness reads 99.2% of 400 files; the real assembly loads
+  correctly but needs 101 s ([#51](https://github.com/vig-os/stepv/issues/51))
+  - The fetcher skips macOS `__MACOSX` resource forks in zips, and its tests run in `just test`
 - **Exact section caps** ([#43](https://github.com/vig-os/stepv/issues/43)): a cut model is capped
   per part, in each part's colour, from the kernel's exact section (`stepv-occt --serve`'s new
   `section` op). Parts that interfere are both capped in their own colours, not as one grey
