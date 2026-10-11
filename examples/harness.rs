@@ -164,6 +164,11 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) {
+    // macOS metadata, never CAD: the same rule as fetch-fixtures.py's corpus_name.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name == "__MACOSX" || name.starts_with("._") {
+        return;
+    }
     if path.is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(path)
             .into_iter()
@@ -213,6 +218,29 @@ mod tests {
         }
         assert_eq!(source_of(Path::new("tests/fixtures/loose.step")), "(other)");
         assert_eq!(source_of(Path::new("tests/data/box.igs")), "(other)");
+    }
+
+    #[test]
+    fn macos_metadata_is_not_corpus() {
+        // AppleDouble `._x.step` files and `__MACOSX/` trees carry a CAD
+        // extension but no CAD data; the fetcher and corpus.sha256 skip them,
+        // so the harness must too, or the two disagree on what the corpus is.
+        let root = std::env::temp_dir().join(format!("stepv-collect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for f in [
+            "src/a.step",
+            "src/._a.step",
+            "src/__MACOSX/b.stp",
+            "src/c.txt",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"ISO-10303-21;").unwrap();
+        }
+        let mut got = Vec::new();
+        collect(&root, &mut got);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(got, vec![root.join("src/a.step")]);
     }
 }
 

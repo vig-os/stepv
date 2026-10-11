@@ -78,6 +78,7 @@ test *args:
 [private]
 _rust-test *args: kernel _rust-lint
     cargo test --workspace {{ args }}
+    cargo test --release --example harness
 
 # Run tests with coverage (same exit-5 rule as `test` above)
 [group('test')]

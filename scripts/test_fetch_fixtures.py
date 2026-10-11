@@ -23,8 +23,6 @@ _spec = importlib.util.spec_from_file_location(
 ff = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ff)
 
-KINDS = {"zip", "abc-index", "git", "generate", "stress", "files"}
-
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -135,6 +133,38 @@ class FilesTest(Tmp):
         self.assertFalse((self.tmp / "evil.step").exists())
 
 
+class EscapeTest(Tmp):
+    def test_names_that_leave_the_source_directory_are_refused(self) -> None:
+        data = b"ISO-10303-21;"
+        url = self.serve("f.step", data)
+        for name in (
+            "../evil.step",
+            str(self.tmp / "abs.step"),
+            "",
+            ".",
+            "a/../../evil.step",
+        ):
+            with self.subTest(name=name), self.assertRaises(SystemExit):
+                ff.fetch_files(
+                    self.tmp / "out",
+                    {"files": [{"url": url, "sha256": sha(data), "name": name}]},
+                )
+        self.assertFalse((self.tmp / "evil.step").exists())
+        self.assertFalse((self.tmp / "abs.step").exists())
+
+    def test_a_zip_entry_cannot_escape_either(self) -> None:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("../evil.step", b"ISO-10303-21;")
+        data = buf.getvalue()
+        with self.assertRaises(SystemExit):
+            ff.fetch_zip(
+                self.tmp / "out",
+                {"url": self.serve("e.zip", data), "sha256": sha(data)},
+            )
+        self.assertFalse((self.tmp / "evil.step").exists())
+
+
 class ManifestTest(unittest.TestCase):
     """The committed manifest is the record of what a pass rate means."""
 
@@ -144,7 +174,7 @@ class ManifestTest(unittest.TestCase):
     def test_every_fetch_kind_is_one_the_fetcher_knows(self) -> None:
         for src in self.sources:
             if "fetch" in src:
-                self.assertIn(src["fetch"]["kind"], KINDS, src["name"])
+                self.assertIn(src["fetch"]["kind"], ff.FETCHERS, src["name"])
 
     def test_every_source_states_why_and_license(self) -> None:
         for src in self.sources:

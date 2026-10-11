@@ -6,6 +6,7 @@
 //
 //   stress-gen <donor.step> <copies> <out.step>
 
+#include <APIHeaderSection_MakeHeader.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRep_Builder.hxx>
@@ -16,6 +17,7 @@
 #include <Message_PrinterOStream.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TCollection_HAsciiString.hxx>
 #include <TopoDS_Compound.hxx>
 #include <gp_Trsf.hxx>
 
@@ -53,8 +55,15 @@ int main(int argc, char** argv) {
         builder.Add(all, copy.Moved(TopLoc_Location(t)));
     }
     STEPControl_Writer writer;
-    if (writer.Transfer(all, STEPControl_AsIs) != IFSelect_RetDone ||
-        writer.Write(argv[3]) != IFSelect_RetDone) {
+    if (writer.Transfer(all, STEPControl_AsIs) != IFSelect_RetDone) {
+        std::fputs("stress-gen: transfer failed\n", stderr);
+        return 1;
+    }
+    // A fixed FILE_NAME time stamp, not the wall clock: the output is hashed
+    // into corpus.sha256, which must be the same bytes on every regeneration.
+    APIHeaderSection_MakeHeader header(writer.Model());
+    header.SetTimeStamp(new TCollection_HAsciiString("2000-01-01T00:00:00"));
+    if (writer.Write(argv[3]) != IFSelect_RetDone) {
         std::fputs("stress-gen: write failed\n", stderr);
         return 1;
     }

@@ -74,6 +74,14 @@ def corpus_name(path: Path) -> bool:
     )
 
 
+def inside(dest: Path, name: str) -> Path:
+    """`dest / name`, refusing any name that resolves outside `dest` (or to it)."""
+    out = (dest / name).resolve()
+    if out == dest.resolve() or not out.is_relative_to(dest.resolve()):
+        sys.exit(f"fixtures: {name!r} escapes {dest}")
+    return out
+
+
 def fetch_zip(dest: Path, spec: dict) -> None:
     data = pinned(spec["url"], spec["sha256"])
     with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -81,7 +89,7 @@ def fetch_zip(dest: Path, spec: dict) -> None:
             name = Path(info.filename)
             if info.is_dir() or not corpus_name(name):
                 continue
-            out = dest / Path(*name.parts[spec.get("strip", 0) :])
+            out = inside(dest, Path(*name.parts[spec.get("strip", 0) :]).as_posix())
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(z.read(info))
 
@@ -139,9 +147,7 @@ def fetch_files(dest: Path, spec: dict) -> None:
     matrix): a commit-pinned raw URL per file, and the hash in the manifest.
     """
     for f in spec["files"]:
-        out = (dest / f["name"]).resolve()
-        if not out.is_relative_to(dest.resolve()):
-            sys.exit(f"fixtures: {f['name']!r} escapes {dest}")
+        out = inside(dest, f["name"])
         if out.is_file() and sha256(out.read_bytes()) == f["sha256"]:
             continue
         data = pinned(f["url"], f["sha256"])
@@ -205,6 +211,17 @@ def generate_stress(dest: Path, spec: dict) -> None:
     tmp.rename(out)
 
 
+# Every fetch kind the manifest may name: (destination, fetch table, source).
+FETCHERS = {
+    "zip": lambda dest, spec, src: fetch_zip(dest, spec),
+    "abc-index": lambda dest, spec, src: fetch_abc_index(dest, spec, src["sample"]),
+    "git": lambda dest, spec, src: fetch_git(dest, spec),
+    "files": lambda dest, spec, src: fetch_files(dest, spec),
+    "generate": lambda dest, spec, src: generate_malformed(dest),
+    "stress": lambda dest, spec, src: generate_stress(dest, spec),
+}
+
+
 def write_lock() -> int:
     lines = []
     for p in sorted(FIXTURES.rglob("*")):
@@ -239,20 +256,9 @@ def main() -> int:
             continue
         kind = spec["kind"]
         print(f"  {name:18} {kind} ...", flush=True)
-        if kind == "zip":
-            fetch_zip(dest, spec)
-        elif kind == "abc-index":
-            fetch_abc_index(dest, spec, src["sample"])
-        elif kind == "git":
-            fetch_git(dest, spec)
-        elif kind == "files":
-            fetch_files(dest, spec)
-        elif kind == "generate":
-            generate_malformed(dest)
-        elif kind == "stress":
-            generate_stress(dest, spec)
-        else:
+        if kind not in FETCHERS:
             sys.exit(f"fixtures: unknown fetch kind {kind!r} for {name}")
+        FETCHERS[kind](dest, spec, src)
     n = write_lock()
     print(f"fixtures: {n} corpus files, hashes in {LOCK.relative_to(ROOT)}")
     if missing:

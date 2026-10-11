@@ -684,3 +684,36 @@ fn an_unwritable_topology_keeps_the_mesh() {
     );
     assert!(!topo.exists());
 }
+
+/// `stress-gen` must write the same bytes on every run: corpus.sha256 is the
+/// exact record a pass rate was measured against, and the generated
+/// stress-assembly sits in it. OCCT stamps the wall clock into FILE_NAME
+/// unless told otherwise, so two runs a second apart must still agree.
+#[test]
+fn stress_gen_output_is_byte_reproducible() {
+    if !kernel_available() {
+        return;
+    }
+    let generator = stepv::occt::kernel_path().with_file_name("stress-gen");
+    assert!(
+        generator.is_file(),
+        "stress-gen not built next to the kernel: {}",
+        generator.display()
+    );
+    let tmp = Scratch::new("stress-gen");
+    let run = |name: &str| {
+        let out = tmp.path(name);
+        let st = Command::new(&generator)
+            .arg(data("assembly.step"))
+            .arg("2")
+            .arg(&out)
+            .status()
+            .expect("spawn stress-gen");
+        assert!(st.success(), "stress-gen failed: {st}");
+        std::fs::read(out).unwrap()
+    };
+    let first = run("a.step");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = run("b.step");
+    assert!(first == second, "stress-gen output differs between runs");
+}

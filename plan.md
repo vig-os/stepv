@@ -5,8 +5,8 @@
 in-process inside the macOS Quick Look extensions, whose sandbox forbids exec. With the per-face
 recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn with a
 flagged overlay, and nothing crashes or hangs. With seven CAD writers and a real 143 MB assembly
-added (#12, 2026-10-11) it is 99.2% of 400: the one new non-pass is the real assembly, which loads
-correctly but takes 101 s (#51). The CLI, the Linux thumbnailer, MIME and KF6 plugin,
+added (#12, 2026-10-11) it is 99.2% of 400 (faithful or wireframe; 99.0% fully faithful). The one
+new non-pass is the real assembly, which loads correctly but takes 101 s (#51). The CLI, the Linux thumbnailer, MIME and KF6 plugin,
 the viewer window, and the macOS preview and thumbnail extensions all work. On macOS that was
 proven through Quick Look itself.
 **Audience:** the next agent or human picking this up cold. Read §1–§4, then §5 for what was
@@ -576,7 +576,15 @@ fetched by `just fixtures`, pinned by sha256, and never committed:
   coloured. **92.2 s of that is STEP transfer** (read 4.4 s, mesh 3.7 s), against 23 s in total
   for the 221 MB synthetic file. Bytes are not the cost; this file's structure is. At the
   CLI's 20 s default and the thumbnailer's 15 s, the file cannot be previewed today. That is #51.
-- No other row moved beyond run-to-run timing noise.
+- No other row moved beyond run-to-run timing noise. *Pass rate* is faithful or wireframe, as in
+  the S1 tables: 397/400 here, 396 fully faithful.
+- **`corpus.sha256` was not byte-exact for `stress-assembly` until now.** OCCT's writer stamps the
+  wall clock into `FILE_NAME`, so every regeneration hashed differently. `stress-gen` now writes a
+  fixed time stamp, and a test in `tests/cli.rs` generates twice and compares bytes. The lock's
+  `stress-assembly` line changes once, here.
+- The fetcher and the harness agree on what a corpus file is: both skip macOS `__MACOSX/` and
+  `._*` entries. The harness's own unit tests never ran before (`cargo test` skips example
+  tests); `just test` now runs `cargo test --example harness`.
 
 ### S2 — The CLI for real (#5): done
 
