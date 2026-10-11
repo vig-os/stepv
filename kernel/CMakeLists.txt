@@ -51,5 +51,9 @@ target_link_libraries(fixture-gen PRIVATE
 
 # The kernel ships; the generators are dev tools.
 install(TARGETS stepv-occt RUNTIME DESTINATION libexec/stepv)
+# Beside the kernel so tests find it via occt::kernel_path() (tests/cli.rs
+# checks its output is byte-reproducible). Not shipped: every package copies
+# stepv-occt from libexec/stepv by name.
+install(TARGETS stress-gen RUNTIME DESTINATION libexec/stepv)
 install(TARGETS stepvocct LIBRARY DESTINATION lib)
 install(FILES stepv_occt.h DESTINATION include)
