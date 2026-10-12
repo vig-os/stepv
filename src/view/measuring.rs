@@ -60,13 +60,18 @@ fn fresh(batch: Vec<(u64, Query)>) -> Vec<(u64, Query)> {
 impl Measurer {
     /// Starts the worker; the kernel starts on the first query.
     #[must_use]
-    pub fn spawn(kernel: &Path, input: &Path, limits: Limits, unhealed: &[u64]) -> Self {
+    /// `unhealed`: the faces the drawing run gave up healing, to replay
+    /// ([`Server::with_unhealed`]); `None` lets the server go by its clock.
+    pub fn spawn(kernel: &Path, input: &Path, limits: Limits, unhealed: Option<&[u64]>) -> Self {
         let (tx, jobs) = mpsc::channel::<(u64, Query)>();
         let (done, rx) = mpsc::channel();
         let (kernel, input): (PathBuf, PathBuf) = (kernel.to_owned(), input.to_owned());
-        let unhealed = unhealed.to_vec();
+        let unhealed = unhealed.map(<[u64]>::to_vec);
         std::thread::spawn(move || {
-            let mut server = Server::new(&kernel, &input, limits).with_unhealed(&unhealed);
+            let mut server = Server::new(&kernel, &input, limits);
+            if let Some(faces) = &unhealed {
+                server = server.with_unhealed(faces);
+            }
             while let Ok(first) = jobs.recv() {
                 let mut batch = vec![first];
                 batch.extend(jobs.try_iter());

@@ -62,9 +62,10 @@ pub struct Summary {
     pub faces_over_budget: usize,
     /// Those faces' numbers, in the order the kernel fixes faces: what a
     /// second process reading the file replays to see the same faces
-    /// ([`crate::measure::Server::with_unhealed`]). Absent from older kernels.
+    /// ([`crate::measure::Server::with_unhealed`]). `None` from older
+    /// kernels, which have no budget to replay.
     #[serde(default)]
-    pub unhealed_faces: Vec<u64>,
+    pub unhealed_faces: Option<Vec<u64>>,
     /// Faceless parts in a file with no faces at all: drawn as curves.
     pub sketch_parts: usize,
     /// Faceless parts beside solids: construction geometry.
@@ -321,6 +322,9 @@ fn command(
     // The nix product's wrapper sets it for the viewer's window and GPU
     // libraries; the sandboxed kernel needs none of them (#32 review).
     cmd.env_remove("LD_LIBRARY_PATH");
+    // A run that draws decides what to heal by its own clock; replaying
+    // another run's decisions is the measurement server's (#51).
+    cmd.env_remove("STEPV_OCCT_UNHEALED");
     cmd.arg(input)
         .arg("--linear-rel")
         .arg(deflection.linear_rel.to_string())

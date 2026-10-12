@@ -164,7 +164,7 @@ struct Viewer {
     /// The file and limits it is started with.
     input: Option<PathBuf>,
     limits: Option<crate::occt::Limits>,
-    unhealed: Vec<u64>,
+    unhealed: Option<Vec<u64>>,
     /// The model tree (#30).
     tree: Tree,
     /// The tree generation the GPU's visibility matches.
@@ -600,7 +600,7 @@ impl Viewer {
                 &crate::occt::kernel_path(),
                 input,
                 limits,
-                &self.unhealed,
+                self.unhealed.as_deref(),
             ));
         }
         self.measurer.as_ref()

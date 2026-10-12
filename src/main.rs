@@ -301,8 +301,8 @@ fn run(args: &Args) -> (u8, Value) {
             frames: args.frames,
             input: Some(args.input.clone()),
             limits: Some(args.limits),
-            unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone())
-                .unwrap_or_default(),
+            // Absent (an older kernel, or no summary): no replay.
+            unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone()).ok(),
             pick_at: std::env::var("STEPV_VIEW_PICK")
                 .map(|s| view::parse_pick_at(&s))
                 .unwrap_or_default(),

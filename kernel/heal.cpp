@@ -19,6 +19,7 @@
 #include <ShapeProcess_Operator.hxx>
 #include <ShapeProcess_ShapeContext.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -29,6 +30,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -227,12 +229,24 @@ void configure(ShapeProcess_ShapeContext& ctx, ShapeFix_Shape& fix) {
 // ShapeFix_Root::NeedFix: a mode below zero means "the default", here on.
 bool on(Standard_Integer mode) { return mode != 0; }
 
+// A face given up on: as the shape had it, and as it is put back.
+struct Unhealed {
+    TopoDS_Shape original;
+    TopoDS_Face face;
+};
+
 // Fixes the faces of `shape` one at a time, as ShapeFix_Shape and
-// ShapeFix_Shell would, with `projector` armed for each: shell by shell, each
-// with the context applied as its turn comes, then the free faces with the
-// two modes ShapeFix_Shape sets for one. A face whose clock runs out is taken
-// out of the shape through `reshape` and appended to `unhealed`. Returns
-// false when the progress was cancelled.
+// ShapeFix_Shell would, with `projector` armed for each: shell by shell,
+// each face with the context applied as its turn comes, then the free faces
+// with the two modes ShapeFix_Shape sets for one. A face whose clock runs out
+// is taken out of the shape through `reshape` and appended to `unhealed`.
+// Returns false when the progress was cancelled.
+//
+// Faces are numbered by their place in `shape` as it came in, so the numbers
+// do not depend on what fixing changed, and a replay (heal.h) names the same
+// faces. The fix of a face given up on can have changed shared edges before
+// its clock ran out, which a replay, not fixing it at all, does not: the
+// neighbours of an unhealed face can differ slightly between the two.
 //
 // Faces in shells are fixed when the solid, shell and face modes all allow it:
 // ShapeFix_Shape asks the same of a shell inside a solid (and of a free shell,
@@ -240,36 +254,40 @@ bool on(Standard_Integer mode) { return mode != 0; }
 // turns one off and not the other).
 bool fix_faces(ShapeFix_Shape& fix, BudgetedProjection& projector,
                const Handle(ShapeBuild_ReShape)& reshape, const TopoDS_Shape& shape,
-               std::vector<TopoDS_Face>& unhealed, const Message_ProgressRange& progress) {
+               std::vector<Unhealed>& unhealed, const Message_ProgressRange& progress) {
     const Handle(ShapeFix_Face) face_fix = fix.FixFaceTool();
     face_fix->SetContext(reshape);
     const bool in_shells = on(fix.FixSolidMode()) && on(fix.FixSolidTool()->FixShellMode()) &&
                            on(fix.FixShellTool()->FixFaceMode());
     const bool free_faces = on(fix.FixFreeFaceMode());
-    TopTools_MapOfShape distinct;
+    TopTools_IndexedMapOfShape numbered;  // located nowhere, in explorer order
     for (TopExp_Explorer f(shape, TopAbs_FACE); f.More(); f.Next())
-        distinct.Add(f.Current().Located(TopLoc_Location()));
-    Message_ProgressScope scope(progress, "Fixing face", distinct.Extent());
+        numbered.Add(f.Current().Located(TopLoc_Location()));
+    long base;
+    {
+        std::lock_guard<std::mutex> g(state().lock);
+        base = state().next;
+        state().next += numbered.Extent();
+    }
+    Message_ProgressScope scope(progress, "Fixing face", numbered.Extent());
 
     TopTools_MapOfShape seen;  // a face shared by two shells is fixed once
-    auto fix_one = [&](const TopoDS_Shape& f) {
-        // A face an earlier fix removed, or split into several.
-        if (f.IsNull() || f.ShapeType() != TopAbs_FACE) return;
-        if (!seen.Add(f.Located(TopLoc_Location()))) return;
-        const TopoDS_Face& face = TopoDS::Face(f);
+    auto fix_one = [&](const TopoDS_Shape& original) {
+        if (!seen.Add(original.Located(TopLoc_Location()))) return;
         scope.Next();
-        // Faces are numbered in the order they are fixed, the same in every
-        // run of the same file: what a replay names.
-        long ordinal;
+        // As earlier fixes left it: gone, or split into several, is skipped.
+        const TopoDS_Shape now = reshape->Apply(original);
+        if (now.IsNull() || now.ShapeType() != TopAbs_FACE) return;
+        const TopoDS_Face& face = TopoDS::Face(now);
+        const long ordinal = base + numbered.FindIndex(original.Located(TopLoc_Location())) - 1;
         std::optional<bool> replayed;  // set: whether the replayed run gave up on it
         {
             std::lock_guard<std::mutex> g(state().lock);
-            ordinal = state().next++;
             if (state().replay) replayed = state().replay->count(ordinal) > 0;
         }
         auto give_up = [&] {
             reshape->Remove(face);
-            unhealed.push_back(face);
+            unhealed.push_back({original, face});
             std::lock_guard<std::mutex> g(state().lock);
             state().ordinals.push_back(ordinal);
         };
@@ -288,9 +306,9 @@ bool fix_faces(ShapeFix_Shape& fix, BudgetedProjection& projector,
     };
     if (in_shells) {
         for (TopExp_Explorer sh(shape, TopAbs_SHELL); sh.More(); sh.Next()) {
-            for (TopoDS_Iterator it(reshape->Apply(sh.Current())); it.More(); it.Next()) {
+            for (TopoDS_Iterator it(sh.Current()); it.More(); it.Next()) {
                 if (!scope.More()) return false;
-                fix_one(it.Value());
+                if (it.Value().ShapeType() == TopAbs_FACE) fix_one(it.Value());
             }
         }
     }
@@ -301,7 +319,7 @@ bool fix_faces(ShapeFix_Shape& fix, BudgetedProjection& projector,
         wire.ModifyTopologyMode() = Standard_True;
         if (small == -1) face_fix->FixSmallAreaWireMode() = Standard_True;
         for (TopExp_Explorer f(shape, TopAbs_FACE, TopAbs_SHELL); f.More() && scope.More(); f.Next())
-            fix_one(reshape->Apply(f.Current()));
+            fix_one(f.Current());
         wire.ModifyTopologyMode() = topology;
         face_fix->FixSmallAreaWireMode() = small;
     }
@@ -332,7 +350,7 @@ public:
         reshape->ModeConsiderLocation() = Standard_True;
         fix->SetContext(reshape);
 
-        std::vector<TopoDS_Face> unhealed;
+        std::vector<Unhealed> unhealed;
         Handle(ShapeFix_Wire) wire = fix->FixWireTool();
         const bool tails = wire->FixTailMode() == 1;
         Message_ProgressScope scope(progress, nullptr, tails ? 4 : 2);
@@ -375,20 +393,23 @@ public:
             // map into the transfer's binders). The map is the context's own
             // member, only handed out const.
             auto& history = const_cast<TopTools_DataMapOfShapeShape&>(ctx->Map());
+            // Keyed by the face as the shape came in: matched on that, not on
+            // the face put back, which an earlier fix may have rebuilt.
             for (TopTools_DataMapOfShapeShape::Iterator it(history); it.More(); it.Next()) {
                 if (!it.Value().IsNull()) continue;
-                for (const TopoDS_Face& f : unhealed)
-                    if (it.Key().TShape() == f.TShape())
-                        it.ChangeValue() = f.Located(it.Key().Location()).Oriented(it.Key().Orientation());
+                for (const Unhealed& u : unhealed)
+                    if (it.Key().TShape() == u.original.TShape())
+                        it.ChangeValue() =
+                            u.face.Located(it.Key().Location()).Oriented(it.Key().Orientation());
             }
             BRep_Builder b;
             TopoDS_Compound with;
             b.MakeCompound(with);
             b.Add(with, ctx->Result());
             std::lock_guard<std::mutex> g(state().lock);
-            for (const TopoDS_Face& f : unhealed) {
-                b.Add(with, f);
-                state().unhealed.Add(f.Located(TopLoc_Location()));
+            for (const Unhealed& u : unhealed) {
+                b.Add(with, u.face);
+                state().unhealed.Add(u.face.Located(TopLoc_Location()));
             }
             ctx->SetResult(with);
         }
@@ -416,12 +437,14 @@ void begin_face_budget() {
     std::optional<std::set<long>> replay;
     if (const char* v = std::getenv("STEPV_OCCT_UNHEALED")) {
         replay.emplace();
+        // Comma-separated numbers; anything else between commas is skipped.
         for (const char* p = v; *p;) {
             char* end = nullptr;
             const long n = std::strtol(p, &end, 10);
-            if (end == p) break;  // not a number: the list ends here
-            replay->insert(n);
-            p = *end == ',' ? end + 1 : end;
+            if (end != p && n >= 0 && (*end == ',' || *end == '\0')) replay->insert(n);
+            const char* comma = std::strchr(p, ',');
+            if (!comma) break;
+            p = comma + 1;
         }
     }
     long ms = kDefaultBudgetMs;

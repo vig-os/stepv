@@ -106,7 +106,7 @@ fn a_file_without_pcurves_heals_within_the_default_budget() {
     } = run("no-pcurves.step", None);
     let with = run("assembly.step", None).summary;
     assert_eq!(s.faces_over_budget, 0);
-    assert!(s.unhealed_faces.is_empty());
+    assert_eq!(s.unhealed_faces, Some(vec![]));
     assert_eq!(s.faces_unmeshed, 0, "every face meshed first time");
     assert_eq!((s.faces, s.triangles), (with.faces, with.triangles));
     assert_eq!((s.parts_named, s.parts_colored), (3, 3));
@@ -127,7 +127,7 @@ fn a_face_past_its_budget_is_drawn_as_its_outline_and_the_run_goes_on() {
     // hole and the pin, need it; planes do not (OCCT computes their 2D
     // curves on demand).
     assert_eq!(s.faces_over_budget, 2);
-    assert_eq!(s.unhealed_faces.len(), 2);
+    assert_eq!(s.unhealed_faces.as_ref().map(Vec::len), Some(2));
     assert_eq!(s.faces_unmeshed, s.faces_over_budget);
     assert_eq!(s.faces_missing, s.faces_over_budget);
     // Every face is still there: the plate's 7 and each pin's 3.
@@ -191,6 +191,7 @@ fn a_replay_gives_up_on_the_same_faces_whatever_its_clock() {
     let list = first
         .unhealed_faces
         .iter()
+        .flatten()
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(",");
@@ -202,7 +203,7 @@ fn a_replay_gives_up_on_the_same_faces_whatever_its_clock() {
     // ...and with a clock that has already run out, on no others.
     let none = run_with("no-pcurves.step", &[(UNHEALED, ""), (BUDGET, "0")]).summary;
     assert_eq!(none.faces_over_budget, 0);
-    assert!(none.unhealed_faces.is_empty());
+    assert_eq!(none.unhealed_faces, Some(vec![]));
 }
 
 #[test]
@@ -218,4 +219,44 @@ fn a_budget_that_is_not_a_number_is_the_default() {
     let s = run("no-pcurves.step", Some("soon")).summary;
     assert_eq!(s.faces_over_budget, 0);
     assert_eq!(s.faces_unmeshed, 0);
+}
+
+#[test]
+fn the_measurement_server_replays_the_run_and_numbers_faces_alike() {
+    use stepv::measure::{Entity, Query, Server};
+    use stepv::topology::Surface;
+    let run = run("no-pcurves.step", Some("0"));
+    let unhealed = run.summary.unhealed_faces.clone().unwrap();
+    // The pin's cylinder, as the drawing run numbered it: last, put back
+    // loose beside the healed faces.
+    let proto = &run.topology.prototypes[run.topology.parts[1].prototype];
+    let face = proto
+        .faces
+        .iter()
+        .position(|f| matches!(f.surface, Surface::Cylinder { .. }))
+        .unwrap() as u32;
+    let pins = Query::Distance(
+        Entity::Face { part: 1, face },
+        Entity::Face { part: 2, face },
+    );
+    let limits = occt::Limits {
+        timeout: std::time::Duration::from_secs(60),
+        memory: Some(2 << 30),
+    };
+    // A server with all the time in the world, replaying the run: the same
+    // face is the cylinder, and the pins' axes are 28 mm apart through it.
+    let mut replay = Server::new(&kernel(), &data("no-pcurves.step"), limits)
+        .with_env(BUDGET, "60000")
+        .with_unhealed(&unhealed);
+    let a = replay.ask(&pins).unwrap();
+    assert!((a.axis_distance.unwrap() - 28.0).abs() < 1e-6, "{a:?}");
+    // Going by its own clock it heals the cylinder in place, and that number
+    // is another face.
+    let mut own =
+        Server::new(&kernel(), &data("no-pcurves.step"), limits).with_env(BUDGET, "60000");
+    let b = own.ask(&pins).unwrap();
+    assert!(
+        b.axis_distance.is_none_or(|d| (d - 28.0).abs() > 1e-6),
+        "{b:?}"
+    );
 }

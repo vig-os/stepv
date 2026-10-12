@@ -1185,6 +1185,12 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
     reports the numbers it gave up on (`unhealed_faces`), and `STEPV_OCCT_UNHEALED` replays them
     exactly, with no clock on the rest. The viewer hands the list to its measurement server
     (`measure::Server::with_unhealed`).
+    - Faces are numbered by their place in the shape as it reached the reader, so fixing can't
+      shift the numbers (review round 2).
+    - Its one limit: the fix of a face given up on may already have changed shared edges, and
+      a replay doesn't repeat that. So the neighbours of an unhealed face can differ slightly
+      between the drawn model and the measured one.
+    - An older kernel reports no list, and then the server goes by its own clock.
   - **Colours and names on an unhealed face.** Removed, the face was mapped to nothing in the
     healing history, so the reader lost its own colour. It is mapped back to itself.
   - **Tails.** As in OCCT, the second pass finds the faces already fixed.
@@ -1217,7 +1223,8 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
   - a budget that isn't a number is the default;
   - the green face colour on an unhealed cylinder survives;
   - an unhealed face's box is its edges', in the summary and the topology;
-  - a replay gives up on the same faces with no clock, and on none with a clock already run out.
+  - a replay gives up on the same faces with no clock, and on none with a clock already run out;
+  - the measurement server replaying the run numbers the pin's cylinder as the run does.
 
 ### Work queue (ordered, 2026-10-04)
 
