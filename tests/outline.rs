@@ -114,3 +114,28 @@ fn a_file_that_is_not_step_fails_cleanly() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(!e.to_string().is_empty());
 }
+
+#[test]
+fn outline_takes_no_outputs_and_not_serve_either() {
+    // Refused before anything is created: an output named here would
+    // otherwise be truncated on the way to the usage error.
+    let dir = std::env::temp_dir().join(format!("stepv-outline-args-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mesh = dir.join("never.bin");
+    let input = data("assembly.step");
+    for args in [
+        vec!["--outline", "--serve"],
+        vec!["--outline", "--mesh", mesh.to_str().unwrap()],
+        vec!["--outline", "--topology", mesh.to_str().unwrap()],
+    ] {
+        let st = std::process::Command::new(kernel())
+            .arg(&input)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(2), "{args:?}");
+        assert!(!mesh.exists(), "{args:?} created an output");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

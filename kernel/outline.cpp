@@ -12,7 +12,11 @@
 // assembly takes its product's name, else its instance's; a part its
 // product's name, else its instance's.
 //
-// What it does NOT mirror is how a product's representations become bodies:
+// Two things it does NOT mirror. A product with sub-assemblies AND a shape
+// of its own: the transfer keeps both (ActorRead, "Product has both
+// sub-assemblies and directly assigned shape"), so --topology has its own
+// body as an extra unnamed child; the outline has the sub-assemblies only.
+// No corpus file has one. And how a product's representations become bodies:
 // a part whose main SHAPE_REPRESENTATION relates several sub-representations
 // (a solid and a wireframe, AP203's hybrid models) transfers to several
 // bodies, which --topology shows as unnamed children. That depends on OCCT's
@@ -33,6 +37,11 @@
 #include <StepData_StepModel.hxx>
 #include <StepRepr_NextAssemblyUsageOccurrence.hxx>
 #include <StepRepr_ProductDefinitionShape.hxx>
+#include <StepDimTol_DatumFeature.hxx>
+#include <StepDimTol_GeometricTolerance.hxx>
+#include <StepRepr_PropertyDefinition.hxx>
+#include <StepRepr_Representation.hxx>
+#include <StepRepr_ShapeAspect.hxx>
 #include <StepShape_ShapeDefinitionRepresentation.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <TCollection_HAsciiString.hxx>
@@ -40,6 +49,7 @@
 #include <XSControl_WorkSession.hxx>
 
 #include <algorithm>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -98,40 +108,91 @@ std::vector<Handle(StepRepr_NextAssemblyUsageOccurrence)> children(
     return out;
 }
 
-// Whether `pd` has a shape of its own: a SHAPE_DEFINITION_REPRESENTATION on
-// one of its PRODUCT_DEFINITION_SHAPEs. A product with neither that nor
-// sub-assemblies (a material, a document) transfers to nothing, so the tree
-// --topology walks does not have it either.
+// An SDR the transfer would translate: one with a representation
+// (STEPControl_ActorRead getSDR).
+bool usable_sdr(const Handle(Standard_Transient)& e) {
+    auto sdr = Handle(StepShape_ShapeDefinitionRepresentation)::DownCast(e);
+    return !sdr.IsNull() && !sdr->UsedRepresentation().IsNull();
+}
+
+// Whether `pd` has a shape of its own, found the way getSDR finds one: an
+// SDR on one of its PRODUCT_DEFINITION_SHAPEs, or on a SHAPE_ASPECT of one
+// (getListSDR; aspects used for GD&T do not count). A product with neither,
+// and no sub-assemblies (a material, a document), transfers to nothing, so
+// the tree --topology walks does not have it either.
 bool has_shape(const Interface_Graph& graph, const Handle(StepBasic_ProductDefinition)& pd) {
     for (Interface_EntityIterator it = graph.Sharings(pd); it.More(); it.Next()) {
         if (Handle(StepRepr_ProductDefinitionShape)::DownCast(it.Value()).IsNull()) continue;
         for (Interface_EntityIterator jt = graph.Sharings(it.Value()); jt.More(); jt.Next()) {
-            if (jt.Value()->IsKind(STANDARD_TYPE(StepShape_ShapeDefinitionRepresentation)))
-                return true;
+            if (usable_sdr(jt.Value())) return true;
+            auto sa = Handle(StepRepr_ShapeAspect)::DownCast(jt.Value());
+            if (sa.IsNull() || sa->IsKind(STANDARD_TYPE(StepDimTol_DatumFeature))) continue;
+            bool tolerance = false;
+            for (Interface_EntityIterator kt = graph.Sharings(sa); kt.More(); kt.Next())
+                tolerance |= kt.Value()->IsKind(STANDARD_TYPE(StepDimTol_GeometricTolerance));
+            if (tolerance) continue;
+            for (Interface_EntityIterator kt = graph.Sharings(sa); kt.More(); kt.Next()) {
+                if (Handle(StepRepr_PropertyDefinition)::DownCast(kt.Value()).IsNull()) continue;
+                for (Interface_EntityIterator lt = graph.Sharings(kt.Value()); lt.More(); lt.Next())
+                    if (usable_sdr(lt.Value())) return true;
+            }
         }
     }
     return false;
 }
+
+// Bounds on what one file may make the walker write. Shared sub-assemblies
+// expand per instance, so a small file can describe an exponential tree;
+// the transfer would expand it too, but the outline must stay cheap, and it
+// also runs in-process (the C API). Depth 60 also keeps the JSON's nesting
+// (about two levels per node) inside serde_json's default limit of 128.
+constexpr int kMaxDepth = 60;
+constexpr long kMaxNodes = 1000000;
 
 struct Walker {
     const Interface_Graph& graph;
     Namer name;
     std::ostringstream o;
     long leaves = 0;
+    long nodes = 0;
+    std::map<const Standard_Transient*, bool> shown_;
 
-    // Whether node() would write anything for `pd`.
-    bool shown(const Handle(StepBasic_ProductDefinition)& pd) const {
-        return !children(graph, pd).empty() || has_shape(graph, pd);
+    // Whether node() writes anything for `pd`: it has a shape, or a child
+    // that is shown (an assembly of shapeless products transfers to nothing
+    // too). Memoised, since a product can be instanced many times.
+    bool shown(const Handle(StepBasic_ProductDefinition)& pd, int depth = 0) {
+        if (depth > kMaxDepth) return true;  // node() reports the depth
+        if (auto it = shown_.find(pd.get()); it != shown_.end()) return it->second;
+        bool r = has_shape(graph, pd);
+        if (!r) {
+            for (const auto& n : children(graph, pd)) {
+                const Handle(StepBasic_ProductDefinition) c = n->RelatedProductDefinition();
+                if (!c.IsNull() && shown(c, depth + 1)) {
+                    r = true;
+                    break;
+                }
+            }
+        }
+        shown_[pd.get()] = r;
+        return r;
     }
 
     void node(const Handle(StepBasic_ProductDefinition)& pd, const std::string& instance,
               int depth) {
         // A cyclic or absurdly deep product graph is malformed input, not a
         // reason to blow the stack (the same bound as walk()).
-        if (depth > 64) throw std::runtime_error("assembly nesting deeper than 64");
+        if (depth > kMaxDepth) throw std::runtime_error("assembly nesting deeper than 60");
+        if (++nodes > kMaxNodes) throw std::runtime_error("outline larger than a million nodes");
         std::string own = name.product(pd);
         const std::string& label = own.empty() ? instance : own;
-        const auto kids = children(graph, pd);
+        std::vector<Handle(StepBasic_ProductDefinition)> kids;
+        std::vector<std::string> names;
+        for (const auto& n : children(graph, pd)) {
+            const Handle(StepBasic_ProductDefinition) child = n->RelatedProductDefinition();
+            if (child.IsNull() || !shown(child, depth + 1)) continue;
+            kids.push_back(child);
+            names.push_back(name.instance(n));
+        }
         o << "{\"name\":\"" << json_escape(label) << '"';
         if (kids.empty()) {
             o << ",\"part\":" << leaves++ << '}';
@@ -139,12 +200,10 @@ struct Walker {
         }
         o << ",\"children\":[";
         bool first = true;
-        for (const auto& n : kids) {
-            const Handle(StepBasic_ProductDefinition) child = n->RelatedProductDefinition();
-            if (child.IsNull() || !shown(child)) continue;
+        for (std::size_t k = 0; k < kids.size(); ++k) {
             o << (first ? "" : ",");
             first = false;
-            node(child, name.instance(n), depth + 1);
+            node(kids[k], names[k], depth + 1);
         }
         o << "]}";
     }
@@ -170,7 +229,7 @@ std::string outline_json(const std::string& path) {
     const Namer namer{model->SourceCodePage() != Resource_FormatType_NoConversion};
     const Interface_Graph& graph = reader.WS()->Graph();
 
-    Walker w{graph, namer, {}, 0};
+    Walker w{graph, namer, {}, 0, 0, {}};
     w.o << "{\"format\":\"stepv-outline\",\"version\":1,\"tree\":[";
     bool first = true;
     const int roots = reader.NbRootsForTransfer();

@@ -7,6 +7,8 @@
 //! just harness --cold-start 30             # spawn-to-result latency only
 //! just harness --strict tests/fixtures/x   # CI gate: non-zero on any crash
 //! just harness --min-pass 95 ...           # ... or below a 95% pass rate
+//! just harness --outline ...               # also check each STEP file's
+//!                                          # outline (#54); --strict gates it
 //! ```
 //!
 //! For each file: import through XCAF, tessellate at bbox-relative
@@ -92,6 +94,18 @@ struct Record {
     wall_ms: f64,
     run: occt::Run,
     note: Option<String>,
+    /// With `--outline`, for a STEP file the run loaded.
+    outline: Option<OutlineCheck>,
+}
+
+/// How a file's outline compared with its full run's product tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutlineCheck {
+    Agree,
+    /// A multi-file assembly: its referenced products are leaves in the
+    /// outline by design (`kernel/outline.h`), so it is not compared.
+    MultiFile,
+    Mismatch(String),
 }
 
 struct Args {
@@ -103,6 +117,9 @@ struct Args {
     strict: bool,
     /// Fail below this pass rate (percent), over the non-malformed files.
     min_pass: Option<f64>,
+    /// Also hold each STEP file's `--outline` to `topology::products` of the
+    /// run's `--topology` tree (#54).
+    outline: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -114,6 +131,7 @@ fn parse_args() -> Result<Args, String> {
         memory: None,
         strict: false,
         min_pass: None,
+        outline: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -133,6 +151,7 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "--strict" => a.strict = true,
+            "--outline" => a.outline = true,
             "--min-pass" => {
                 a.min_pass = Some(
                     value("--min-pass")?
@@ -250,15 +269,25 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
         timeout: args.timeout,
         memory: args.memory,
     };
+    let step = args.outline
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "step" | "stp"));
+    let topo = mesh.with_extension("topology.json");
+    let _ = std::fs::remove_file(&topo);
     let run = occt::run(
         kernel,
         path,
         args.deflection,
         limits,
         Some(mesh),
-        None,
+        step.then_some(topo.as_path()),
         false,
     )?;
+    let outline = (step && run.outcome == Outcome::Ok)
+        .then(|| check_outline(kernel, path, &topo, &run, limits));
+    let _ = std::fs::remove_file(&topo);
     let mut note = run.summary.as_ref().and_then(|s| s.error.clone());
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,
@@ -338,7 +367,34 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
         wall_ms: run.wall.as_secs_f64() * 1e3,
         run,
         note,
+        outline,
     })
+}
+
+/// The file's `--outline` against `topology::products` of the tree the run
+/// just wrote.
+fn check_outline(
+    kernel: &Path,
+    path: &Path,
+    topo: &Path,
+    run: &occt::Run,
+    limits: occt::Limits,
+) -> OutlineCheck {
+    if run.summary.as_ref().is_some_and(|s| s.external_files > 0) {
+        return OutlineCheck::MultiFile;
+    }
+    let full = match std::fs::read(topo)
+        .map_err(|e| e.to_string())
+        .and_then(|b| stepv::topology::Topology::parse(&b).map_err(|e| e.to_string()))
+    {
+        Ok(t) => t,
+        Err(e) => return OutlineCheck::Mismatch(format!("no topology to compare: {e}")),
+    };
+    match occt::outline(kernel, path, limits) {
+        Ok(o) if o.tree == stepv::topology::products(&full.tree) => OutlineCheck::Agree,
+        Ok(o) => OutlineCheck::Mismatch(format!("{} leaves differ from the products", o.leaves)),
+        Err(e) => OutlineCheck::Mismatch(format!("outline failed: {e}")),
+    }
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -364,6 +420,7 @@ fn jsonl(r: &Record) -> String {
         "verdict": r.verdict.name(),
         "wall_ms": r.wall_ms,
         "note": r.note,
+        "outline": r.outline.as_ref().map(|c| format!("{c:?}")),
         "summary": r.run.summary.as_ref().map(|s| serde_json::json!({
             "stage": s.stage, "format": s.format, "parts": s.parts,
             "parts_named": s.parts_named, "parts_colored": s.parts_colored,
@@ -478,6 +535,17 @@ fn report(records: &[Record]) -> String {
         total(|s| s.sketch_parts),
         total(|s| s.construction_parts),
     );
+    let checked: Vec<_> = records.iter().filter_map(|r| r.outline.as_ref()).collect();
+    if !checked.is_empty() {
+        let n = |want: fn(&OutlineCheck) -> bool| checked.iter().filter(|c| want(c)).count();
+        let _ = writeln!(
+            out,
+            "\nOutline vs products of --topology (#54): {} agree, {} differ, {} multi-file (not compared)",
+            n(|c| *c == OutlineCheck::Agree),
+            n(|c| matches!(c, OutlineCheck::Mismatch(_))),
+            n(|c| *c == OutlineCheck::MultiFile),
+        );
+    }
     out
 }
 
@@ -568,7 +636,15 @@ fn main() -> ExitCode {
                 r.path.display()
             );
         }
-        if !bad.is_empty() {
+        // With --outline, every compared outline must agree (#54).
+        let mut differ = false;
+        for r in &records {
+            if let Some(OutlineCheck::Mismatch(why)) = &r.outline {
+                eprintln!("harness --strict: outline {} ({why})", r.path.display());
+                differ = true;
+            }
+        }
+        if !bad.is_empty() || differ {
             return ExitCode::FAILURE;
         }
     }

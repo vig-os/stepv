@@ -12,9 +12,15 @@
 // leaf, IS the outline. Leaf numbers count the outline's leaves only: the
 // geometry's tree replaces the outline when it arrives.
 //
-// One deliberate gap: a multi-file assembly's externally referenced products
-// are leaves. The transfer reads those files and expands them; the outline
-// reads only the file it is given, to stay a parse of one file.
+// Known gaps, each a mismatch rather than a silent error:
+//   - a multi-file assembly's externally referenced products are leaves:
+//     the transfer reads those files, the outline only the one it is given;
+//   - a product with sub-assemblies AND its own shape loses the shape (the
+//     transfer adds it as an unnamed child; no corpus file has one);
+//   - products() could merge a real sub-assembly whose products and
+//     instances all have no name, id or description at all.
+// Bounded: at most 60 levels deep and a million nodes (shared
+// sub-assemblies expand per instance), else an error.
 #pragma once
 
 #include <string>

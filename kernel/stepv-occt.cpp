@@ -156,6 +156,12 @@ int main(int argc, char** argv) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
     }
+    // --serve and --outline write nothing and exclude each other: refused
+    // here, before any output file is created (and so truncated).
+    if ((serve || outline) && (serve == outline || !mesh_out.empty() || !topology_out.empty())) {
+        std::fputs(kUsage, stderr);
+        return kExitUsage;
+    }
 
     // Test hook for the memory cap (tests/cli.rs): allocate and touch this many
     // MiB, then hold them, so the parent's cap has something deterministic to
@@ -234,12 +240,10 @@ int main(int argc, char** argv) {
     if (serve) {
         // Sandboxed like a run, with nothing writable: queries in, answers
         // out, on the descriptors it already has.
-        if (!mesh_out.empty() || !topology_out.empty()) return kExitUsage;
         return stepv_occt_serve(input.c_str(), sandbox.c_str(), STDIN_FILENO, json_fd);
     }
     if (outline) {
         // Sandboxed like --serve, with nothing writable: one JSON line out.
-        if (serve || !mesh_out.empty() || !topology_out.empty()) return kExitUsage;
         int code = 3;
         char* json = stepv_occt_outline(input.c_str(), &code);
         if (!json) return 3;

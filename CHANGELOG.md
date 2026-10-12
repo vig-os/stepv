@@ -11,12 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The assembly outline before the geometry** ([#54](https://github.com/vig-os/stepv/issues/54)):
   `stepv-occt --outline` reads a STEP file's product tree and names straight from its parsed
-  entities, with no shape transfer. On the 143 MB Ultimaker 3 assembly that takes 4.9 s against
-  102 s for the full run ([#51](https://github.com/vig-os/stepv/issues/51)), so a front-end can
+  entities, with no shape transfer. On the 143 MB Ultimaker 3 assembly that takes 4.6 s against
+  98.6 s for the full run ([#51](https://github.com/vig-os/stepv/issues/51)), so a front-end can
   show the tree while the geometry loads
   - It is the product level of the tree `--topology` writes: the same products, names and order.
     A product the transfer splits into unnamed bodies is one leaf (`topology::products`)
   - In the C API as `stepv_occt_outline`, and in Rust as `occt::outline`
+  - `harness --outline` checks it against each STEP file's full run; CI's `--strict` gate fails
+    on a mismatch
 - **Corpus: seven CAD writers and a real large assembly** ([#12](https://github.com/vig-os/stepv/issues/12)):
   `just fixtures` now fetches one file each from SolidWorks, NX, CATIA, Fusion 360, FreeCAD,
   Inventor and Creo, the whole Ultimaker 3 printer (143 MB, 523 parts) and MBx-IF's public AP242
