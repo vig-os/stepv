@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Atomic, versioned cache entries** ([#62](https://github.com/vig-os/stepv/issues/62)):
+  an entry is either whole and current or ignored
+  - Entries carry a format version and a checksum; a truncated, corrupt or old-version entry is
+    a miss and is regenerated. Existing caches are regenerated once
+  - Every write is a `.part` file, `fsync`ed and renamed, then the directory `fsync`ed;
+    concurrent writers of one key never tear an entry, and stale `.part` files are swept
+  - Failures cached before this (raw `.fail` files) are ignored and regenerated
 - **A time budget for healing each face** ([#51](https://github.com/vig-os/stepv/issues/51)):
   a file written without p-curves (SolidWorks writes none) has the reader rebuild every edge's
   2D curve on each face by projection, and on a few faces that is very slow. The kernel now heals

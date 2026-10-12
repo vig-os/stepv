@@ -1226,6 +1226,38 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
   - a replay gives up on the same faces with no clock, and on none with a clock already run out;
   - the measurement server replaying the run numbers the pin's cylinder as the run does.
 
+### Cache (#62, #54 step 4, 2026-10-12)
+
+A killed or failed run must never leave an entry a later run trusts. This is the entries and how
+they are written; which results may be cached at all (complete-only, the negative cache) follows
+as #62's second part, and the outline artifact as its third.
+
+- **Entries (`cache::store`, `cache::load`):** `STEPVCE\0`, `ENTRY_VERSION` (u32 LE), the
+  payload's length (u64 LE), the payload, then its blake3 hash as the completeness tag. `load`
+  treats a short, corrupt or other-version entry (and a raw pre-#62 one) as a miss, and the run
+  regenerates it. Bumping `ENTRY_VERSION` invalidates the whole cache.
+- **Writes (`cache::write_atomic`):** `<name>.<pid>.<nonce>.part` in the target's own directory
+  (`rename` is atomic only within a filesystem), `fsync`, `rename`, then `fsync` of the
+  directory. Every output stepv writes goes through it, the user's `--png`/`--topology` too.
+  Concurrent writers of one key each have their own `.part`; the last rename wins whole.
+  A failed directory `fsync` after the rename is not an error: the entry is complete, and at worst
+  a crash loses it and it is regenerated. The hash catches truncation, not forgery: the cache
+  directory is the user's own.
+- **Stale `.part` files:** a writer killed between its write and its rename leaves one. `store`
+  sweeps those older than `STALE_PART_AGE` (1 h) from the cache directory; never in the user's.
+  The age is by wall clock, so a writer stopped longer than that loses its `.part`: its rename
+  fails with `ENOENT`, harmlessly.
+- **Known limit:** the keys share `(len, mtime)`'s blind spot: a file rewritten in place within
+  one mtime tick at the same length.
+- **Tests:**
+  - `tests/cache.rs`: a truncated and an old-version entry are regenerated.
+  - `cache.rs`'s unit tests:
+    - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
+      frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn
+      reads in each of 5 runs;
+    - only a complete current-version entry loads;
+    - the sweep takes stale `.part` files only.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
