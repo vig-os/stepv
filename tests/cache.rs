@@ -4,6 +4,7 @@
 //! kernel against `tests/data/`.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -627,16 +628,37 @@ fn a_later_run_killed_after_its_outline_keeps_the_box() {
 /// The most a `view` test lets the viewer process hold (#86): its kernel
 /// has `--memory-mb`, the viewer itself has no cap of its own.
 const VIEW_FOOTPRINT_CAP: u64 = 2 << 30;
+/// How long a `view` test may run before the watchdog kills it: well past
+/// the `--timeout` `Home::view` gives stepv, which fires first.
+const VIEW_DEADLINE: Duration = Duration::from_secs(120);
 
 impl Home {
     /// `stepv view <input>` with `args`, held to what a test may cost (#86):
-    /// the kernel under `--memory-mb 1024`, the screenshot hook set so a
-    /// window that opens closes itself, and the viewer's own footprint polled,
-    /// killed and failed past [`VIEW_FOOTPRINT_CAP`] or after 120 s.
+    /// the kernel under `--memory-mb 1024`, stepv's own `--timeout 30` unless
+    /// `args` gives another, the screenshot hook set so a window that opens
+    /// closes itself, and the viewer's own footprint polled.
+    ///
+    /// The watchdog is the backstop: past [`VIEW_FOOTPRINT_CAP`] or
+    /// [`VIEW_DEADLINE`] it kills the run's whole process group, not stepv
+    /// alone. The kernel's caps are stepv's own sampler, so a kernel orphaned
+    /// by killing stepv would run on uncapped. However the run ends, nothing
+    /// of its group may outlive it.
     fn view(&self, input: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+        self.view_within(input, args, env, VIEW_DEADLINE)
+    }
+
+    /// [`Home::view`] with the watchdog's `deadline`.
+    fn view_within(
+        &self,
+        input: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        deadline: Duration,
+    ) -> (i32, Value) {
         let shot = self.0.join("shot.png");
+        // A later `--timeout` in `args` wins.
         let all = [
-            &["view", input.to_str().unwrap()][..],
+            &["view", input.to_str().unwrap(), "--timeout", "30"][..],
             args,
             &["--memory-mb", "1024"],
         ]
@@ -645,20 +667,87 @@ impl Home {
         let mut child = self
             .command(&all, &env)
             .stdout(std::process::Stdio::piped())
+            // Its own group, the kernel included: one kill takes them all.
+            .process_group(0)
             .spawn()
             .expect("spawn stepv view");
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while child.try_wait().unwrap().is_none() {
+        let group = child.id() as libc::pid_t;
+        let start = Instant::now();
+        let fired = loop {
+            if child.try_wait().unwrap().is_some() {
+                break None;
+            }
             let fp = occt::footprint(child.id()).unwrap_or(0);
-            if fp > VIEW_FOOTPRINT_CAP || Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("stepv view killed: footprint {fp} bytes, or past 120 s");
+            if fp > VIEW_FOOTPRINT_CAP {
+                break Some(format!(
+                    "footprint {fp} bytes over the cap of {VIEW_FOOTPRINT_CAP}"
+                ));
+            }
+            if start.elapsed() > deadline {
+                break Some(format!(
+                    "{:.1} s elapsed, past the deadline of {} s",
+                    start.elapsed().as_secs_f64(),
+                    deadline.as_secs()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if fired.is_some() {
+            // SAFETY: a signal to the group this test spawned.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
+        let out = child.wait_with_output().unwrap();
+        // Every member gone, the kernel included (stepv reaps it; one it
+        // left would be reparented and reaped once dead).
+        let gone = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the group has members.
+        while unsafe { libc::killpg(group, 0) } == 0 {
+            if Instant::now() > gone {
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+                panic!("a process of stepv view's group outlived it");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        result(&child.wait_with_output().unwrap())
+        if let Some(why) = fired {
+            panic!("stepv view and its group killed: {why}");
+        }
+        result(&out)
     }
+}
+
+#[test]
+fn the_view_watchdog_kills_the_kernel_too() {
+    let h = Home::new("viewdog");
+    // A kernel that never finishes, and says who it is: stepv waits on it
+    // for its 30 s timeout, past the watchdog's 2 s.
+    let pidfile = h.0.join("kernel.pid");
+    let hang = script(
+        &h,
+        "hang-kernel",
+        &format!("echo $$ > '{}'\nexec sleep 60", pidfile.display()),
+    );
+    let run = std::panic::catch_unwind(|| {
+        h.view_within(
+            &data("assembly.step"),
+            &[],
+            &[("STEPV_OCCT", hang.to_str().unwrap())],
+            Duration::from_secs(2),
+        )
+    });
+    let why = run.expect_err("the watchdog did not fire");
+    let why = why
+        .downcast_ref::<String>()
+        .map_or("", String::as_str)
+        .to_owned();
+    assert!(why.contains("past the deadline of 2 s"), "{why}");
+    let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+        .expect("the kernel never started")
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only asks whether the process exists.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    assert!(!alive, "the kernel {pid} outlived the watchdog");
 }
 
 #[test]
@@ -716,7 +805,7 @@ fn a_complete_view_adds_the_box() {
     let input = h.0.join("m.step");
     std::fs::copy(data("assembly.step"), &input).unwrap();
     let before = cache::FileId::of(&input).unwrap();
-    let (code, j) = h.view(&input, &["--timeout", "60"], &[]);
+    let (code, j) = h.view(&input, &[], &[]);
     // The box is stored once the mesh has decoded, before the window opens:
     // whether a window can open here (a headless runner) does not matter.
     assert!(

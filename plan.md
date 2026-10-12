@@ -1374,8 +1374,13 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
     the tests run in parallel, and an inheritable slave passed to another test's stepv and
     kernel would hold this terminal open until that process tree exits.
   - `tests/cache.rs`, each `view` through `Home::view` (#86): the kernel under `--memory-mb 1024`,
-    `STEPV_VIEW_SCREENSHOT` set so a window that opens closes itself, and the viewer's own
-    footprint polled and the run failed past 2 GiB or 120 s.
+    stepv's own `--timeout 30` unless the test gives another, `STEPV_VIEW_SCREENSHOT` set so a
+    window that opens closes itself, and the viewer's own footprint polled. stepv runs in its own
+    process group: past 2 GiB or 120 s the watchdog kills the whole group, never stepv alone
+    (the kernel's caps are stepv's sampler, so a kernel orphaned by killing stepv would run on
+    uncapped), and fails naming the limit. However a run ends, no member of its group may
+    outlive it.
+    - the watchdog, at a 2 s deadline over a kernel that never finishes, kills that kernel too;
     - a `view` whose kernel is killed after its outline leaves the artifact under the pre-run
       `FileId`, equal to `occt::outline`, without a box;
     - `view --no-cache` leaves no artifact, where the same run cached leaves one (a kernel that
