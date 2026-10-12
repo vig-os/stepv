@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-04T14:47:22Z
-updated: 2026-10-04T19:00:47Z
+updated: 2026-10-11T15:23:34Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/12
-comments: 0
+comments: 1
 labels: chore, priority:medium, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-05T08:45:51.601Z
+synced: 2026-10-12T08:55:39.521Z
 ---
 
 # [Issue 12]: [Corpus: full CAx-IF rounds, exporter matrix, a real large assembly](https://github.com/vig-os/stepv/issues/12)
@@ -41,4 +41,20 @@ about CATIA (plan.md §5 "Corpus caveats").
 ## Acceptance
 
 All three present; plan.md §5 re-recorded with them.
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on October 11, 2026 at 03:23 PM_
+
+Done in #52 (merged as f7c7543), as far as public sources allow:
+
+- **exporter-matrix:** 7 writers (SolidWorks, NX, CATIA, Fusion 360, FreeCAD/OCC, Inventor, Creo), each verified from its own header and pinned per file. All 7 pass.
+- **real-assembly:** the whole Ultimaker 3 printer, 143 MB of SolidWorks, 523 parts. It loads correctly with every part named and coloured, but takes 101 s, 92 s of it in STEP transfer. That is #51.
+- **mbx-if-public:** MBx-IF's one open AP242 model.
+- plan.md §5 "Corpus fill (#12)" has the table: 99.2% of 400 faithful or wireframe.
+- On the way, `corpus.sha256` became byte-exact (stress-gen no longer stamps the wall clock), and the harness's own tests now run in `just test`.
+
+The one part public sources can't fill, the members-only CAx-IF rounds, moves to 53.
 

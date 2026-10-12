@@ -2,18 +2,18 @@
 type: issue
 state: closed
 created: 2026-10-04T18:57:35Z
-updated: 2026-10-10T23:07:29Z
+updated: 2026-10-12T00:18:39Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/21
-comments: 3
+comments: 4
 labels: feature, priority:medium, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-11T08:35:00.536Z
+synced: 2026-10-12T08:55:39.221Z
 ---
 
 # [Issue 21]: [Viewer: model tree with show/hide, cross sections, measurements on the exact B-rep](https://github.com/vig-os/stepv/issues/21)
@@ -101,4 +101,18 @@ The inspector gives radii and diameters, axes and centres, face areas, edge leng
 **Still open from this issue's list, now filed on their own:**
 - #48: free (non-axis-aligned) section planes, and more than one at a time.
 - #49: vertex picking, with coordinates and distances to vertices.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 12:18 AM_
+
+Thanks. These points line up with what shipped. Checked against `main`:
+
+- **Instance transforms:** done. The inspector works in model coordinates, placing each prototype by its part's transform. The measurement test uses two instances of one pin and gets 28 mm between their axes (`tests/measure.rs`), which only holds if each placement is applied.
+- **Witness points:** done (#33). Distance queries return `BRepExtrema_DistShapeShape`'s witness points, and the viewer draws the segment.
+- **Exact vs mesh:** inspector and measurement values all come from the B-rep, never the mesh. The one mesh-based stand-in, the stencil section cap, is labelled as such in the Section panel (#43).
+- **Per-part vs assembly totals:** a real gap. Today only per-part values are shown. That's now #55, along with a visible "exact (B-rep)" tag on values.
+
 
