@@ -304,3 +304,115 @@ fn a_complete_run_has_no_cause() {
     assert_eq!(code, 0, "{j}");
     assert!(j["kernel"]["cause"].is_null(), "{j}");
 }
+
+/// The kernel's C library: beside the kernel in a dev build, in `lib/`
+/// beside `libexec/` in an installed one.
+fn kernel_lib() -> PathBuf {
+    let k = kernel();
+    let name = if cfg!(target_os = "macos") {
+        "libstepvocct.dylib"
+    } else {
+        "libstepvocct.so"
+    };
+    [k.with_file_name(name), k.join("../../../lib").join(name)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("no {name} near {}", k.display()))
+}
+
+#[test]
+fn an_input_the_host_will_not_open_is_the_environment() {
+    kernel();
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPING: root ignores mode bits, so the file would open");
+        return;
+    }
+    let h = Home::new("unreadable");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (code, j) = h.png(&input, &[], &[]);
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("cannot open input"),
+        "{j}"
+    );
+    h.assert_nothing_cached("unreadable input");
+    assert_eq!(
+        h.png(&input, &[], &[]).0,
+        0,
+        "readable again, and not blocked"
+    );
+}
+
+#[test]
+fn an_occt_exception_is_the_input_but_its_out_of_memory_is_the_environment() {
+    kernel();
+    let input = data("assembly.step");
+    // The kernel's test hook throws mid-run.
+    let h = Home::new("throw");
+    let (code, j) = h.png(&input, &[], &[("STEPV_OCCT_TEST_THROW", "failure")]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_eq!(h.entries("fail").len(), 1);
+
+    let h = Home::new("throw-oom");
+    let (code, j) = h.png(&input, &[], &[("STEPV_OCCT_TEST_THROW", "oom")]);
+    assert_eq!((code, j["status"].as_str()), (3, Some("memory-cap")), "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    h.assert_nothing_cached("OCCT out of memory");
+}
+
+#[test]
+fn a_file_with_no_geometry_is_the_input() {
+    kernel();
+    let h = Home::new("nogeometry");
+    let input = h.0.join("empty.step");
+    std::fs::write(
+        &input,
+        b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n",
+    )
+    .unwrap();
+    let (code, j) = h.png(&input, &[], &[]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_eq!(h.entries("fail").len(), 1);
+}
+
+#[test]
+fn invalid_arguments_are_the_environment() {
+    use std::ffi::{CStr, CString, c_char, c_int};
+    type Run =
+        unsafe extern "C" fn(*const c_char, *const c_char, f64, f64, *mut c_int) -> *mut c_char;
+    type Free = unsafe extern "C" fn(*mut c_char);
+    let lib = CString::new(kernel_lib().into_os_string().into_encoded_bytes()).unwrap();
+    // SAFETY: the kernel library's C ABI (kernel/stepv_occt.h), called with
+    // the signatures it declares; the summary is freed with its own free.
+    let json = unsafe {
+        let h = libc::dlopen(lib.as_ptr(), libc::RTLD_NOW);
+        assert!(!h.is_null(), "{:?}", CStr::from_ptr(libc::dlerror()));
+        let run: Run = std::mem::transmute(libc::dlsym(h, c"stepv_occt_run".as_ptr()));
+        let free: Free = std::mem::transmute(libc::dlsym(h, c"stepv_occt_free".as_ptr()));
+        let mut code = 0;
+        // A zero deflection: what no caller should pass.
+        let p = run(
+            c"m.step".as_ptr(),
+            std::ptr::null(),
+            0.0,
+            20.0,
+            &raw mut code,
+        );
+        let json = CStr::from_ptr(p).to_string_lossy().into_owned();
+        free(p);
+        assert_eq!(code, 3, "{json}");
+        json
+    };
+    let j: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        (&j["error"], &j["cause"]),
+        (&"invalid arguments".into(), &"environment".into())
+    );
+}

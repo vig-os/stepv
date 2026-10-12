@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Failures cached before this (raw `.fail` files) are ignored and regenerated
 - **Only complete results, and only failures of the file, are cached** ([#62](https://github.com/vig-os/stepv/issues/62)):
   the kernel's summary says why a run failed in `cause` (`input` or `environment`), and only a
-  failure of the input itself is remembered. Timeouts, memory caps, crashes, unwritable outputs
-  and missing part files no longer are. Neither is a kernel exit without a summary, or a
+  failure of the input itself is remembered. Timeouts, memory caps, crashes, unreadable inputs,
+  unwritable outputs and missing part files no longer are. Neither is a kernel exit without a summary, or a
   multi-file assembly drawn without some of its parts
 - **A time budget for healing each face** ([#51](https://github.com/vig-os/stepv/issues/51)):
   a file written without p-curves (SolidWorks writes none) has the reader rebuild every edge's

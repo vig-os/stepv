@@ -370,9 +370,9 @@ fn outcome(status: Option<ExitStatus>, over_memory: bool, summary: Option<&Summa
         None => Outcome::Timeout,
         Some(s) => match s.code() {
             Some(0) => Outcome::Ok,
-            // The OS refusing an allocation (std::bad_alloc in the kernel)
-            // surfaces as a clean "out of memory" summary: a memory limit,
-            // just the machine's rather than ours.
+            // The OS refusing an allocation (std::bad_alloc, or OCCT's
+            // Standard_OutOfMemory, in the kernel) surfaces as a clean "out of
+            // memory" summary: a memory limit, just the machine's, not ours.
             Some(3) if summary.is_some_and(|s| s.error.as_deref() == Some("out of memory")) => {
                 Outcome::MemoryCap
             }

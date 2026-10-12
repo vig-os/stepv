@@ -1251,10 +1251,16 @@ part.
   summary; `Ok` without one is a "bad kernel output" error. A multi-file assembly with a part file
   that did not read (`external_missing > 0`) still draws, but is not cached: the part files are
   outside the key.
-- **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file. The
-  summary's `cause` (`occt::Cause`) is `input` when the file does not read, transfer, or has
-  nothing to draw, and `environment` for output I/O, path resolution, missing part files, out of
-  memory, and any other exception. Only `Outcome::Failed` with cause `input` is cached. A
+- **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file.
+  - The summary's `cause` (`occt::Cause`) is `input` when the file, once opened, does not read or
+    transfer, has an unsupported extension, has nothing to draw, nests its assembly more than 64
+    deep, or makes OCCT throw.
+  - It is `environment` when the kernel cannot open the input (it opens the file itself before
+    the reader, so a permission error is never the file's), for path resolution, output I/O and
+    missing part files (nothing to draw because of them included), for out of memory (OCCT's
+    `Standard_OutOfMemory` included), and for invalid arguments or any other exception.
+  - Only the run's summary carries `cause`: the `--serve` and `--outline` error lines don't.
+  - Only `Outcome::Failed` with cause `input` is cached. A
   timeout or a memory cap depends on the limits (`--timeout`, `--memory-mb` are not in the key),
   a crash may not repeat, an environment failure is outside the key, and a kernel without
   `cause` says nothing: none of them is cached, since each would block a run that could
@@ -1270,7 +1276,11 @@ part.
     - a timeout, a memory cap, a kernel exit 0 without a summary, an unwritable mesh output
       (`environment`) and missing part files (`environment`) cache nothing, and the next run
       succeeds;
-    - a garbage file (`input`) caches its failure.
+    - a garbage file, a file with no geometry and an OCCT exception (`input`, through the test
+      hook `STEPV_OCCT_TEST_THROW`) cache their failure;
+    - a `chmod 000` copy (`environment`, skipped as root) and OCCT's out of memory
+      (`environment`) cache nothing, and the readable copy then succeeds;
+    - invalid arguments to the kernel's C library (`environment`, through `dlopen`).
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn
