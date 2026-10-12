@@ -301,6 +301,8 @@ fn run(args: &Args) -> (u8, Value) {
             frames: args.frames,
             input: Some(args.input.clone()),
             limits: Some(args.limits),
+            unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone())
+                .unwrap_or_default(),
             pick_at: std::env::var("STEPV_VIEW_PICK")
                 .map(|s| view::parse_pick_at(&s))
                 .unwrap_or_default(),
@@ -505,7 +507,7 @@ fn tessellate(
         "stage": s.stage, "error": s.error, "parts": s.parts, "faces": s.faces,
         "triangles": s.triangles, "segments": s.segments, "bbox": s.bbox,
         "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
-        "faces_over_budget": s.faces_over_budget,
+        "faces_over_budget": s.faces_over_budget, "unhealed_faces": s.unhealed_faces,
         "peak_rss_bytes": s.peak_rss_bytes, "sandbox": s.sandbox,
         "external_files": s.external_files, "external_missing": s.external_missing,
         "topology_error": s.topology_error,

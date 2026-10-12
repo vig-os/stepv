@@ -37,6 +37,7 @@
 // Degenerate edges (a cone's apex, a sphere's poles) are skipped.
 
 #include "topology.h"
+#include "heal.h"
 
 #include "json.h"
 
@@ -256,7 +257,7 @@ std::string prototype_json(const TopoDS_Shape& shape) {
         o << "null";
     }
     Bnd_Box box;
-    BRepBndLib::Add(shape, box, false);
+    stepv::add_bounds(shape, box);
     o << ",\"bbox\":";
     if (box.IsVoid()) {
         o << "null";

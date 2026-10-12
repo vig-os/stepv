@@ -188,6 +188,8 @@ struct Summary {
                 faces_degenerate = 0, faces_approx = 0, faces_missing = 0;
     // Of faces_missing: left unhealed by the per-face budget (heal.h, #51).
     std::size_t faces_over_budget = 0;
+    // Their numbers (heal.h), for a measurement server to replay.
+    std::vector<long> unhealed_faces;
     std::size_t sketch_parts = 0;        // faceless parts in a file with no faces
     std::size_t construction_parts = 0;  // faceless parts beside solids
     std::size_t vertices = 0;
@@ -241,7 +243,9 @@ std::string to_json(const Summary& s) {
       << ",\"faces_refined\":" << s.faces_refined << ",\"faces_coarse\":" << s.faces_coarse
       << ",\"faces_degenerate\":" << s.faces_degenerate << ",\"faces_approx\":" << s.faces_approx
       << ",\"faces_missing\":" << s.faces_missing
-      << ",\"faces_over_budget\":" << s.faces_over_budget << ",\"sketch_parts\":" << s.sketch_parts
+      << ",\"faces_over_budget\":" << s.faces_over_budget << ",\"unhealed_faces\":[";
+    for (std::size_t i = 0; i < s.unhealed_faces.size(); ++i) o << (i ? "," : "") << s.unhealed_faces[i];
+    o << "],\"sketch_parts\":" << s.sketch_parts
       << ",\"construction_parts\":" << s.construction_parts;
     o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles
       << ",\"segments\":" << s.segments << ",\"edges\":" << s.edges;
@@ -1001,7 +1005,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
     std::vector<stepv::TopoNode> tree;
     Bnd_Box bbox;
     for (const TDF_Label& root : roots) {
-        BRepBndLib::Add(st->GetShape(root), bbox, false);
+        stepv::add_bounds(st->GetShape(root), bbox);
         walk(st, ct, root, TopLoc_Location(), label_name(root), std::nullopt, parts, tree, -1, 0);
     }
     s.parts = parts.size();
@@ -1019,6 +1023,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         return kExitFailed;
     }
     s.bbox = bbox;
+    s.unhealed_faces = stepv::unhealed_faces();
     s.diagonal = std::sqrt(bbox.SquareExtent());
 
     // ── Tessellate each prototype ONCE; instances share its triangulation ──
@@ -1194,6 +1199,19 @@ int run(const std::string& input_arg, const std::string& mesh_out,
 }  // namespace
 
 
+// Installs the per-face healing budget (heal.h), or says once on stderr
+// that it could not: something made a reader before the first call, OCCT's
+// FixShape won, and healing runs unbudgeted (and correct, only slow).
+static void warn_unbudgeted() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (!stepv::install_face_budget())
+            std::fputs("stepv-occt: warning: OCCT's FixShape was registered first; healing "
+                       "has no per-face time budget in this process\n",
+                       stderr);
+    });
+}
+
 // OCCT's data-exchange layer keeps global state (Interface_Static, the
 // XSControl session): one file at a time per process. The CLI never notices
 // (one run per process); Quick Look issues concurrent requests.
@@ -1230,7 +1248,7 @@ extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
     std::call_once(quiet, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     });
-    stepv::install_face_budget();
+    warn_unbudgeted();
 
     Summary s;
     Events ev;
@@ -1263,7 +1281,7 @@ extern "C" void stepv_occt_free(char* p) { std::free(p); }
 extern "C" char* stepv_occt_outline(const char* input, int* exit_code) {
     std::lock_guard<std::mutex> lock(serial());
     // Before its reader: OCCT keeps the FixShape registered first (heal.h).
-    stepv::install_face_budget();
+    warn_unbudgeted();
     std::string json;
     int code = kExitFailed;
     try {
@@ -1304,7 +1322,7 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
     std::call_once(*new std::once_flag, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     });
-    stepv::install_face_budget();
+    warn_unbudgeted();
     const std::string sb = stepv::json_escape(sandbox ? sandbox : "");
     Summary s;
     // The model, as run() reads it, but not meshed: a query needs the exact

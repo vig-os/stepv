@@ -60,6 +60,11 @@ pub struct Summary {
     /// older kernels.
     #[serde(default)]
     pub faces_over_budget: usize,
+    /// Those faces' numbers, in the order the kernel fixes faces: what a
+    /// second process reading the file replays to see the same faces
+    /// ([`crate::measure::Server::with_unhealed`]). Absent from older kernels.
+    #[serde(default)]
+    pub unhealed_faces: Vec<u64>,
     /// Faceless parts in a file with no faces at all: drawn as curves.
     pub sketch_parts: usize,
     /// Faceless parts beside solids: construction geometry.

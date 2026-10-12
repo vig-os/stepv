@@ -9,7 +9,8 @@
 //                  two instances of one pin (orange), all named
 //   no-pcurves.step  the same assembly with no p-curves: every edge only
 //                  in 3D, as SolidWorks writes them (#51), so the reader's
-//                  healing must project each onto its faces
+//                  healing must project each onto its faces. The pins'
+//                  cylindrical face is green, a colour on a face that needs it
 //   multifile/     the same assembly as a multi-file STEP: bracket.step holds
 //                  the structure, and each part is a sibling file it
 //                  references (the CAx-IF s1-c5-214 / SolidWorks export style)
@@ -20,6 +21,7 @@
 //                  axes: its Axis() points +z while the surface (and the
 //                  face) faces -z, as mirrored geometry and some .brep do
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -57,7 +59,8 @@
 
 namespace {
 
-Handle(TDocStd_Document) bracket() {
+// `pin_side`: the pins' cylindrical face green, a colour on a curved face.
+Handle(TDocStd_Document) bracket(bool pin_side = false) {
     Handle(TDocStd_Document) doc;
     XCAFApp_Application::GetApplication()->NewDocument("MDTV-XCAF", doc);
     Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
@@ -88,6 +91,14 @@ Handle(TDocStd_Document) bracket() {
     TDF_Label pin_l = st->AddShape(pin, false);
     TDataStd_Name::Set(pin_l, "pin");
     ct->SetColor(pin_l, Quantity_Color(0.95, 0.50, 0.05, Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+    if (pin_side) {
+        for (TopExp_Explorer ex(pin, TopAbs_FACE); ex.More(); ex.Next()) {
+            if (BRepAdaptor_Surface(TopoDS::Face(ex.Current())).GetType() != GeomAbs_Cylinder)
+                continue;
+            TDF_Label f = st->AddSubShape(pin_l, ex.Current());
+            ct->SetColor(f, Quantity_Color(0.10, 0.80, 0.20, Quantity_TOC_RGB), XCAFDoc_ColorSurf);
+        }
+    }
 
     st->AddComponent(assy, plate_l, TopLoc_Location());
     for (double x : {6.0, 34.0}) {
@@ -113,7 +124,8 @@ bool step_no_pcurves(const std::string& path) {
     STEPCAFControl_Writer w;
     w.SetColorMode(true);
     w.SetNameMode(true);
-    const bool ok = w.Transfer(bracket(), STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
+    const bool ok =
+        w.Transfer(bracket(true), STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
     Interface_Static::SetIVal("write.surfacecurve.mode", 1);
     return ok;
 }

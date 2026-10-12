@@ -1154,8 +1154,10 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
 - **The mechanism (`kernel/heal.{h,cpp}`):**
   - stepv registers its own `FixShape` before any reader exists. OCCT's registry keeps the
     first operator registered under a name, and `install_face_budget()` checks that ours won.
-  - It sets `ShapeFix_Shape` up from the same context parameters as OCCT's operator. It is our
-    own table, not a copy of OCCT's source: stepv is Apache-2.0, and OCCT is used unmodified.
+  - It sets `ShapeFix_Shape` up from the same context parameters as OCCT's operator. The table
+    is derived from OCCT's `fixshape()` (keys, order, defaults) and says so; whether that needs
+    more than the comment, given that stepv is Apache-2.0 and OCCT LGPL, is an open question for
+    a human.
   - It fixes the faces itself, one at a time, as `ShapeFix_Shell` and `ShapeFix_Shape` do: shell
     by shell, then free faces with the two modes `ShapeFix_Shape` sets for one.
   - The edge tool's projector is a subclass with a clock. It is set through a member pointer,
@@ -1172,6 +1174,22 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
   recorded. The mesher draws each as its outline (`Missing`), without the recovery ladder, and
   counts it in `faces_over_budget`. The topology still numbers it: loose faces come after the
   solid's. The ladder's ShapeFix rung carries the same budget.
+- **What the review (round 1) fixed:**
+  - **The bounding box.** Without p-curves OCCT bounds a face by its whole surface, and a
+    cylinder's is infinite: the scene's box became ±1e100. `stepv::add_bounds` bounds an
+    unhealed face by its edges, for the scene, the mesh header and the topology. The topology's
+    area for such a face is still 0, since it is unknown.
+  - **Measurement.** `--serve` re-reads the file, and a clock does not repeat: a face near the
+    budget could be healed in one process and not the other, and every later face in its part
+    would be numbered differently. So faces are numbered in the order they are fixed. The run
+    reports the numbers it gave up on (`unhealed_faces`), and `STEPV_OCCT_UNHEALED` replays them
+    exactly, with no clock on the rest. The viewer hands the list to its measurement server
+    (`measure::Server::with_unhealed`).
+  - **Colours and names on an unhealed face.** Removed, the face was mapped to nothing in the
+    healing history, so the reader lost its own colour. It is mapped back to itself.
+  - **Tails.** As in OCCT, the second pass finds the faces already fixed.
+  - **The install check is no longer silent.** If OCCT's `FixShape` was registered first, the
+    kernel warns on stderr.
 - **Measured on Ultimaker 3:**
 
   | | before | after |
@@ -1196,7 +1214,10 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
   - a zero budget leaves exactly its two cylinders unhealed, drawn as outlines, with the faces,
     names and colours all still there;
   - a file that carries its p-curves spends nothing;
-  - a budget that isn't a number is the default.
+  - a budget that isn't a number is the default;
+  - the green face colour on an unhealed cylinder survives;
+  - an unhealed face's box is its edges', in the summary and the topology;
+  - a replay gives up on the same faces with no clock, and on none with a clock already run out.
 
 ### Work queue (ordered, 2026-10-04)
 

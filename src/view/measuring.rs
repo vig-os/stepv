@@ -60,12 +60,13 @@ fn fresh(batch: Vec<(u64, Query)>) -> Vec<(u64, Query)> {
 impl Measurer {
     /// Starts the worker; the kernel starts on the first query.
     #[must_use]
-    pub fn spawn(kernel: &Path, input: &Path, limits: Limits) -> Self {
+    pub fn spawn(kernel: &Path, input: &Path, limits: Limits, unhealed: &[u64]) -> Self {
         let (tx, jobs) = mpsc::channel::<(u64, Query)>();
         let (done, rx) = mpsc::channel();
         let (kernel, input): (PathBuf, PathBuf) = (kernel.to_owned(), input.to_owned());
+        let unhealed = unhealed.to_vec();
         std::thread::spawn(move || {
-            let mut server = Server::new(&kernel, &input, limits);
+            let mut server = Server::new(&kernel, &input, limits).with_unhealed(&unhealed);
             while let Ok(first) = jobs.recv() {
                 let mut batch = vec![first];
                 batch.extend(jobs.try_iter());

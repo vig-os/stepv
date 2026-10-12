@@ -19,13 +19,26 @@
 // The budget is STEPV_OCCT_FACE_BUDGET_MS (default 2000; 0 refuses any
 // projection), read at the start of each run. It covers the fixes of faces;
 // wires and edges outside any face are healed unbudgeted, as before.
+//
+// A clock is not repeatable, and a second process reading the same file (the
+// measurement server, --serve) must see the same faces, numbered the same.
+// So faces are numbered in the order they are fixed, the run reports the
+// numbers of those it gave up on (unhealed_faces()), and with
+// STEPV_OCCT_UNHEALED set (a comma-separated list, possibly empty) a run
+// replays them: it gives up on exactly those, and puts no clock on the rest.
+//
+// An unhealed face has no p-curves, so OCCT cannot bound it (its box opens
+// to the surface's) nor measure its area (0): add_bounds() bounds it by its
+// edges.
 
 #pragma once
 
 #include <TopoDS_Shape.hxx>
 
 #include <exception>
+#include <vector>
 
+class Bnd_Box;
 class ShapeFix_Shape;
 
 namespace stepv {
@@ -48,6 +61,13 @@ void begin_face_budget();
 // Whether `face` (any location, any orientation) was left unhealed by the
 // budget in this run.
 bool over_face_budget(const TopoDS_Shape& face);
+
+// The numbers of the faces this run left unhealed, in order.
+std::vector<long> unhealed_faces();
+
+// BRepBndLib::Add(shape, box, false), with each unhealed face bounded by its
+// edges.
+void add_bounds(const TopoDS_Shape& shape, Bnd_Box& box);
 
 // Gives `fix` one budget for its whole Perform(), which then throws
 // BudgetSpent past it: for a ShapeFix outside the transfer (the recovery

@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - stepv registers its own `FixShape` operator ahead of OCCT's, set up from the same reader
     parameters; outside the budget it heals as before
   - The recovery ladder's ShapeFix rung has the same budget
+  - The run lists the faces it gave up on (`unhealed_faces`), and the viewer's measurement
+    server replays exactly that list (`STEPV_OCCT_UNHEALED`), so both number faces alike
 - **Streamed runs: the outline, then progress, then the summary** ([#54](https://github.com/vig-os/stepv/issues/54)):
   `stepv-occt --stream` writes a run's events to stdout as frames in place of its one JSON line.
   A STEP file's outline arrives once the file is parsed, from the same parse the run uses; then

@@ -2,7 +2,9 @@
 
 #include "heal.h"
 
+#include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
 #include <Message_ProgressScope.hxx>
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_ProjectCurveOnSurface.hxx>
@@ -28,6 +30,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
+#include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -42,6 +47,10 @@ constexpr long kDefaultBudgetMs = 2000;
 struct State {
     std::mutex lock;
     Clock::duration budget = std::chrono::milliseconds(kDefaultBudgetMs);
+    // STEPV_OCCT_UNHEALED: replay another run's decisions, not the clock's.
+    std::optional<std::set<long>> replay;
+    long next = 0;                 // the next face's ordinal
+    std::vector<long> ordinals;    // of the faces left unhealed, in order
     TopTools_MapOfShape unhealed;  // located nowhere: one entry per TShape
 };
 
@@ -103,9 +112,13 @@ struct EdgeTool : ShapeFix_Edge {
 };
 
 // ── ShapeFix_Shape from the shape-processing context ──
-// The parameters FixShape reads from the reader's context (the "read.step"
-// and "read.iges" resource sets, and DE_ShapeFixParameters), each with the
-// value it takes when the context has none.
+// The parameters OCCT's own FixShape operator reads from the reader's context
+// (the "read.step" and "read.iges" resource sets, DE_ShapeFixParameters),
+// each with the value it takes when the context has none. The list, its
+// order and its defaults follow OCCT 7.9.3's fixshape() in
+// ShapeProcess_OperLibrary.cxx, as does the operator below (one ReShape
+// through two passes when tails are fixed, the history recorded the same
+// way): this is derived from it, so a newer OCCT's list wants comparing.
 
 template <class Tool>
 struct IntMode {
@@ -233,9 +246,10 @@ bool fix_faces(ShapeFix_Shape& fix, BudgetedProjection& projector,
     const bool in_shells = on(fix.FixSolidMode()) && on(fix.FixSolidTool()->FixShellMode()) &&
                            on(fix.FixShellTool()->FixFaceMode());
     const bool free_faces = on(fix.FixFreeFaceMode());
-    int count = 0;
-    for (TopExp_Explorer f(shape, TopAbs_FACE); f.More(); f.Next()) ++count;
-    Message_ProgressScope scope(progress, "Fixing face", count);
+    TopTools_MapOfShape distinct;
+    for (TopExp_Explorer f(shape, TopAbs_FACE); f.More(); f.Next())
+        distinct.Add(f.Current().Located(TopLoc_Location()));
+    Message_ProgressScope scope(progress, "Fixing face", distinct.Extent());
 
     TopTools_MapOfShape seen;  // a face shared by two shells is fixed once
     auto fix_one = [&](const TopoDS_Shape& f) {
@@ -243,16 +257,34 @@ bool fix_faces(ShapeFix_Shape& fix, BudgetedProjection& projector,
         if (f.IsNull() || f.ShapeType() != TopAbs_FACE) return;
         if (!seen.Add(f.Located(TopLoc_Location()))) return;
         const TopoDS_Face& face = TopoDS::Face(f);
-        projector.arm();
+        scope.Next();
+        // Faces are numbered in the order they are fixed, the same in every
+        // run of the same file: what a replay names.
+        long ordinal;
+        std::optional<bool> replayed;  // set: whether the replayed run gave up on it
+        {
+            std::lock_guard<std::mutex> g(state().lock);
+            ordinal = state().next++;
+            if (state().replay) replayed = state().replay->count(ordinal) > 0;
+        }
+        auto give_up = [&] {
+            reshape->Remove(face);
+            unhealed.push_back(face);
+            std::lock_guard<std::mutex> g(state().lock);
+            state().ordinals.push_back(ordinal);
+        };
+        if (replayed.value_or(false)) {
+            give_up();
+            return;
+        }
+        if (!replayed) projector.arm();
         try {
             face_fix->Init(face);
             face_fix->Perform();
         } catch (const stepv::BudgetSpent&) {
-            reshape->Remove(face);
-            unhealed.push_back(face);
+            give_up();
         }
         projector.disarm();
-        scope.Next();
     };
     if (in_shells) {
         for (TopExp_Explorer sh(shape, TopAbs_SHELL); sh.More(); sh.Next()) {
@@ -304,9 +336,15 @@ public:
         Handle(ShapeFix_Wire) wire = fix->FixWireTool();
         const bool tails = wire->FixTailMode() == 1;
         Message_ProgressScope scope(progress, nullptr, tails ? 4 : 2);
+        // The faces are fixed in the first pass only: OCCT's second, tail
+        // pass finds the shape already fixed (ShapeFix_Shape keeps what it
+        // fixed across Init) and returns at once, and so does ours.
+        bool faces_fixed = false;
         auto pass = [&]() {
-            if (!fix_faces(*fix, *projector, reshape, ctx->Result(), unhealed, scope.Next()))
+            const Message_ProgressRange faces = scope.Next();
+            if (!faces_fixed && !fix_faces(*fix, *projector, reshape, ctx->Result(), unhealed, faces))
                 return false;
+            faces_fixed = true;
             Standard_Integer& in_shells = fix->FixShellTool()->FixFaceMode();
             Standard_Integer& loose = fix->FixFreeFaceMode();
             const Standard_Integer saved_in_shells = in_shells, saved_loose = loose;
@@ -331,6 +369,18 @@ public:
         }
         if (!pass()) return Standard_False;
         if (!unhealed.empty()) {
+            // The history maps each unhealed face to nothing, since it was
+            // taken out; it is back, so map it to itself, and the reader
+            // finds its colour and name (XSAlgo_ShapeProcessor reads this
+            // map into the transfer's binders). The map is the context's own
+            // member, only handed out const.
+            auto& history = const_cast<TopTools_DataMapOfShapeShape&>(ctx->Map());
+            for (TopTools_DataMapOfShapeShape::Iterator it(history); it.More(); it.Next()) {
+                if (!it.Value().IsNull()) continue;
+                for (const TopoDS_Face& f : unhealed)
+                    if (it.Key().TShape() == f.TShape())
+                        it.ChangeValue() = f.Located(it.Key().Location()).Oriented(it.Key().Orientation());
+            }
             BRep_Builder b;
             TopoDS_Compound with;
             b.MakeCompound(with);
@@ -363,6 +413,17 @@ bool install_face_budget() {
 }
 
 void begin_face_budget() {
+    std::optional<std::set<long>> replay;
+    if (const char* v = std::getenv("STEPV_OCCT_UNHEALED")) {
+        replay.emplace();
+        for (const char* p = v; *p;) {
+            char* end = nullptr;
+            const long n = std::strtol(p, &end, 10);
+            if (end == p) break;  // not a number: the list ends here
+            replay->insert(n);
+            p = *end == ',' ? end + 1 : end;
+        }
+    }
     long ms = kDefaultBudgetMs;
     if (const char* v = std::getenv("STEPV_OCCT_FACE_BUDGET_MS"); v && *v) {
         char* end = nullptr;
@@ -372,7 +433,43 @@ void begin_face_budget() {
     }
     std::lock_guard<std::mutex> g(state().lock);
     state().budget = std::chrono::milliseconds(ms);
+    state().replay = std::move(replay);
+    state().next = 0;
+    state().ordinals.clear();
     state().unhealed.Clear();
+}
+
+std::vector<long> unhealed_faces() {
+    std::lock_guard<std::mutex> g(state().lock);
+    return state().ordinals;
+}
+
+void add_bounds(const TopoDS_Shape& shape, Bnd_Box& box) {
+    bool any = false;
+    {
+        std::lock_guard<std::mutex> g(state().lock);
+        for (TopExp_Explorer f(shape, TopAbs_FACE); f.More() && !any; f.Next())
+            any = state().unhealed.Contains(f.Current().Located(TopLoc_Location()));
+    }
+    if (!any) {
+        BRepBndLib::Add(shape, box, false);
+        return;
+    }
+    // Without p-curves a face's extent on its surface is unknown, and the
+    // box opens out to the whole surface (infinite for a cylinder): bound
+    // such a face by its edges instead.
+    for (TopExp_Explorer f(shape, TopAbs_FACE); f.More(); f.Next()) {
+        if (over_face_budget(f.Current())) {
+            for (TopExp_Explorer e(f.Current(), TopAbs_EDGE); e.More(); e.Next())
+                BRepBndLib::Add(e.Current(), box, false);
+        } else {
+            BRepBndLib::Add(f.Current(), box, false);
+        }
+    }
+    for (TopExp_Explorer e(shape, TopAbs_EDGE, TopAbs_FACE); e.More(); e.Next())
+        BRepBndLib::Add(e.Current(), box, false);
+    for (TopExp_Explorer v(shape, TopAbs_VERTEX, TopAbs_EDGE); v.More(); v.Next())
+        BRepBndLib::Add(v.Current(), box, false);
 }
 
 bool over_face_budget(const TopoDS_Shape& face) {
