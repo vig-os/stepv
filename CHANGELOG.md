@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Streamed runs: the outline, then progress, then the summary** ([#54](https://github.com/vig-os/stepv/issues/54)):
+  `stepv-occt --stream` writes a run's events to stdout as frames in place of its one JSON line.
+  A STEP file's outline arrives once the file is parsed, from the same parse the run uses; then
+  progress through the transfer and the meshing; then the summary. On the Ultimaker 3 assembly
+  the tree arrives at 4.3 s of 101 s
+  - In Rust as `occt::run_streaming`, which hands each `occt::Event` to the caller as it arrives.
+    A run killed partway keeps what arrived and has no summary; a stream that breaks the frame
+    contract is a crash
+  - In the C API as `stepv_occt_run_stream`, with a callback, for in-process front-ends
+  - Transfer progress is OCCT's own, so it stalls inside one slow solid: Ultimaker 3 sits at
+    15.6% for 80 s ([#51](https://github.com/vig-os/stepv/issues/51))
 - **The assembly outline before the geometry** ([#54](https://github.com/vig-os/stepv/issues/54)):
   `stepv-occt --outline` reads a STEP file's product tree and names straight from its parsed
   entities, with no shape transfer. On the 143 MB Ultimaker 3 assembly that takes 4.6 s against

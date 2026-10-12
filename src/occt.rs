@@ -10,10 +10,11 @@
 //! The mesh file format is specified at the top of `kernel/stepv-occt.cpp`;
 //! [`read_mesh`] is its only reader.
 
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -198,6 +199,106 @@ pub fn run(
     topology_out: Option<&Path>,
     edges: bool,
 ) -> std::io::Result<Run> {
+    let cmd = command(kernel, input, deflection, mesh_out, topology_out, edges);
+    let s = supervise(
+        cmd,
+        limits,
+        |mut out| {
+            let mut text = String::new();
+            let _ = out.read_to_string(&mut text);
+            text
+        },
+        || {},
+    )?;
+    let summary: Option<Summary> = s
+        .output
+        .lines()
+        .next()
+        .and_then(|l| serde_json::from_str(l).ok());
+    Ok(Run {
+        outcome: outcome(s.status, s.over_memory, summary.as_ref()),
+        summary,
+        wall: s.wall,
+    })
+}
+
+/// [`run`], streaming (`stepv-occt --stream`, #54): `on_event` gets the
+/// run's [`Event`]s as they happen, on the calling thread: a STEP file's
+/// outline once it is parsed, then progress through the transfer and the
+/// meshing. The summary ends the stream and is the [`Run`]'s, as in [`run`].
+///
+/// A run killed partway (the wall clock, the memory cap) keeps the events
+/// that arrived and has no summary: it is not complete, whatever arrived. A
+/// kernel that exits with a stream that breaks the contract ([`read_events`])
+/// has crashed, whatever its exit code says. Progress is coalesced: when
+/// `on_event` falls behind, intermediate progress events are dropped, never
+/// the outline or the order.
+///
+/// # Errors
+/// Only when the kernel cannot be spawned at all, as [`run`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_streaming(
+    kernel: &Path,
+    input: &Path,
+    deflection: Deflection,
+    limits: Limits,
+    mesh_out: Option<&Path>,
+    topology_out: Option<&Path>,
+    edges: bool,
+    on_event: &mut dyn FnMut(Event),
+) -> std::io::Result<Run> {
+    let mut cmd = command(kernel, input, deflection, mesh_out, topology_out, edges);
+    cmd.arg("--stream");
+    let (tx, rx) = mpsc::sync_channel::<Event>(64);
+    let s = supervise(
+        cmd,
+        limits,
+        move |out| {
+            read_events(BufReader::new(out), |e| match e {
+                Event::Progress(_) => {
+                    let _ = tx.try_send(e);
+                }
+                Event::Tree(_) => {
+                    let _ = tx.send(e);
+                }
+            })
+        },
+        || {
+            while let Ok(e) = rx.try_recv() {
+                on_event(e);
+            }
+        },
+    )?;
+    let (outcome, summary) = match (s.status, s.output) {
+        // Exited, but not with the stream the contract promises.
+        (Some(status), Err(_)) => (
+            Outcome::Crashed {
+                signal: status.signal(),
+                code: status.code(),
+            },
+            None,
+        ),
+        (status, stream) => {
+            let summary = stream.ok();
+            (outcome(status, s.over_memory, summary.as_ref()), summary)
+        }
+    };
+    Ok(Run {
+        outcome,
+        summary,
+        wall: s.wall,
+    })
+}
+
+/// The kernel's command line for a run.
+fn command(
+    kernel: &Path,
+    input: &Path,
+    deflection: Deflection,
+    mesh_out: Option<&Path>,
+    topology_out: Option<&Path>,
+    edges: bool,
+) -> Command {
     let mut cmd = Command::new(kernel);
     // The nix product's wrapper sets it for the viewer's window and GPU
     // libraries; the sandboxed kernel needs none of them (#32 review).
@@ -220,19 +321,12 @@ pub fn run(
     if let Some(out) = topology_out {
         cmd.arg("--topology").arg(out);
     }
+    cmd
+}
 
-    let Supervised {
-        status,
-        over_memory,
-        stdout: text,
-        wall,
-    } = supervise(cmd, limits)?;
-    let summary: Option<Summary> = text
-        .lines()
-        .next()
-        .and_then(|l| serde_json::from_str(l).ok());
-
-    let outcome = match status {
+/// How a run ended, from how its process did and the summary it gave.
+fn outcome(status: Option<ExitStatus>, over_memory: bool, summary: Option<&Summary>) -> Outcome {
+    match status {
         None if over_memory => Outcome::MemoryCap,
         None => Outcome::Timeout,
         Some(s) => match s.code() {
@@ -240,11 +334,7 @@ pub fn run(
             // The OS refusing an allocation (std::bad_alloc in the kernel)
             // surfaces as a clean "out of memory" summary: a memory limit,
             // just the machine's rather than ours.
-            Some(3)
-                if summary
-                    .as_ref()
-                    .is_some_and(|s| s.error.as_deref() == Some("out of memory")) =>
-            {
+            Some(3) if summary.is_some_and(|s| s.error.as_deref() == Some("out of memory")) => {
                 Outcome::MemoryCap
             }
             Some(3) => Outcome::Failed,
@@ -253,36 +343,36 @@ pub fn run(
                 code,
             },
         },
-    };
-    Ok(Run {
-        outcome,
-        summary,
-        wall,
-    })
+    }
 }
 
 /// How a supervised kernel process ended.
-struct Supervised {
+struct Supervised<T> {
     /// `None`: killed, at the wall clock or the memory cap.
-    status: Option<std::process::ExitStatus>,
+    status: Option<ExitStatus>,
     over_memory: bool,
-    stdout: String,
+    /// What `read` made of its stdout.
+    output: T,
     wall: Duration,
 }
 
 /// Spawns `cmd` (stdout piped) and holds it to `limits`: killed past the wall
 /// clock, or once its footprint passes the cap (polled every 5 ms).
-fn supervise(mut cmd: Command, limits: Limits) -> std::io::Result<Supervised> {
+///
+/// `read` consumes its stdout on a thread of its own, so a chatty kernel can
+/// never fill the pipe and deadlock against the wait loop. `tick` runs on
+/// this thread every couple of milliseconds until `read` is done: the place
+/// to take what `read` hands over as it goes.
+fn supervise<T: Send + 'static>(
+    mut cmd: Command,
+    limits: Limits,
+    read: impl FnOnce(ChildStdout) -> T + Send + 'static,
+    mut tick: impl FnMut(),
+) -> std::io::Result<Supervised<T>> {
     let start = Instant::now();
     let mut child = cmd.spawn()?;
-    // Drain stdout on a thread so a chatty kernel can never fill the pipe and
-    // deadlock against our wait loop.
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        s
-    });
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || read(stdout));
 
     let mut over_memory = false;
     let mut last_probe = Instant::now();
@@ -306,13 +396,25 @@ fn supervise(mut cmd: Command, limits: Limits) -> std::io::Result<Supervised> {
                 break None;
             }
         }
+        tick();
         std::thread::sleep(Duration::from_millis(2));
     };
     let wall = start.elapsed();
+    // The process is gone, so its stdout ends; `read` may still be handing
+    // over what it had, and waits on `tick` to take it.
+    while !reader.is_finished() {
+        tick();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let output = match reader.join() {
+        Ok(output) => output,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    tick();
     Ok(Supervised {
         status,
         over_memory,
-        stdout: reader.join().unwrap_or_default(),
+        output,
         wall,
     })
 }
@@ -356,6 +458,44 @@ impl std::error::Error for OutlineError {}
 /// times out, passes the memory cap, crashes, or answers something that is
 /// not a valid outline (leaves not numbered `0..leaves` in order).
 pub fn outline(kernel: &Path, input: &Path, limits: Limits) -> Result<Outline, OutlineError> {
+    let mut cmd = Command::new(kernel);
+    cmd.env_remove("LD_LIBRARY_PATH");
+    cmd.arg(input)
+        .arg("--outline")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let s = supervise(
+        cmd,
+        limits,
+        |mut out| {
+            let mut text = String::new();
+            let _ = out.read_to_string(&mut text);
+            text
+        },
+        || {},
+    )
+    .map_err(|e| OutlineError(format!("cannot start kernel: {e}")))?;
+    let Some(status) = s.status else {
+        return Err(OutlineError(
+            if s.over_memory {
+                "memory cap exceeded"
+            } else {
+                "wall-clock cap exceeded"
+            }
+            .to_owned(),
+        ));
+    };
+    match s.output.lines().next() {
+        Some(line) => parse_outline(line.as_bytes()),
+        None => Err(OutlineError(format!(
+            "kernel answered no outline ({status})"
+        ))),
+    }
+}
+
+/// An outline as the kernel writes it (`kernel/outline.h`), validated.
+fn parse_outline(json: &[u8]) -> Result<Outline, OutlineError> {
     #[derive(Deserialize)]
     struct Wire {
         format: Option<String>,
@@ -364,30 +504,9 @@ pub fn outline(kernel: &Path, input: &Path, limits: Limits) -> Result<Outline, O
         leaves: Option<usize>,
         error: Option<String>,
     }
-    let mut cmd = Command::new(kernel);
-    cmd.env_remove("LD_LIBRARY_PATH");
-    cmd.arg(input)
-        .arg("--outline")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let s =
-        supervise(cmd, limits).map_err(|e| OutlineError(format!("cannot start kernel: {e}")))?;
     let fail = |m: &str| Err(OutlineError(m.to_owned()));
-    let Some(status) = s.status else {
-        return fail(if s.over_memory {
-            "memory cap exceeded"
-        } else {
-            "wall-clock cap exceeded"
-        });
-    };
-    let wire: Option<Wire> = s
-        .stdout
-        .lines()
-        .next()
-        .and_then(|l| serde_json::from_str(l).ok());
-    let Some(wire) = wire else {
-        return fail(&format!("kernel answered no outline ({status})"));
+    let Ok(wire) = serde_json::from_slice::<Wire>(json) else {
+        return fail("kernel answered no outline");
     };
     if let Some(e) = wire.error {
         return Err(OutlineError(e));
@@ -415,6 +534,153 @@ pub fn outline(kernel: &Path, input: &Path, limits: Limits) -> Result<Outline, O
         tree,
         leaves: count,
     })
+}
+
+/// What a streamed run ([`run_streaming`]) reports before its summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A STEP file's [`Outline`], once the file is parsed: before the
+    /// transfer, which is most of a large assembly's wait (#51).
+    Tree(Outline),
+    Progress(Progress),
+}
+
+/// How far a run is through one [`Stage`]: `done` of `total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Progress {
+    pub stage: Stage,
+    pub done: u64,
+    pub total: u64,
+}
+
+impl Progress {
+    /// `done / total`, in `0.0..=1.0`.
+    #[must_use]
+    pub fn fraction(&self) -> f64 {
+        if self.total == 0 {
+            1.0
+        } else {
+            self.done as f64 / self.total as f64
+        }
+    }
+}
+
+/// The stages a run reports progress through, in the order they come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    /// Shapes from the parsed file: thousandths of OCCT's own progress.
+    Transfer,
+    /// Tessellation and its recovery ladder: two passes over the prototypes.
+    Mesh,
+}
+
+/// The largest frame [`read_events`] accepts, checked before it allocates.
+/// An outline is the largest today: a million nodes (its bound) of short
+/// names fit.
+pub const MAX_FRAME: u32 = 64 << 20;
+
+/// A `--stream` that breaks its contract (`kernel/stepv_occt.h`). The kernel
+/// writes it, so each is a crashed or misbehaving kernel, never bad input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamError {
+    /// It ended without the summary frame, at a frame boundary.
+    NoSummary,
+    /// It ended partway through a frame.
+    Truncated,
+    BadMagic,
+    BadKind(u8),
+    TooLarge(u32),
+    /// A frame whose payload is not what its kind promises.
+    BadPayload(String),
+    /// Bytes after the summary.
+    TrailingBytes,
+    Io(std::io::ErrorKind),
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSummary => write!(f, "event stream ended without its summary"),
+            Self::Truncated => write!(f, "event stream ended partway through a frame"),
+            Self::BadMagic => write!(f, "not an event frame"),
+            Self::BadKind(k) => write!(f, "unknown event kind {k}"),
+            Self::TooLarge(n) => write!(f, "event frame of {n} bytes is over the cap"),
+            Self::BadPayload(e) => write!(f, "malformed event: {e}"),
+            Self::TrailingBytes => write!(f, "bytes after the summary"),
+            Self::Io(k) => write!(f, "reading the event stream: {k}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+/// Fills `buf` from `r` until it is full or `r` ends; returns how much it
+/// filled.
+fn fill(r: &mut impl Read, buf: &mut [u8]) -> Result<usize, StreamError> {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(StreamError::Io(e.kind())),
+        }
+    }
+    Ok(n)
+}
+
+/// Decodes a `stepv-occt --stream` stream (`kernel/stepv_occt.h`): passes
+/// each event to `on_event` as its frame arrives and returns the summary
+/// that ends it.
+///
+/// # Errors
+/// See [`StreamError`]. The events before the error were passed on.
+pub fn read_events(
+    mut r: impl Read,
+    mut on_event: impl FnMut(Event),
+) -> Result<Summary, StreamError> {
+    loop {
+        let mut head = [0u8; 9];
+        match fill(&mut r, &mut head)? {
+            0 => return Err(StreamError::NoSummary),
+            9 => {}
+            _ => return Err(StreamError::Truncated),
+        }
+        if &head[..4] != b"SVEV" {
+            return Err(StreamError::BadMagic);
+        }
+        let kind = head[4];
+        let len = u32::from_le_bytes(head[5..9].try_into().expect("4 bytes"));
+        if !(1..=3).contains(&kind) {
+            return Err(StreamError::BadKind(kind));
+        }
+        if len > MAX_FRAME {
+            return Err(StreamError::TooLarge(len));
+        }
+        let mut payload = vec![0; len as usize];
+        if fill(&mut r, &mut payload)? < payload.len() {
+            return Err(StreamError::Truncated);
+        }
+        let bad = |e: &dyn std::fmt::Display| StreamError::BadPayload(e.to_string());
+        match kind {
+            1 => on_event(Event::Tree(parse_outline(&payload).map_err(|e| bad(&e))?)),
+            2 => {
+                let p: Progress = serde_json::from_slice(&payload).map_err(|e| bad(&e))?;
+                if p.done > p.total {
+                    return Err(bad(&format_args!("progress {} of {}", p.done, p.total)));
+                }
+                on_event(Event::Progress(p));
+            }
+            _ => {
+                let summary: Summary = serde_json::from_slice(&payload).map_err(|e| bad(&e))?;
+                return match fill(&mut r, &mut [0])? {
+                    0 => Ok(summary),
+                    _ => Err(StreamError::TrailingBytes),
+                };
+            }
+        }
+    }
 }
 
 /// A process's current memory footprint in bytes, as the OS accounts it for
@@ -829,6 +1095,100 @@ mod tests {
         let mut v = one_triangle("bolt");
         v.push(0);
         assert_eq!(read_mesh(&v).unwrap_err(), MeshError::TrailingBytes(1));
+    }
+
+    fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = b"SVEV".to_vec();
+        v.push(kind);
+        v.extend((payload.len() as u32).to_le_bytes());
+        v.extend(payload);
+        v
+    }
+
+    const SUMMARY: &str = r#"{"ok":true,"stage":"done","error":null,"format":"step",
+        "bbox":[0,0,0,1,1,1],"diagonal":1.7,"linear_abs":0.0017,"parts":1,
+        "parts_named":1,"parts_colored":0,"parts_face_colored":0,"prototypes":1,
+        "prototypes_mesh_failed":0,"faces":6,"faces_unmeshed":0,"faces_remeshed":0,
+        "faces_healed":0,"faces_refined":0,"faces_coarse":0,"faces_degenerate":0,
+        "faces_approx":0,"faces_missing":0,"sketch_parts":0,"construction_parts":0,
+        "vertices":24,"triangles":12,"segments":0,"t_read_ms":1,"t_transfer_ms":1,
+        "t_mesh_ms":1,"t_extract_ms":1,"peak_rss_bytes":1,"sandbox":"none"}"#;
+
+    /// An outline, two progress events and the summary.
+    fn a_stream() -> Vec<u8> {
+        let mut v = frame(
+            1,
+            br#"{"format":"stepv-outline","version":1,"tree":[{"name":"bolt","part":0}],"leaves":1}"#,
+        );
+        v.extend(frame(2, br#"{"stage":"transfer","done":0,"total":1000}"#));
+        v.extend(frame(2, br#"{"stage":"mesh","done":2,"total":2}"#));
+        v.extend(frame(3, SUMMARY.as_bytes()));
+        v
+    }
+
+    #[test]
+    fn decodes_an_event_stream() {
+        let mut events = Vec::new();
+        let summary = read_events(a_stream().as_slice(), |e| events.push(e)).unwrap();
+        assert_eq!(summary.triangles, 12);
+        assert_eq!(summary.sandbox.as_deref(), Some("none"));
+        let [Event::Tree(tree), Event::Progress(a), Event::Progress(b)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(tree.leaves, 1);
+        assert_eq!((a.stage, a.done, a.total), (Stage::Transfer, 0, 1000));
+        assert_eq!((b.stage, b.fraction()), (Stage::Mesh, 1.0));
+        assert!(Stage::Transfer < Stage::Mesh);
+    }
+
+    #[test]
+    fn every_truncated_stream_is_an_error() {
+        let full = a_stream();
+        for n in 0..full.len() {
+            let r = read_events(&full[..n], |_| {});
+            assert!(r.is_err(), "prefix of {n} bytes decoded");
+        }
+        // Cut at a frame boundary: no summary; inside a frame: truncated.
+        let first = frame(
+            1,
+            br#"{"format":"stepv-outline","version":1,"tree":[{"name":"bolt","part":0}],"leaves":1}"#,
+        )
+        .len();
+        assert_eq!(
+            read_events(&full[..first], |_| {}).unwrap_err(),
+            StreamError::NoSummary
+        );
+        assert_eq!(
+            read_events(&full[..first + 3], |_| {}).unwrap_err(),
+            StreamError::Truncated
+        );
+    }
+
+    #[test]
+    fn a_broken_frame_is_rejected() {
+        let err = |v: Vec<u8>| read_events(v.as_slice(), |_| {}).unwrap_err();
+        assert_eq!(err(b"STEPVMSH and more".to_vec()), StreamError::BadMagic);
+        assert_eq!(err(frame(9, b"{}")), StreamError::BadKind(9));
+        assert_eq!(err(frame(0, b"{}")), StreamError::BadKind(0));
+        // Refused on its header alone: nothing that size is allocated.
+        let mut huge = b"SVEV\x02".to_vec();
+        huge.extend(u32::MAX.to_le_bytes());
+        assert_eq!(err(huge), StreamError::TooLarge(u32::MAX));
+        assert!(matches!(
+            err(frame(2, br#"{"stage":"mesh","done":3,"total":2}"#)),
+            StreamError::BadPayload(_)
+        ));
+        assert!(matches!(
+            err(frame(2, br#"{"stage":"bake","done":0,"total":2}"#)),
+            StreamError::BadPayload(_)
+        ));
+        assert!(matches!(
+            err(frame(1, br#"{"format":"stepv-outline","version":1,"tree":[{"name":"a","part":1}],"leaves":1}"#)),
+            StreamError::BadPayload(_)
+        ));
+        let mut v = frame(3, SUMMARY.as_bytes());
+        v.push(0);
+        assert_eq!(err(v), StreamError::TrailingBytes);
     }
 
     #[test]

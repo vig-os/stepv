@@ -33,6 +33,45 @@ char* stepv_occt_run_ex(const char* input, const char* mesh_out, const char* top
 
 void stepv_occt_free(char* p);
 
+// A run's events as they happen (#54), for a front-end that shows the
+// outline and progress before the geometry. Each is one JSON object:
+//
+//   STEPV_OCCT_EVENT_TREE      the outline, as stepv_occt_outline returns it,
+//                              right after the file is parsed. STEP only, and
+//                              left out when the outline itself fails: the
+//                              run goes on without it.
+//   STEPV_OCCT_EVENT_PROGRESS  {"stage": "transfer"|"mesh", "done": k,
+//                              "total": n}. Stages in that order; within one,
+//                              done never falls and ends at total. transfer
+//                              counts thousandths of OCCT's own progress,
+//                              mesh counts two passes over the prototypes.
+//                              At most one per stage every 50 ms, besides the
+//                              first and the last.
+//   STEPV_OCCT_EVENT_DONE      the summary. Never passed to the callback: it
+//                              is what the run returns. The kind exists for
+//                              the CLI's wire (below).
+//
+// Kinds 4 and up are reserved for per-part boxes and meshes (#54 P1).
+//
+// `stepv-occt --stream` writes these to stdout as frames, in place of the
+// one JSON line: "SVEV", the kind as one byte, the payload's length as a
+// little-endian u32, the payload. The last frame is DONE (the summary, with
+// "sandbox" as on the line); a stream that ends without it is a crash.
+#define STEPV_OCCT_EVENT_TREE 1
+#define STEPV_OCCT_EVENT_PROGRESS 2
+#define STEPV_OCCT_EVENT_DONE 3
+
+// Called on the thread running the call, with the payload valid for the
+// call alone. It must not call back into the kernel.
+typedef void (*stepv_occt_event_fn)(void* ctx, int kind, const char* payload,
+                                    unsigned long length);
+
+// stepv_occt_run_ex, passing its events to `on_event` (NULL: none) with
+// `ctx` as they happen.
+char* stepv_occt_run_stream(const char* input, const char* mesh_out, const char* topology_out,
+                            int edges, double linear_rel, double angular_deg,
+                            stepv_occt_event_fn on_event, void* ctx, int* exit_code);
+
 // The assembly outline (#54, outline.h): the tree and names of the STEP file
 // `input`, read from its product structure with no shape transfer, as JSON
 // ({"format": "stepv-outline", ...}, or {"error": ...}) in a malloc'd string

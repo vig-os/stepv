@@ -25,6 +25,8 @@
 
 #include <string>
 
+class STEPControl_Reader;
+
 namespace stepv {
 
 // The outline of the STEP file at `path` as one JSON object:
@@ -36,5 +38,11 @@ namespace stepv {
 // Throws std::runtime_error with what went wrong: not a STEP file, or one
 // that does not read.
 std::string outline_json(const std::string& path);
+
+// The same, of a file `reader` has already read (ReadFile done, nothing
+// transferred): how a streamed run (--stream) sends the outline before its
+// transfer without parsing the file twice. Throws std::runtime_error past
+// the bounds above.
+std::string outline_json(STEPControl_Reader& reader);
 
 }  // namespace stepv

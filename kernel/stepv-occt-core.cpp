@@ -108,6 +108,8 @@
 #include <IMeshTools_Parameters.hxx>
 #include <Message.hxx>
 #include <Message_Messenger.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
 #include <Message_PrinterOStream.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Quantity_Color.hxx>
@@ -144,7 +146,9 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <algorithm>
 #include <map>
+#include <set>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -253,6 +257,63 @@ using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
+
+// ── Events (#54, stepv_occt.h) ──────────────────────────────────────────────
+
+// Where a run's events go: nowhere, unless a caller of stepv_occt_run_stream
+// asked for them.
+struct Events {
+    stepv_occt_event_fn fn = nullptr;
+    void* ctx = nullptr;
+    // The last progress sent: its stage, count and time, for the rate limit.
+    mutable std::string stage;
+    mutable std::uint64_t done = 0;
+    mutable Clock::time_point at{};
+
+    explicit operator bool() const { return fn != nullptr; }
+
+    void emit(int kind, const std::string& payload) const {
+        if (fn) fn(ctx, kind, payload.data(), payload.size());
+    }
+
+    // At most one every 50 ms per stage, besides its first and its last;
+    // never a step back.
+    void progress(const char* name, std::uint64_t k, std::uint64_t n) const {
+        if (!fn) return;
+        k = std::min(k, n);
+        const bool fresh = stage != name;
+        if (!fresh && k <= done) return;
+        if (!fresh && k < n && Clock::now() - at < std::chrono::milliseconds(50)) return;
+        stage = name;
+        done = k;
+        at = Clock::now();
+        emit(STEPV_OCCT_EVENT_PROGRESS, "{\"stage\":\"" + stage + "\",\"done\":" +
+                                            std::to_string(k) + ",\"total\":" +
+                                            std::to_string(n) + "}");
+    }
+};
+
+// OCCT's own progress through a transfer, in thousandths. Show() is called
+// under the indicator's lock, so from one thread at a time.
+class TransferProgress : public Message_ProgressIndicator {
+public:
+    explicit TransferProgress(const Events& ev) : ev_(ev) {}
+    void Show(const Message_ProgressScope&, const Standard_Boolean) override {
+        ev_.progress("transfer", static_cast<std::uint64_t>(GetPosition() * 1000.0), 1000);
+    }
+
+private:
+    const Events& ev_;
+};
+
+// The transfer's progress range: OCCT's indicator when events are wanted,
+// else none (an empty range costs nothing).
+Message_ProgressRange transfer_range(const Events& ev, Handle(TransferProgress)& keep) {
+    if (!ev) return Message_ProgressRange();
+    keep = new TransferProgress(ev);
+    ev.progress("transfer", 0, 1000);
+    return keep->Start();
 }
 
 // ── XCAF walk ───────────────────────────────────────────────────────────────
@@ -791,8 +852,10 @@ std::string lower_ext(const std::string& path) {
 }
 
 // Reads `path` into `doc`. Fills the read/transfer timings and returns false
-// with s.error set on failure.
-bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Summary& s) {
+// with s.error set on failure. A STEP file's outline goes to `ev` between the
+// parse and the transfer, and the transfer's progress after it.
+bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Summary& s,
+               const Events& ev) {
     const std::string ext = lower_ext(path);
     auto t0 = Clock::now();
 
@@ -808,9 +871,23 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
             return false;
         }
         s.t_read_ms = ms_since(t0);
+        // The outline is a preview of what follows; failing, it is left
+        // out (stepv_occt.h) and the run goes on.
+        if (ev) {
+            std::string outline;
+            try {
+                outline = stepv::outline_json(reader.ChangeReader());
+            } catch (const std::bad_alloc&) {
+                throw;
+            } catch (const Standard_Failure&) {
+            } catch (const std::exception&) {
+            }
+            if (!outline.empty()) ev.emit(STEPV_OCCT_EVENT_TREE, outline);
+        }
         s.stage = "transfer";
         t0 = Clock::now();
-        if (!reader.Transfer(doc)) {
+        Handle(TransferProgress) progress;
+        if (!reader.Transfer(doc, transfer_range(ev, progress))) {
             s.error = "STEP transfer failed";
             return false;
         }
@@ -837,7 +914,8 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         s.t_read_ms = ms_since(t0);
         s.stage = "transfer";
         t0 = Clock::now();
-        if (!reader.Transfer(doc)) {
+        Handle(TransferProgress) progress;
+        if (!reader.Transfer(doc, transfer_range(ev, progress))) {
             s.error = "IGES transfer failed";
             return false;
         }
@@ -861,12 +939,13 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         return false;
     }
     s.t_transfer_ms = ms_since(t0);
+    ev.progress("transfer", 1000, 1000);
     return true;
 }
 
 int run(const std::string& input_arg, const std::string& mesh_out,
         const std::string& topology_out, bool edges, double linear_rel, double angular_deg,
-        bool parallel, Summary& s) {
+        bool parallel, const Events& ev, Summary& s) {
     // STEPCAFControl_Reader resolves multi-file assemblies' external
     // references against the main file's directory ONLY when the path is
     // absolute; given a relative one it silently yields an empty document.
@@ -886,7 +965,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
     Handle(TDocStd_Document) doc;
     app->NewDocument("BinXCAF", doc);
 
-    if (!read_into(input, doc, s)) return kExitFailed;
+    if (!read_into(input, doc, s, ev)) return kExitFailed;
 
     Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
@@ -940,6 +1019,15 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         TDF_Tool::Entry(l, e);
         return std::string(e.ToCString());
     };
+    // Mesh progress: two passes over the prototypes, this one and the
+    // recovery ladder's below.
+    std::uint64_t mesh_total = 0, mesh_done = 0;
+    {
+        std::set<std::string> unique;
+        for (const auto& p : parts) unique.insert(entry(p.prototype));
+        mesh_total = 2 * unique.size();
+    }
+    ev.progress("mesh", 0, mesh_total);
     for (const auto& p : parts) {
         if (prototypes.count(entry(p.prototype))) continue;
         TopoDS_Shape shape = st->GetShape(p.prototype);
@@ -953,6 +1041,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         }
         prototypes.emplace(entry(p.prototype), shape);
         prototype_labels.emplace(entry(p.prototype), p.prototype);
+        ev.progress("mesh", ++mesh_done, mesh_total);
     }
     s.prototypes = prototypes.size();
 
@@ -965,6 +1054,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
                                          face_colors(st, ct, prototype_labels.at(key)), cache, s);
         if (edges) g.edges = edge_geometry(shape, params);
         geoms.emplace(key, std::move(g));
+        ev.progress("mesh", ++mesh_done, mesh_total);
     }
     s.t_mesh_ms = ms_since(t0);
     // Faceless parts are the content of a sketch-only file, but construction
@@ -1104,6 +1194,14 @@ extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out
 extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
                                    const char* topology_out, int edges, double linear_rel,
                                    double angular_deg, int* exit_code) {
+    return stepv_occt_run_stream(input, mesh_out, topology_out, edges, linear_rel, angular_deg,
+                                 nullptr, nullptr, exit_code);
+}
+
+extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
+                                       const char* topology_out, int edges, double linear_rel,
+                                       double angular_deg, stepv_occt_event_fn on_event,
+                                       void* ctx, int* exit_code) {
     std::lock_guard<std::mutex> lock(serial());
     static std::once_flag quiet;
     std::call_once(quiet, [] {
@@ -1111,13 +1209,16 @@ extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
     });
 
     Summary s;
+    Events ev;
+    ev.fn = on_event;
+    ev.ctx = ctx;
     int code = kExitFailed;
     if (!input || !(linear_rel > 0) || !(angular_deg > 0)) {
         s.error = "invalid arguments";
     } else {
         try {
             code = run(input, mesh_out ? mesh_out : "", topology_out ? topology_out : "",
-                       edges != 0, linear_rel, angular_deg, true, s);
+                       edges != 0, linear_rel, angular_deg, true, ev, s);
         } catch (const Standard_Failure& e) {
             s.error = std::string("OCCT: ") + e.GetMessageString();
         } catch (const std::bad_alloc&) {
@@ -1199,7 +1300,7 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
             Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
             Handle(TDocStd_Document) doc;
             app->NewDocument("BinXCAF", doc);
-            if (read_into(resolved, doc, s)) {
+            if (read_into(resolved, doc, s, Events{})) {
                 Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
                 Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
                 TDF_LabelSequence roots;
