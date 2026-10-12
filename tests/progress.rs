@@ -173,9 +173,21 @@ fn a_terminal_sees_the_parts_and_each_stage_and_stdout_is_unchanged() {
     ] {
         assert!(tty.contains(&want), "{want:?} not in {tty:?}");
     }
-    // Redrawn in place, and cleared at the end: a later line starts clean.
-    assert!(!tty.contains('\n'), "{tty:?}");
-    assert!(tty.ends_with("\r\x1b[K"), "{tty:?}");
+    // Redrawn in place, and erased once the run ends, before anything else
+    // is said: what follows (the sandbox warning where the kernel's sandbox
+    // cannot nest, as in nix's) starts on a clean line.
+    let erase = format!("stepv: {leaves} parts · meshing 100%\x1b[K\r\x1b[K");
+    let end = tty.find(&erase).map(|i| i + erase.len());
+    let end =
+        end.unwrap_or_else(|| panic!("the line was not erased after its last redraw: {tty:?}"));
+    assert!(
+        !tty[..end].contains('\n'),
+        "a new line while redrawing: {tty:?}"
+    );
+    assert!(
+        !tty[end..].contains("parts ·"),
+        "progress after the erase: {tty:?}"
+    );
 
     // The same run into a pipe: no progress, and the same report.
     let o = h
