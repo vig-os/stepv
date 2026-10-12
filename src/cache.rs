@@ -302,25 +302,65 @@ impl OutlineArtifact {
     }
 }
 
-/// Where the [`OutlineArtifact`] for `input` lives under `dir`; `None` when
-/// `input` cannot be stat'ed.
+/// A file as it was at one moment: its canonical path, length and mtime,
+/// which every key is made of. A run takes it once, before it reads the
+/// file, and keys everything it leaves on it, so a file saved mid-run gets
+/// nothing from that run: its new mtime is another key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileId {
+    pub path: PathBuf,
+    pub len: u64,
+    pub mtime_nanos: i128,
+}
+
+impl FileId {
+    /// `input` now; `None` when it cannot be stat'ed.
+    #[must_use]
+    pub fn of(input: &Path) -> Option<Self> {
+        let path = std::fs::canonicalize(input).ok()?;
+        let meta = std::fs::metadata(&path).ok()?;
+        let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Self {
+            len: meta.len(),
+            mtime_nanos: i128::try_from(mtime.as_nanos()).ok()?,
+            path,
+        })
+    }
+}
+
+/// Where the [`OutlineArtifact`] for `file` lives under `dir`.
 #[must_use]
-pub fn outline_path(dir: &Path, input: &Path) -> Option<PathBuf> {
-    let canon = std::fs::canonicalize(input).ok()?;
-    let meta = std::fs::metadata(&canon).ok()?;
-    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    let path = canon.as_os_str().as_encoded_bytes();
+pub fn outline_path(dir: &Path, file: &FileId) -> PathBuf {
+    let path = file.path.as_os_str().as_encoded_bytes();
     let mut h = blake3::Hasher::new();
     // Its own domain: no output key can hash the same.
     h.update(OUTLINE_FORMAT.as_bytes());
     h.update(&(path.len() as u64).to_le_bytes());
     h.update(path);
-    h.update(&meta.len().to_le_bytes());
-    h.update(&mtime.as_nanos().to_le_bytes());
-    Some(dir.join(format!("{}.outline.json", h.finalize().to_hex())))
+    h.update(&file.len.to_le_bytes());
+    h.update(&file.mtime_nanos.to_le_bytes());
+    dir.join(format!("{}.outline.json", h.finalize().to_hex()))
 }
 
-/// Writes `artifact` for `input` under `dir`, atomically.
+/// Writes `artifact` to `path` ([`outline_path`]), atomically.
+///
+/// # Errors
+/// When the write fails.
+pub fn store_outline(path: &Path, artifact: &OutlineArtifact) -> std::io::Result<()> {
+    let json = serde_json::to_vec(artifact).map_err(std::io::Error::other)?;
+    write_atomic(path, &json)
+}
+
+/// The [`OutlineArtifact`] at `path`, if it is one of this
+/// [`OUTLINE_VERSION`].
+#[must_use]
+pub fn load_outline_at(path: &Path) -> Option<OutlineArtifact> {
+    let bytes = std::fs::read(path).ok()?;
+    let a: OutlineArtifact = serde_json::from_slice(&bytes).ok()?;
+    (a.format == OUTLINE_FORMAT && a.version == OUTLINE_VERSION).then_some(a)
+}
+
+/// Writes `artifact` for `input` as it is now under `dir`, atomically.
 ///
 /// # Errors
 /// When `input` cannot be stat'ed, or the write fails.
@@ -329,10 +369,9 @@ pub fn store_outline_in(
     input: &Path,
     artifact: &OutlineArtifact,
 ) -> std::io::Result<()> {
-    let path = outline_path(dir, input)
+    let file = FileId::of(input)
         .ok_or_else(|| std::io::Error::other(format!("cannot stat {}", input.display())))?;
-    let json = serde_json::to_vec(artifact).map_err(std::io::Error::other)?;
-    write_atomic(&path, &json)
+    store_outline(&outline_path(dir, &file), artifact)
 }
 
 /// The [`OutlineArtifact`] for `input` under `dir`, if one was written for
@@ -340,9 +379,7 @@ pub fn store_outline_in(
 /// [`OUTLINE_VERSION`].
 #[must_use]
 pub fn load_outline_in(dir: &Path, input: &Path) -> Option<OutlineArtifact> {
-    let bytes = std::fs::read(outline_path(dir, input)?).ok()?;
-    let a: OutlineArtifact = serde_json::from_slice(&bytes).ok()?;
-    (a.format == OUTLINE_FORMAT && a.version == OUTLINE_VERSION).then_some(a)
+    load_outline_at(&outline_path(dir, &FileId::of(input)?))
 }
 
 /// [`load_outline_in`] the [`cache_dir`]: what #63's preview and the

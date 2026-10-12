@@ -211,31 +211,51 @@ fn a_run_killed_after_the_outline_keeps_the_outline_but_no_summary() {
 }
 
 #[test]
-fn a_broken_stream_is_a_crash_not_a_result() {
+fn a_broken_stream_has_no_summary_and_the_exits_outcome() {
     let t = Scratch::new("broken");
     let input = data("assembly.step");
-    for (name, body) in [
-        ("silent", "exit 0"),
-        ("garbage", "printf 'not a frame at all'; exit 0"),
+    for (name, body, expected) in [
+        // An exit 0 or 3 without the summary broke the contract: no result,
+        // and the outcome the exit gives, as in `occt::run`, not a crash.
+        ("silent", "exit 0", Outcome::Ok),
+        (
+            "garbage",
+            "printf 'not a frame at all'; exit 0",
+            Outcome::Ok,
+        ),
         // A Done frame cut off inside its payload.
         (
             "cut",
             r#"printf 'SVEV\003\100\000\000\000{"ok":true'; exit 0"#,
+            Outcome::Ok,
         ),
         // A frame claiming 4 GiB: refused before it is allocated.
-        ("huge", r"printf 'SVEV\002\377\377\377\377'; exit 0"),
+        (
+            "huge",
+            r"printf 'SVEV\002\377\377\377\377'; exit 0",
+            Outcome::Ok,
+        ),
         // A kind outside the contract.
-        ("kind", r"printf 'SVEV\177\002\000\000\000{}'; exit 0"),
+        (
+            "kind",
+            r"printf 'SVEV\177\002\000\000\000{}'; exit 0",
+            Outcome::Ok,
+        ),
         // A clean failure exit, but its stream ends without the summary.
-        ("nodone", "exit 3"),
+        ("nodone", "exit 3", Outcome::Failed),
+        // An exit outside the contract is a crash, stream or not.
+        (
+            "exit9",
+            "exit 9",
+            Outcome::Crashed {
+                signal: None,
+                code: Some(9),
+            },
+        ),
     ] {
         let fake = t.script(name, body);
         let (run, _) = stream(&fake, &input, limits(), None);
-        assert!(
-            matches!(run.outcome, Outcome::Crashed { .. }),
-            "{name}: {:?}",
-            run.outcome
-        );
+        assert_eq!(run.outcome, expected, "{name}");
         assert!(run.summary.is_none(), "{name}");
     }
 }

@@ -131,9 +131,10 @@ pub fn full_sandbox(sandbox: &str) -> bool {
 /// How a kernel run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Exit 0: geometry produced.
+    /// Exit 0: geometry produced, if the run has its summary. Without one
+    /// the kernel broke its contract.
     Ok,
-    /// Exit 3: a clean, reported failure. The summary is still valid.
+    /// Exit 3: a clean, reported failure, if the run has its summary.
     Failed,
     /// Killed by a signal, or an exit code outside the contract.
     Crashed {
@@ -258,7 +259,9 @@ pub fn run(
 /// A run killed partway (the wall clock, the memory cap) keeps the events
 /// that arrived and has no summary: it is not complete, whatever arrived. A
 /// kernel that exits with a stream that breaks the contract ([`read_events`])
-/// has crashed, whatever its exit code says. Progress is coalesced: when
+/// has no summary either, and the outcome its exit gives, as in [`run`]: an
+/// exit 0 or 3 without a summary is a broken contract, for the caller to
+/// report, and not a crash. Progress is coalesced: when
 /// `on_event` falls behind, progress within a stage is dropped, but never a
 /// stage's first or last event ([`Progress::droppable`]), the outline or the
 /// order.
@@ -304,14 +307,9 @@ pub fn run_streaming(
         },
     )?;
     let (outcome, summary) = match (s.status, s.output) {
-        // Exited, but not with the stream the contract promises.
-        (Some(status), Err(_)) => (
-            Outcome::Crashed {
-                signal: status.signal(),
-                code: status.code(),
-            },
-            None,
-        ),
+        // Exited, but not with the stream the contract promises: no summary,
+        // and the outcome is the exit's, as in `run`.
+        (Some(status), Err(_)) => (outcome(Some(status), s.over_memory, None), None),
         // Killed: not complete, even when the summary made it out first.
         (None, _) => (outcome(None, s.over_memory, None), None),
         (status, stream) => {
