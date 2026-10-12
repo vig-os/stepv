@@ -624,6 +624,43 @@ fn a_later_run_killed_after_its_outline_keeps_the_box() {
     );
 }
 
+/// The most a `view` test lets the viewer process hold (#86): its kernel
+/// has `--memory-mb`, the viewer itself has no cap of its own.
+const VIEW_FOOTPRINT_CAP: u64 = 2 << 30;
+
+impl Home {
+    /// `stepv view <input>` with `args`, held to what a test may cost (#86):
+    /// the kernel under `--memory-mb 1024`, the screenshot hook set so a
+    /// window that opens closes itself, and the viewer's own footprint polled,
+    /// killed and failed past [`VIEW_FOOTPRINT_CAP`] or after 120 s.
+    fn view(&self, input: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+        let shot = self.0.join("shot.png");
+        let all = [
+            &["view", input.to_str().unwrap()][..],
+            args,
+            &["--memory-mb", "1024"],
+        ]
+        .concat();
+        let env = [env, &[("STEPV_VIEW_SCREENSHOT", shot.to_str().unwrap())]].concat();
+        let mut child = self
+            .command(&all, &env)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stepv view");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while child.try_wait().unwrap().is_none() {
+            let fp = occt::footprint(child.id()).unwrap_or(0);
+            if fp > VIEW_FOOTPRINT_CAP || Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("stepv view killed: footprint {fp} bytes, or past 120 s");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        result(&child.wait_with_output().unwrap())
+    }
+}
+
 #[test]
 fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
     let k = kernel();
@@ -634,15 +671,11 @@ fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
     let before = cache::FileId::of(&input).unwrap();
     // The kernel stalls 30 s once the outline is out; the 10 s cap kills it
     // there, before the viewer would open a window. A viewer whose run was
-    // not streamed opens one: the screenshot hook closes it again, and the
-    // test fails rather than waits on it.
-    let shot = h.0.join("shot.png");
-    let (code, j) = h.stepv(
-        &["view", input.to_str().unwrap(), "--timeout", "10"],
-        &[
-            ("STEPV_OCCT_TEST_STALL_MS", "30000"),
-            ("STEPV_VIEW_SCREENSHOT", shot.to_str().unwrap()),
-        ],
+    // not streamed opens one, and `Home::view` closes it again.
+    let (code, j) = h.view(
+        &input,
+        &["--timeout", "10"],
+        &[("STEPV_OCCT_TEST_STALL_MS", "30000")],
     );
     assert_eq!((code, j["status"].as_str()), (4, Some("timeout")), "{j}");
     let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
@@ -651,4 +684,47 @@ fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
     assert_eq!((&a.tree, a.leaves), (&outline.tree, outline.leaves));
     assert_eq!(a.header, stepv::header::read(&input));
     assert_eq!(a.bbox, None, "a box from a run that did not complete");
+}
+
+#[test]
+fn a_viewer_with_no_cache_leaves_no_artifact() {
+    let k = kernel();
+    let h = Home::new("viewnocache");
+    let input = data("assembly.step");
+    // The real kernel, then a crash: a streamed run would have its outline,
+    // and no run gets as far as a window.
+    let crash = script(
+        &h,
+        "crash-kernel",
+        &format!("'{}' \"$@\"\nexit 1", k.display()),
+    );
+    let env = [("STEPV_OCCT", crash.to_str().unwrap())];
+    let (code, j) = h.view(&input, &["--no-cache"], &env);
+    assert_eq!((code, j["status"].as_str()), (3, Some("crashed")), "{j}");
+    assert!(h.entries("json").is_empty(), "--no-cache wrote an artifact");
+    // The same run, cached: the outline is left. Without this, the first
+    // half could pass with a crash that comes before the outline.
+    let (code, j) = h.view(&input, &[], &env);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(h.entries("json").len(), 1, "a cached view left no artifact");
+}
+
+#[test]
+fn a_complete_view_adds_the_box() {
+    kernel();
+    let h = Home::new("viewbox");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let before = cache::FileId::of(&input).unwrap();
+    let (code, j) = h.view(&input, &["--timeout", "60"], &[]);
+    // The box is stored once the mesh has decoded, before the window opens:
+    // whether a window can open here (a headless runner) does not matter.
+    assert!(
+        j["status"] == "ok" || (code == 3 && j["status"] == "error"),
+        "{j}"
+    );
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).expect("a box");
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("the viewer's run left no outline artifact");
+    assert_eq!(a.bbox, Some(bbox));
 }

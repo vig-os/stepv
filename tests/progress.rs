@@ -3,7 +3,8 @@
 //! the same either way. Runs the real kernel against `tests/data/`.
 
 use std::io::Read as _;
-use std::os::fd::{FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -69,23 +70,62 @@ fn json(stdout: &[u8]) -> Value {
     serde_json::from_str(text.trim_end()).expect("stdout is JSON")
 }
 
+/// A pseudo-terminal's master and slave, both close-on-exec from the moment
+/// they exist. The tests run in parallel threads and each spawns stepv, so a
+/// descriptor without it, even for an instant, can be inherited by another
+/// test's child (and passed on to its kernel), and this terminal's reader
+/// then sees no end until that other process tree exits. `openpty` makes
+/// them inheritable, and setting the flag after it leaves that instant.
+fn pty() -> (OwnedFd, OwnedFd) {
+    // SAFETY: plain libc calls on a descriptor this function owns; `ptsname`
+    // returns a static buffer, copied at once under a lock (only this file
+    // calls it).
+    unsafe {
+        let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        assert!(m >= 0, "posix_openpt: {}", std::io::Error::last_os_error());
+        let master = OwnedFd::from_raw_fd(m);
+        assert_eq!(
+            libc::grantpt(m),
+            0,
+            "grantpt: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(
+            libc::unlockpt(m),
+            0,
+            "unlockpt: {}",
+            std::io::Error::last_os_error()
+        );
+        static PTSNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let name = {
+            let _g = PTSNAME.lock().unwrap();
+            let p = libc::ptsname(m);
+            assert!(!p.is_null(), "ptsname: {}", std::io::Error::last_os_error());
+            std::ffi::CStr::from_ptr(p).to_str().unwrap().to_owned()
+        };
+        // std opens every file close-on-exec.
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&name)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        (master, slave.into())
+    }
+}
+
+fn close_on_exec(fd: &OwnedFd) -> bool {
+    // SAFETY: F_GETFD on a descriptor we own.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    flags >= 0 && flags & libc::FD_CLOEXEC != 0
+}
+
 /// Runs `cmd` with stderr on a pseudo-terminal: its exit code, its stdout
 /// JSON, and everything it wrote to the terminal.
 fn on_a_tty(mut cmd: Command) -> (i32, Value, String) {
-    let (mut master, mut slave) = (0, 0);
-    // SAFETY: openpty fills the two descriptors; no name, termios or size.
-    let rc = unsafe {
-        libc::openpty(
-            &raw mut master,
-            &raw mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-    // SAFETY: both are fresh descriptors this function now owns.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let (master, slave) = pty();
+    // A regression here couples the tests' terminals again: see `pty`.
+    assert!(close_on_exec(&master) && close_on_exec(&slave));
     let child = cmd.stderr(slave).spawn().expect("spawn stepv");
     // The command keeps its copy of the slave until dropped. Once it is, the
     // child holds the only one, and the terminal ends with it: a read then

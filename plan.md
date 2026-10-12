@@ -1334,7 +1334,7 @@ as the outline should leave something a preview can show at once.
 
 ### Outline and progress first (#63, #54 step 5, 2026-10-12): part 1, the CLI
 
-Part 1 of #63: the CLI. The viewer's own outline-first window is part 2.
+Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
 
 - **`view` writes the artifact:** its load is a cached run like `--png`'s. It is streamed, writes
   `cache::OutlineArtifact` on `Event::Tree` under the `cache::FileId` taken before the run, and
@@ -1348,8 +1348,11 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2.
   - `stepv: N parts · reading` once the outline arrives, or at once when a cached artifact
     already names them, before the kernel says anything;
   - `stepv: N parts · transferring P%`, then `· meshing P%`, redrawn on each whole percent;
-  - the line is erased when the run ends, however it ends, so stderr's warnings and the
-    viewer's notes start on a clean line. The outcome is the stdout JSON's to say.
+  - the line is erased when stepv finishes the run, whatever its outcome (timeout, memory cap,
+    crash and failure included), so stderr's warnings and the viewer's notes start on a clean
+    line. The outcome is the stdout JSON's to say. stepv itself interrupted (Ctrl-C) or killed
+    erases nothing: it installs no signal handler, so the last state stays on the line and the
+    shell's prompt follows it.
   - A file without an outline (IGES, BREP, a STEP file without product structure) shows no part
     count. A cache hit runs nothing and shows nothing.
 - **Stdout is unchanged:** one JSON line, the same keys whether stderr is a terminal or not.
@@ -1357,7 +1360,7 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2.
   written to it, and an uncached `--no-cache` run is not streamed.
 - **Known limits:**
   - the viewer still waits for the whole run before opening its window, and shows nothing of
-    the outline or the progress in it: part 2 of #63;
+    the outline or the progress in it: #85 (#63 part 2);
   - streaming for the progress line costs the run its parse again inside the timeout, as for
     the artifact (#76);
   - a non-STEP file has no outline, so the line has no part count (#76).
@@ -1366,9 +1369,19 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2.
     reaches `transferring 100%` and `meshing 100%`, never starts a new line, and is erased at
     the end. The same run into a pipe writes no progress, and its JSON has the same keys and
     values. A cached artifact names the parts with a kernel that never writes a byte; without
-    one, no part count shows.
-  - `tests/cache.rs`: a `view` whose kernel is killed after its outline leaves the artifact
-    under the pre-run `FileId`, equal to `occt::outline`, without a box.
+    one, no part count shows. The terminal's master and slave are close-on-exec from the
+    moment they exist (`posix_openpt(O_CLOEXEC)`, the slave opened by std), and asserted to be:
+    the tests run in parallel, and an inheritable slave passed to another test's stepv and
+    kernel would hold this terminal open until that process tree exits.
+  - `tests/cache.rs`, each `view` through `Home::view` (#86): the kernel under `--memory-mb 1024`,
+    `STEPV_VIEW_SCREENSHOT` set so a window that opens closes itself, and the viewer's own
+    footprint polled and the run failed past 2 GiB or 120 s.
+    - a `view` whose kernel is killed after its outline leaves the artifact under the pre-run
+      `FileId`, equal to `occt::outline`, without a box;
+    - `view --no-cache` leaves no artifact, where the same run cached leaves one (a kernel that
+      crashes after a full run, so no window opens). Making `view` ignore `--no-cache` fails it;
+    - a complete `view` stores the box, equal to the summary's, whether or not a window can
+      then open.
 
 ### Work queue (ordered, 2026-10-04)
 
