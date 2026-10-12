@@ -391,7 +391,7 @@ fn run(args: &Args) -> (u8, Value) {
                 );
             }
         };
-        if let Err(e) = write_atomic(dest, &bytes) {
+        if let Err(e) = cache::write_atomic(dest, &bytes) {
             let msg = format!("cannot write {}: {e}", dest.display());
             return fail(report, EXIT_FAILED, "error", &msg);
         }
@@ -425,7 +425,7 @@ fn run(args: &Args) -> (u8, Value) {
         ),
         Format::Mesh => raw,
     };
-    if let Err(e) = write_atomic(&out, &bytes) {
+    if let Err(e) = cache::write_atomic(&out, &bytes) {
         return fail(
             report,
             EXIT_FAILED,
@@ -433,8 +433,10 @@ fn run(args: &Args) -> (u8, Value) {
             &format!("cannot write {}: {e}", out.display()),
         );
     }
-    if let Some(cp) = &cache_path {
-        let _ = write_atomic(cp, &bytes);
+    if let Some(cp) = &cache_path
+        && let Err(e) = cache::store(cp, &bytes)
+    {
+        eprintln!("stepv: cannot cache {}: {e}", cp.display());
     }
     report["status"] = json!("ok");
     report["output"] = json!(out);
@@ -606,10 +608,11 @@ fn cache_path(args: &Args, format: Format) -> Option<PathBuf> {
     Some(dir.join(format!("{key}.{ext}")))
 }
 
-/// Serves a cache hit, or a cached failure, into `out`. `None` on a miss.
+/// Serves a cache hit, or a cached failure, into `out`. `None` on a miss,
+/// which an incomplete or old-version entry is ([`cache::load`]).
 fn from_cache(cp: &Path, out: &Path, report: &mut Value) -> Option<u8> {
-    if let Ok(bytes) = std::fs::read(cp) {
-        if write_atomic(out, &bytes).is_ok() {
+    if let Some(bytes) = cache::load(cp) {
+        if cache::write_atomic(out, &bytes).is_ok() {
             report["status"] = json!("ok");
             report["output"] = json!(out);
             report["cached"] = json!(true);
@@ -619,7 +622,7 @@ fn from_cache(cp: &Path, out: &Path, report: &mut Value) -> Option<u8> {
     }
     // A failure is as expensive to recompute as a success; Finder will ask
     // again on every window that shows the folder.
-    let fail = std::fs::read(cp.with_extension("fail")).ok()?;
+    let fail = cache::load(&cp.with_extension("fail"))?;
     let v: Value = serde_json::from_slice(&fail).ok()?;
     report["status"] = v["status"].clone();
     report["error"] = v["error"].clone();
@@ -629,20 +632,7 @@ fn from_cache(cp: &Path, out: &Path, report: &mut Value) -> Option<u8> {
 
 fn remember_failure(cp: &Path, status: &str, msg: &str) {
     let body = json!({ "status": status, "error": msg }).to_string();
-    let _ = write_atomic(&cp.with_extension("fail"), body.as_bytes());
-}
-
-/// Writes via a sibling temp file and a rename, so a reader (Finder, a
-/// concurrent stepv) never sees a half-written PNG.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    let _ = cache::store(&cp.with_extension("fail"), body.as_bytes());
 }
 
 fn temp_path(ext: &str) -> PathBuf {
