@@ -181,7 +181,10 @@
           ];
 
           # Every crane derivation (nextest included) sees the built kernel.
+          # The kernel as a library (the C API: capi, Quick Look), for the
+          # tests that load it.
           craneArgs.STEPV_OCCT = "${kernel}/libexec/stepv/stepv-occt";
+          craneArgs.STEPV_OCCT_LIB = "${kernel}/lib/libstepvocct${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}";
 
           # Host-runner hooks (#1167): direnv CI runs on the bare host runner,
           # so the flake GENERATES .pre-commit-config.yaml from the shared base

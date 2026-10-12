@@ -305,19 +305,29 @@ fn a_complete_run_has_no_cause() {
     assert!(j["kernel"]["cause"].is_null(), "{j}");
 }
 
-/// The kernel's C library: beside the kernel in a dev build, in `lib/`
-/// beside `libexec/` in an installed one.
+/// The kernel's C library: `$STEPV_OCCT_LIB`, else this checkout's
+/// `target/kernel/` (`just kernel`), as `kernel()` resolves `$STEPV_OCCT`.
+/// A missing file fails the test, with its path.
 fn kernel_lib() -> PathBuf {
-    let k = kernel();
-    let name = if cfg!(target_os = "macos") {
-        "libstepvocct.dylib"
-    } else {
-        "libstepvocct.so"
-    };
-    [k.with_file_name(name), k.join("../../../lib").join(name)]
-        .into_iter()
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("no {name} near {}", k.display()))
+    let lib = std::env::var_os("STEPV_OCCT_LIB").map_or_else(
+        || {
+            let name = if cfg!(target_os = "macos") {
+                "libstepvocct.dylib"
+            } else {
+                "libstepvocct.so"
+            };
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/kernel")
+                .join(name)
+        },
+        PathBuf::from,
+    );
+    assert!(
+        lib.is_file(),
+        "kernel library not found at {}: run `just kernel` or set STEPV_OCCT_LIB",
+        lib.display()
+    );
+    lib
 }
 
 #[test]
@@ -394,8 +404,11 @@ fn invalid_arguments_are_the_environment() {
     let json = unsafe {
         let h = libc::dlopen(lib.as_ptr(), libc::RTLD_NOW);
         assert!(!h.is_null(), "{:?}", CStr::from_ptr(libc::dlerror()));
-        let run: Run = std::mem::transmute(libc::dlsym(h, c"stepv_occt_run".as_ptr()));
-        let free: Free = std::mem::transmute(libc::dlsym(h, c"stepv_occt_free".as_ptr()));
+        let run = libc::dlsym(h, c"stepv_occt_run".as_ptr());
+        let free = libc::dlsym(h, c"stepv_occt_free".as_ptr());
+        assert!(!run.is_null() && !free.is_null(), "the C API's symbols");
+        let run: Run = std::mem::transmute(run);
+        let free: Free = std::mem::transmute(free);
         let mut code = 0;
         // A zero deflection: what no caller should pass.
         let p = run(
