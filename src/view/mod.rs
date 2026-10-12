@@ -122,6 +122,10 @@ pub struct Options {
     /// The file and the limits a measurement server (#33) reads it with.
     pub input: Option<PathBuf>,
     pub limits: Option<crate::occt::Limits>,
+    /// The faces the kernel's run left unhealed (#51), for the measurement
+    /// server to replay. `None`: the run did not say (an older kernel), and
+    /// the server goes by its own clock.
+    pub unhealed: Option<Vec<u64>>,
 }
 
 /// What a `--frames` run measured: wall-clock intervals between frames,

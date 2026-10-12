@@ -12,6 +12,11 @@ extern "C" {
 // prints — as a malloc'd string to release with stepv_occt_free, and sets
 // *exit_code to 0 (geometry) or 3 (clean failure; the summary says why).
 // Thread-safe: calls are serialised, since OCCT's readers share global state.
+//
+// Healing a face during the transfer has a time budget (#51, heal.h):
+// STEPV_OCCT_FACE_BUDGET_MS from the environment, read at each call, default
+// 2000. A face past it is drawn as its outline and counted in the summary's
+// "faces_over_budget".
 char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
                      double angular_deg, int* exit_code);
 

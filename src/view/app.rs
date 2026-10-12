@@ -164,6 +164,7 @@ struct Viewer {
     /// The file and limits it is started with.
     input: Option<PathBuf>,
     limits: Option<crate::occt::Limits>,
+    unhealed: Option<Vec<u64>>,
     /// The model tree (#30).
     tree: Tree,
     /// The tree generation the GPU's visibility matches.
@@ -267,6 +268,7 @@ impl Viewer {
             next_query: 1,
             input: opts.input.clone(),
             limits: opts.limits,
+            unhealed: opts.unhealed.clone(),
             tree,
             uploaded: 0,
             reveal: false,
@@ -594,7 +596,12 @@ impl Viewer {
     fn measurer(&mut self) -> Option<&Measurer> {
         if self.measurer.is_none() {
             let (input, limits) = (self.input.as_ref()?, self.limits?);
-            self.measurer = Some(Measurer::spawn(&crate::occt::kernel_path(), input, limits));
+            self.measurer = Some(Measurer::spawn(
+                &crate::occt::kernel_path(),
+                input,
+                limits,
+                self.unhealed.as_deref(),
+            ));
         }
         self.measurer.as_ref()
     }

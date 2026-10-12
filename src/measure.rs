@@ -192,6 +192,20 @@ impl Server {
         self
     }
 
+    /// Has the kernels this server starts give up healing exactly the faces
+    /// the run that drew the model did ([`crate::occt::Summary::unhealed_faces`]),
+    /// in place of their own time budget (#51): a budget is a clock, and the
+    /// server must see the faces the run numbered, numbered the same.
+    #[must_use]
+    pub fn with_unhealed(self, faces: &[u64]) -> Self {
+        let list = faces
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.with_env("STEPV_OCCT_UNHEALED", &list)
+    }
+
     /// The sandbox the running kernel reported, once started.
     #[must_use]
     pub fn sandbox(&self) -> Option<&str> {
