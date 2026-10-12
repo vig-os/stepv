@@ -49,11 +49,19 @@ target_link_libraries(fixture-gen PRIVATE
   TKDESTEP TKDEIGES TKXCAF TKXSBase TKLCAF TKCAF TKCDF TKBO TKPrim
   TKTopAlgo TKBRep TKGeomBase TKG3d TKMath TKernel)
 
-# The kernel ships; the generators are dev tools.
+# Checks the OCCT it links against carries stepv's patch (#74,
+# nix/patches/): tests/occt_patch.rs runs it.
+add_executable(occt-patch-check occt-patch-check.cpp)
+target_include_directories(occt-patch-check PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+target_compile_options(occt-patch-check PRIVATE -Wall -Wextra)
+target_link_libraries(occt-patch-check PRIVATE
+  TKShHealing TKTopAlgo TKBRep TKGeomAlgo TKGeomBase TKG3d TKG2d TKMath TKernel)
+
+# The kernel ships; the generators and the check are dev tools.
 install(TARGETS stepv-occt RUNTIME DESTINATION libexec/stepv)
 # Beside the kernel so tests find it via occt::kernel_path() (tests/cli.rs
 # checks its output is byte-reproducible). Not shipped: every package copies
 # stepv-occt from libexec/stepv by name.
-install(TARGETS stress-gen RUNTIME DESTINATION libexec/stepv)
+install(TARGETS stress-gen occt-patch-check RUNTIME DESTINATION libexec/stepv)
 install(TARGETS stepvocct LIBRARY DESTINATION lib)
 install(FILES stepv_occt.h DESTINATION include)

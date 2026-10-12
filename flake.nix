@@ -55,8 +55,28 @@
           # (added to `modules` below) brings cc/c++/cmake/make/pkg-config but
           # deliberately leaves third-party libraries to extraPackages, so OCCT
           # itself must be named here.
-          pkgs.opencascade-occt
+          occt
         ];
+
+        # nixpkgs' OCCT 7.9.3 with stepv's patches (NOTICE, plan.md "#74 OCCT
+        # patch"). The dev shell (`just kernel`, the macOS app's dylibs) and
+        # the kernel derivation both build against this one, so every shipped
+        # kernel carries the patch. A patch that no longer applies fails the
+        # build in patchPhase, and a different OCCT version fails evaluation:
+        # the patch was proven equivalent on 7.9.3's code only, so a bump must
+        # re-check it (drop it once an OCCT release we use has it).
+        occt =
+          assert pkgs.lib.assertMsg (pkgs.opencascade-occt.version == "7.9.3")
+            "nixpkgs moved OCCT to ${pkgs.opencascade-occt.version}: re-check nix/patches/occt-7.9.3-* (plan.md \"#74 OCCT patch\")";
+          pkgs.opencascade-occt.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [
+              # #74: ShapeFix_IntersectionTool::FixSelfIntersectWire fetched
+              # edge1 from the wire's sequence on every inner iteration, O(n^3)
+              # on long wires; fetched once per num1 (and again after the
+              # big-segment branch's removals), it is O(n^2).
+              ./nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch
+            ];
+          });
 
         # Devkit knobs read from .vig-os (#1224, #1432, #1431, #1282, #1633): the
         # flake-generated pre-commit hooks — the branch guard and the
@@ -151,7 +171,7 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = ./kernel;
           nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [ pkgs.opencascade-occt ];
+          buildInputs = [ occt ];
           cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
           meta.description = "stepv's OCCT kernel: STEP/IGES/BREP to meshes, run as a subprocess";
         };
@@ -173,11 +193,13 @@
             "stepv-capi"
           ];
 
-          # The harness corpus manifest and the committed CLI-test corpus live
-          # outside the cargo source filter; without this, crane drops them.
+          # The harness corpus manifest, the committed CLI-test corpus and the
+          # OCCT patch's reference output live outside the cargo source
+          # filter; without this, crane drops them.
           extraSrcFiles = [
             "tests/fixtures"
             "tests/data"
+            "tests/occt-patch"
           ];
 
           # Every crane derivation (nextest included) sees the built kernel.
@@ -195,9 +217,12 @@
           # every `just test-data` would re-dirty the tree.
           # The licence texts in licenses/ are verbatim upstream copies: a
           # whitespace "fix" would make them no longer the licence.
+          # The OCCT patches' blank context lines are a single space: trimmed,
+          # the patch no longer applies.
           hooksExcludes = [
             "^tests/data/"
             "^licenses/"
+            "^nix/patches/"
           ];
 
           tools = [
