@@ -1228,9 +1228,9 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
 
 ### Cache (#62, #54 step 4, 2026-10-12)
 
-A killed or failed run must never leave an entry a later run trusts. This is the entries and how
-they are written; which results may be cached at all (complete-only, the negative cache) follows
-as #62's second part, and the outline artifact as its third.
+A killed or failed run must never leave an entry a later run trusts. Below: the entries, how they
+are written, and which results may be cached at all. The outline artifact follows as #62's last
+part.
 
 - **Entries (`cache::store`, `cache::load`):** `STEPVCE\0`, `ENTRY_VERSION` (u32 LE), the
   payload's length (u64 LE), the payload, then its blake3 hash as the completeness tag. `load`
@@ -1247,10 +1247,30 @@ as #62's second part, and the outline artifact as its third.
   sweeps those older than `STALE_PART_AGE` (1 h) from the cache directory; never in the user's.
   The age is by wall clock, so a writer stopped longer than that loses its `.part`: its rename
   fails with `ENOENT`, harmlessly.
-- **Known limit:** the keys share `(len, mtime)`'s blind spot: a file rewritten in place within
-  one mtime tick at the same length.
+- **Only complete results:** an entry is written only when the kernel's outcome is `Ok` with a
+  summary; `Ok` without one is a "bad kernel output" error. A multi-file assembly with a part file
+  that did not read (`external_missing > 0`) still draws, but is not cached: the part files are
+  outside the key.
+- **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file. The
+  summary's `cause` (`occt::Cause`) is `input` when the file does not read, transfer, or has
+  nothing to draw, and `environment` for output I/O, path resolution, missing part files, out of
+  memory, and any other exception. Only `Outcome::Failed` with cause `input` is cached. A
+  timeout or a memory cap depends on the limits (`--timeout`, `--memory-mb` are not in the key),
+  a crash may not repeat, an environment failure is outside the key, and a kernel without
+  `cause` says nothing: none of them is cached, since each would block a run that could
+  succeed.
+- **Known limits:**
+  - the keys share `(len, mtime)`'s blind spot: a file rewritten in place within one mtime tick
+    at the same length;
+  - a multi-file assembly's part file edited after it was cached is not seen: only the top file
+    is in the key.
 - **Tests:**
-  - `tests/cache.rs`: a truncated and an old-version entry are regenerated.
+  - `tests/cache.rs`:
+    - a truncated and an old-version entry are regenerated;
+    - a timeout, a memory cap, a kernel exit 0 without a summary, an unwritable mesh output
+      (`environment`) and missing part files (`environment`) cache nothing, and the next run
+      succeeds;
+    - a garbage file (`input`) caches its failure.
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn

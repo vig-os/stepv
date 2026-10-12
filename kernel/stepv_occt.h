@@ -11,6 +11,10 @@ extern "C" {
 // (NULL: summary only). Returns the JSON summary — the same one stepv-occt
 // prints — as a malloc'd string to release with stepv_occt_free, and sets
 // *exit_code to 0 (geometry) or 3 (clean failure; the summary says why).
+// A failure's "cause" is "input" when the file itself is at fault, and
+// "environment" when the host, the output or files beside the input are (an
+// external part file missing, an unwritable mesh): only an input failure
+// repeats for the same file anywhere (#62). It is null on success.
 // Thread-safe: calls are serialised, since OCCT's readers share global state.
 //
 // Healing a face during the transfer has a time budget (#51, heal.h):

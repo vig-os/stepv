@@ -433,7 +433,12 @@ fn run(args: &Args) -> (u8, Value) {
             &format!("cannot write {}: {e}", out.display()),
         );
     }
-    if let Some(cp) = &cache_path
+    // Only a complete result gets here: `tessellate` returned a scene. A part
+    // file that did not read is outside the key: the whole assembly may be
+    // there next time.
+    if let Some(cp) = cache_path
+        .as_ref()
+        .filter(|_| report["kernel"]["external_missing"].as_u64() == Some(0))
         && let Err(e) = cache::store(cp, &bytes)
     {
         eprintln!("stepv: cannot cache {}: {e}", cp.display());
@@ -506,7 +511,8 @@ fn tessellate(
         }
     };
     report["kernel"] = json!(run.summary.as_ref().map(|s| json!({
-        "stage": s.stage, "error": s.error, "parts": s.parts, "faces": s.faces,
+        "stage": s.stage, "error": s.error, "cause": s.cause.map(|c| format!("{c:?}").to_lowercase()),
+        "parts": s.parts, "faces": s.faces,
         "triangles": s.triangles, "segments": s.segments, "bbox": s.bbox,
         "faces_approx": s.faces_approx, "faces_missing": s.faces_missing,
         "faces_over_budget": s.faces_over_budget, "unhealed_faces": s.unhealed_faces,
@@ -525,6 +531,11 @@ fn tessellate(
     report["wall_ms"] = json!((run.wall.as_secs_f64() * 1e3).round());
 
     let outcome = match run.outcome {
+        Outcome::Ok if run.summary.is_none() => Some((
+            EXIT_FAILED,
+            "error",
+            "bad kernel output: no summary".to_owned(),
+        )),
         Outcome::Ok => None,
         Outcome::Timeout => Some((
             EXIT_TIMEOUT,
@@ -548,9 +559,14 @@ fn tessellate(
     };
     if let Some((code, status, msg)) = outcome {
         let _ = std::fs::remove_file(&mesh);
-        // Timeouts are not cached: a busy machine is not a property of the file.
-        if code == EXIT_FAILED
-            && status != "crashed"
+        // Only a failure the kernel puts down to the file itself repeats. A
+        // timeout or a memory cap depends on the limits and the machine, a
+        // crash may not repeat, and an environment failure (an unwritable
+        // output, a missing part file) is outside the key: caching one would
+        // block a later run that could succeed. An older kernel gives no
+        // cause, and is not cached either.
+        if run.outcome == Outcome::Failed
+            && run.summary.as_ref().and_then(|s| s.cause) == Some(occt::Cause::Input)
             && let Some(cp) = cache_path
         {
             remember_failure(cp, status, &msg);
