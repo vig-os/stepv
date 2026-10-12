@@ -9,7 +9,7 @@
 //! failure. That is the exit-3 contract: a front-end that could not get
 //! geometry still has something honest to show.
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, UNIX_EPOCH};
@@ -64,7 +64,8 @@ VIEWER:
 
 OUTPUT:
     One JSON line on stdout for every run past argument parsing, success
-    or not: header metadata, the outcome, and the kernel's summary.
+    or not: header metadata, the outcome, and the kernel's summary. When
+    stderr is a terminal, the run's progress is shown there as it goes.
 
 EXIT CODES:
     0  success
@@ -249,10 +250,16 @@ fn run(args: &Args) -> (u8, Value) {
         report["status"] = json!("info");
         return (EXIT_OK, report);
     }
+    // The outline artifact (#62) under the snapshot: a streamed run leaves
+    // it as soon as the outline arrives, the viewer's run included (#63).
+    let outline = cache::cache_dir()
+        .filter(|_| args.cache)
+        .zip(file.clone())
+        .map(|(dir, file)| (cache::outline_path(&dir, &file), info));
     if args.view {
         // The exact B-rep for the inspector (#29) comes with the mesh.
         let topo_tmp = temp_path("json");
-        let result = tessellate(args, &mut report, None, Some(&topo_tmp), None);
+        let result = tessellate(args, &mut report, None, Some(&topo_tmp), outline);
         let topo_bytes = topology_bytes(&report, &topo_tmp);
         let scene = match result {
             Ok((s, _)) => s,
@@ -345,10 +352,6 @@ fn run(args: &Args) -> (u8, Value) {
     }
 
     let topology_tmp = args.topology.as_ref().map(|_| temp_path("json"));
-    let outline = cache::cache_dir()
-        .filter(|_| args.cache)
-        .zip(file)
-        .map(|(dir, file)| (cache::outline_path(&dir, &file), info));
     let result = tessellate(
         args,
         &mut report,
@@ -483,6 +486,8 @@ fn topology_bytes(report: &Value, tmp: &Path) -> std::io::Result<Vec<u8>> {
 /// With `outline` (the artifact's path and the file's header), the run is
 /// streamed and leaves a [`cache::OutlineArtifact`] once the outline arrives,
 /// whether or not it then completes; a complete run adds the model's box.
+/// With stderr a terminal, the run is streamed too, and its progress shown
+/// there ([`Progress`]).
 fn tessellate(
     args: &Args,
     report: &mut Value,
@@ -505,8 +510,26 @@ fn tessellate(
     // thumbnails, --glb and --mesh (Quick Look's format) keep v3.
     let edges = args.view;
     let mut artifact = None;
-    let result = match &outline {
-        Some((path, info)) => occt::run_streaming(
+    // Progress for a person at a terminal (#63), and nothing for a pipe: a
+    // front-end reads the stdout line alone.
+    let mut progress = std::io::stderr().is_terminal().then(|| {
+        // A cached outline names the parts before the kernel even starts.
+        let cached = outline
+            .as_ref()
+            .and_then(|(path, _)| cache::load_outline_at(path));
+        Progress::start(cached.map(|a| a.leaves))
+    });
+    let result = match (&outline, progress.is_some()) {
+        (None, false) => occt::run(
+            &kernel,
+            &args.input,
+            args.deflection,
+            args.limits,
+            Some(&mesh),
+            topology_out,
+            edges,
+        ),
+        _ => occt::run_streaming(
             &kernel,
             &args.input,
             args.deflection,
@@ -515,7 +538,10 @@ fn tessellate(
             topology_out,
             edges,
             &mut |e| {
-                if let occt::Event::Tree(tree) = e {
+                if let Some(p) = progress.as_mut() {
+                    p.event(&e);
+                }
+                if let (occt::Event::Tree(tree), Some((path, info))) = (e, &outline) {
                     let a = cache::OutlineArtifact::new(info.clone(), tree);
                     // One already there is of this very file, and may have
                     // its box from a run that completed: keep it.
@@ -526,16 +552,11 @@ fn tessellate(
                 }
             },
         ),
-        None => occt::run(
-            &kernel,
-            &args.input,
-            args.deflection,
-            args.limits,
-            Some(&mesh),
-            topology_out,
-            edges,
-        ),
     };
+    // Off the line before anything else is said on stderr.
+    if let Some(p) = progress {
+        p.finish();
+    }
     let run = match result {
         Ok(r) => r,
         Err(e) => {
@@ -636,6 +657,68 @@ fn tessellate(
         store_outline(&path, &a);
     }
     Ok(scene)
+}
+
+/// The CLI's progress line on a terminal's stderr (#63): the part count
+/// once known, then the stage and its percentage, redrawn in place and
+/// cleared when the run ends.
+struct Progress {
+    parts: Option<usize>,
+    /// The stage and whole percent last drawn.
+    shown: Option<(occt::Stage, u64)>,
+}
+
+impl Progress {
+    /// Starts the line, with the part count of a cached outline.
+    fn start(parts: Option<usize>) -> Self {
+        let p = Self { parts, shown: None };
+        p.draw(&p.line("reading"));
+        p
+    }
+
+    fn event(&mut self, e: &occt::Event) {
+        match e {
+            occt::Event::Tree(t) => {
+                self.parts = Some(t.leaves);
+                let stage = self.shown.map_or_else(|| "reading".into(), stage_text);
+                self.draw(&self.line(&stage));
+            }
+            occt::Event::Progress(p) => {
+                let at = (p.stage, (p.fraction() * 100.0).floor() as u64);
+                // A redraw per whole percent: the kernel reports thousandths.
+                if self.shown != Some(at) {
+                    self.shown = Some(at);
+                    self.draw(&self.line(&stage_text(at)));
+                }
+            }
+        }
+    }
+
+    /// `stepv: 12 parts · meshing 40%`.
+    fn line(&self, stage: &str) -> String {
+        match self.parts {
+            Some(1) => format!("stepv: 1 part · {stage}"),
+            Some(n) => format!("stepv: {n} parts · {stage}"),
+            None => format!("stepv: {stage}"),
+        }
+    }
+
+    fn draw(&self, line: &str) {
+        // `\r` and erase-to-end: the line is redrawn over itself.
+        eprint!("\r{line}\x1b[K");
+    }
+
+    fn finish(self) {
+        eprint!("\r\x1b[K");
+    }
+}
+
+fn stage_text((stage, pct): (occt::Stage, u64)) -> String {
+    let name = match stage {
+        occt::Stage::Transfer => "transferring",
+        occt::Stage::Mesh => "meshing",
+    };
+    format!("{name} {pct}%")
 }
 
 fn fail(mut report: Value, code: u8, status: &str, msg: &str) -> (u8, Value) {

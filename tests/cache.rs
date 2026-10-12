@@ -623,3 +623,32 @@ fn a_later_run_killed_after_its_outline_keeps_the_box() {
         bbox
     );
 }
+
+#[test]
+fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
+    let k = kernel();
+    let h = Home::new("view");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    // The snapshot the run must key on, taken before it starts.
+    let before = cache::FileId::of(&input).unwrap();
+    // The kernel stalls 30 s once the outline is out; the 10 s cap kills it
+    // there, before the viewer would open a window. A viewer whose run was
+    // not streamed opens one: the screenshot hook closes it again, and the
+    // test fails rather than waits on it.
+    let shot = h.0.join("shot.png");
+    let (code, j) = h.stepv(
+        &["view", input.to_str().unwrap(), "--timeout", "10"],
+        &[
+            ("STEPV_OCCT_TEST_STALL_MS", "30000"),
+            ("STEPV_VIEW_SCREENSHOT", shot.to_str().unwrap()),
+        ],
+    );
+    assert_eq!((code, j["status"].as_str()), (4, Some("timeout")), "{j}");
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("the viewer's run left no outline artifact");
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    assert_eq!((&a.tree, a.leaves), (&outline.tree, outline.leaves));
+    assert_eq!(a.header, stepv::header::read(&input));
+    assert_eq!(a.bbox, None, "a box from a run that did not complete");
+}

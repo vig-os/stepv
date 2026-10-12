@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Progress on a terminal, and the viewer leaves the outline too** ([#63](https://github.com/vig-os/stepv/issues/63), part 1):
+  - When stderr is a terminal, `stepv` shows one line of progress there, redrawn in place:
+    the part count once the outline arrives (at once from a cached outline artifact), then
+    `transferring` and `meshing` percentages. The line is erased when the run ends. Nothing
+    changes when stderr is not a terminal, and stdout's JSON line is the same either way
+  - `stepv view` writes the outline artifact as cached CLI runs do, so a viewer whose kernel is
+    killed after the outline leaves the tree for the next preview. `--no-cache` writes none
+  - The viewer's own outline-first window is part 2 of #63
 - **Atomic, versioned cache entries** ([#62](https://github.com/vig-os/stepv/issues/62)):
   an entry is either whole and current or ignored
   - Entries carry a format version and a checksum; a truncated, corrupt or old-version entry is

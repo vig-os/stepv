@@ -1276,8 +1276,8 @@ as the outline should leave something a preview can show at once.
 - **The outline artifact (`cache::OutlineArtifact`):** JSON `{format: "stepv-outline-artifact",
   version: 1, header, tree, leaves, bbox, boxes}` at `<key>.outline.json`, keyed on the snapshot
   alone in its own hash domain. Cached CLI runs (`--png`/`--glb`/`--mesh`/`--topology`, without
-  `--no-cache`) are streamed (`occt::run_streaming`) and write it on `Event::Tree`, before the
-  transfer. A run killed after the outline keeps it. Once the mesh has decoded, the run rewrites
+  `--no-cache`) and `view` (#63) are streamed (`occt::run_streaming`) and write it on
+  `Event::Tree`, before the transfer. A run killed after the outline keeps it. Once the mesh has decoded, the run rewrites
   it with the model's `bbox` (the B-rep's box, so the same at any deflection). Read back with
   `cache::load_outline` (#63, the thumbnail fallback), which rejects another format or version.
   `boxes` is always absent until the kernel streams per-part boxes (#66).
@@ -1299,7 +1299,6 @@ as the outline should leave something a preview can show at once.
   - streaming costs the run its parse again inside the timeout (about 5% on a large assembly,
     see #54 step 2; #76);
   - a non-STEP file has no outline, so no artifact (#76);
-  - `view` does not write the artifact yet (#63);
   - a box can still be lost (#80): run A checks for an artifact at the key (a read and a JSON
     parse) and finds none; run B, completing, renames its artifact with the box into place; then
     A's outline write (create, write, `sync_all`, rename) replaces it. The box is missing until
@@ -1332,6 +1331,44 @@ as the outline should leave something a preview can show at once.
       reads in each of 5 runs;
     - only a complete current-version entry loads;
     - the sweep takes stale `.part` files only.
+
+### Outline and progress first (#63, #54 step 5, 2026-10-12): part 1, the CLI
+
+Part 1 of #63: the CLI. The viewer's own outline-first window is part 2.
+
+- **`view` writes the artifact:** its load is a cached run like `--png`'s. It is streamed, writes
+  `cache::OutlineArtifact` on `Event::Tree` under the `cache::FileId` taken before the run, and
+  adds the box once the mesh has decoded. A viewer whose kernel is killed after the outline (the
+  timeout, the memory cap, the user's Ctrl-C) leaves the tree for the next preview. With
+  `--no-cache` it writes nothing.
+- **Progress on a terminal (`Progress` in `src/main.rs`):** when stderr is a terminal
+  (`IsTerminal`), the run is streamed even with `--no-cache`, and one line on stderr is redrawn
+  in place (`\r`, then erase to the end of the line):
+  - `stepv: reading` while the file parses, as soon as the kernel starts;
+  - `stepv: N parts · reading` once the outline arrives, or at once when a cached artifact
+    already names them, before the kernel says anything;
+  - `stepv: N parts · transferring P%`, then `· meshing P%`, redrawn on each whole percent;
+  - the line is erased when the run ends, however it ends, so stderr's warnings and the
+    viewer's notes start on a clean line. The outcome is the stdout JSON's to say.
+  - A file without an outline (IGES, BREP, a STEP file without product structure) shows no part
+    count. A cache hit runs nothing and shows nothing.
+- **Stdout is unchanged:** one JSON line, the same keys whether stderr is a terminal or not.
+  When stderr is not a terminal (a pipe, a file, Quick Look, the thumbnailer), nothing is
+  written to it, and an uncached `--no-cache` run is not streamed.
+- **Known limits:**
+  - the viewer still waits for the whole run before opening its window, and shows nothing of
+    the outline or the progress in it: part 2 of #63;
+  - streaming for the progress line costs the run its parse again inside the timeout, as for
+    the artifact (#76);
+  - a non-STEP file has no outline, so the line has no part count (#76).
+- **Tests:**
+  - `tests/progress.rs`, through a real pseudo-terminal (`openpty`): the line names the parts and
+    reaches `transferring 100%` and `meshing 100%`, never starts a new line, and is erased at
+    the end. The same run into a pipe writes no progress, and its JSON has the same keys and
+    values. A cached artifact names the parts with a kernel that never writes a byte; without
+    one, no part count shows.
+  - `tests/cache.rs`: a `view` whose kernel is killed after its outline leaves the artifact
+    under the pre-run `FileId`, equal to `occt::outline`, without a box.
 
 ### Work queue (ordered, 2026-10-04)
 
