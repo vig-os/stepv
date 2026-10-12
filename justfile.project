@@ -155,7 +155,7 @@ fixtures *sources: kernel
 # Build the Plan B native-OCCT kernel (kernel/) into target/kernel/stepv-occt.
 [group('harness')]
 kernel:
-    cmake -S kernel -B target/kernel -DCMAKE_BUILD_TYPE=Release
+    cmake -S kernel -B target/kernel -DCMAKE_BUILD_TYPE=Release -DSTEPV_BUILD_TESTS=ON
     cmake --build target/kernel -j
 
 # Regenerate the small committed test corpus (tests/data/) the CLI tests use.

@@ -224,7 +224,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OCCT 7.9.3 is built with one patch (`nix/patches/`, described in NOTICE). OCCT checked a
   wire's edges for self-intersection in time cubic in their number, and now does it in
   quadratic time. Results are unchanged. On the Ultimaker 3 assembly the transfer takes 29 s
-  instead of 35 to 36 s
+  instead of 35 to 36 s.
 
 ### Deprecated
 
