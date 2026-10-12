@@ -360,20 +360,6 @@ pub fn load_outline_at(path: &Path) -> Option<OutlineArtifact> {
     (a.format == OUTLINE_FORMAT && a.version == OUTLINE_VERSION).then_some(a)
 }
 
-/// Writes `artifact` for `input` as it is now under `dir`, atomically.
-///
-/// # Errors
-/// When `input` cannot be stat'ed, or the write fails.
-pub fn store_outline_in(
-    dir: &Path,
-    input: &Path,
-    artifact: &OutlineArtifact,
-) -> std::io::Result<()> {
-    let file = FileId::of(input)
-        .ok_or_else(|| std::io::Error::other(format!("cannot stat {}", input.display())))?;
-    store_outline(&outline_path(dir, &file), artifact)
-}
-
 /// The [`OutlineArtifact`] for `input` under `dir`, if one was written for
 /// the file as it is now (same path, length and mtime) with this
 /// [`OUTLINE_VERSION`].

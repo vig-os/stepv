@@ -1300,8 +1300,13 @@ as the outline should leave something a preview can show at once.
     see #54 step 2; #76);
   - a non-STEP file has no outline, so no artifact (#76);
   - `view` does not write the artifact yet (#63);
-  - a run's outline write can still land between another run's check and its box write, and
-    drop that box until the next complete run: a window of one stat and one rename.
+  - a box can still be lost (#80): run A checks for an artifact at the key (a read and a JSON
+    parse) and finds none; run B, completing, renames its artifact with the box into place; then
+    A's outline write (create, write, `sync_all`, rename) replaces it. The box is missing until
+    the next complete run. The window runs from A's read to A's rename, which is milliseconds or
+    more on a real disk; the directory `fsync` follows the rename and is outside it;
+  - a cache hit returns before the kernel runs, so it writes no artifact: a file cached before
+    #62's artifact gets no outline until its entry misses (#76).
 - **Tests:**
   - `tests/cache.rs`:
     - a truncated and an old-version entry are regenerated;
@@ -1316,11 +1321,11 @@ as the outline should leave something a preview can show at once.
     - a run killed after its outline leaves the artifact, equal to `occt::outline`, and no entry,
       and the next run adds the box; the artifact follows the file's length and its mtime;
     - a file touched mid-run (same length, later mtime) gets neither the run's artifact nor its
-      entry;
+      entry, which stay under the file the run read, the box included;
     - a mesh that doesn't decode leaves the artifact without a box;
     - a later run killed after its outline keeps an earlier run's box;
-    - a kernel exit 0 without a summary is `error`, "the kernel exited without a summary", both
-      streamed and with `--no-cache`.
+    - a kernel exit 0 or 3 without a summary is `error`, "the kernel exited without a summary",
+      both streamed and with `--no-cache`.
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn

@@ -223,30 +223,30 @@ fn script(h: &Home, name: &str, body: &str) -> PathBuf {
 }
 
 #[test]
-fn a_kernel_exit_0_without_a_summary_is_an_error_and_not_cached() {
+fn a_kernel_exit_without_a_summary_is_an_error_and_not_cached() {
     let k = kernel();
-    // The real kernel writes the mesh; its summary, or its stream, goes
-    // nowhere.
     let h = Home::new("nosummary");
+    // Exit 0: the real kernel writes the mesh; its summary, or its stream,
+    // goes nowhere. Exit 3: a clean failure that leaves its summary out.
     let mute = script(
         &h,
         "mute-kernel",
         &format!("'{}' \"$@\" >/dev/null", k.display()),
     );
-    let env = [("STEPV_OCCT", mute.to_str().unwrap())];
-    // Cached, so streamed; then plain.
-    for extra in [&[][..], &["--no-cache"]] {
-        let (code, j) = h.png(&data("assembly.step"), extra, &env);
-        assert_eq!(
-            (code, j["status"].as_str()),
-            (3, Some("error")),
-            "{extra:?}: {j}"
-        );
-        assert_eq!(
-            j["error"], "bad kernel output: the kernel exited without a summary",
-            "{extra:?}"
-        );
-        h.assert_nothing_cached("no summary");
+    let fail = script(&h, "fail-kernel", "exit 3");
+    for kernel in [&mute, &fail] {
+        let env = [("STEPV_OCCT", kernel.to_str().unwrap())];
+        // Cached, so streamed; then plain.
+        for extra in [&[][..], &["--no-cache"]] {
+            let (code, j) = h.png(&data("assembly.step"), extra, &env);
+            let why = format!("{} {extra:?}: {j}", kernel.display());
+            assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{why}");
+            assert_eq!(
+                j["error"], "bad kernel output: the kernel exited without a summary",
+                "{why}"
+            );
+            h.assert_nothing_cached("no summary");
+        }
     }
 }
 
@@ -503,7 +503,8 @@ fn the_artifact_is_keyed_on_the_file_as_it_is_now() {
     std::fs::copy(data("assembly.step"), &input).unwrap();
     let outline = occt::outline(&kernel(), &input, occt::Limits::DEFAULT).unwrap();
     let a = cache::OutlineArtifact::new(stepv::header::read(&input), outline);
-    cache::store_outline_in(&h.cache_dir(), &input, &a).unwrap();
+    let file = cache::FileId::of(&input).unwrap();
+    cache::store_outline(&cache::outline_path(&h.cache_dir(), &file), &a).unwrap();
     assert_eq!(
         cache::load_outline_in(&h.cache_dir(), &input),
         Some(a.clone())
@@ -536,6 +537,7 @@ fn a_file_saved_mid_run_gets_nothing_from_that_run() {
         "--size",
         "64",
     ];
+    let before = cache::FileId::of(&input).unwrap();
     // The kernel holds the run 3 s once the outline is out.
     let child = h
         .command(&args, &[("STEPV_OCCT_TEST_STALL_MS", "3000")])
@@ -563,6 +565,11 @@ fn a_file_saved_mid_run_gets_nothing_from_that_run() {
         None,
         "the saved file was given the earlier run's outline"
     );
+    // The run's artifact, its box included, is under the file it read.
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).unwrap();
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("no artifact under the file the run read");
+    assert_eq!(a.bbox, Some(bbox));
     let (code, j) = h.stepv(&args, &[]);
     assert_eq!((code, &j["cached"]), (0, &Value::Bool(false)), "{j}");
 }
