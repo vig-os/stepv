@@ -8,7 +8,7 @@
 //! prototype's `faces[j]` is that part's mesh face id `j`.
 //! [`Topology::check_against`] holds a file to that.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub type Point = [f64; 3];
 
@@ -24,7 +24,7 @@ pub struct Topology {
 }
 
 /// One node of the assembly tree.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Node {
     /// A leaf: `parts[part]`.

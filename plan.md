@@ -1117,7 +1117,9 @@ JSON object.
     outline never is.
   - Outcomes: a kill (wall clock, memory) keeps the events that arrived and has **no summary**,
     so nothing downstream can mistake it for a complete scene. A kernel that exits with a broken
-    stream is `Crashed`, whatever its exit code.
+    stream has no summary and the outcome of its exit, as with `run`: an exit 0 or 3 without its
+    summary is a broken contract that stepv reports as an error, not a crash (#62); any other exit
+    is `Crashed`.
 - **Edges of the contract (from the review):**
   - A stage's first and last progress events are never dropped (`Progress::droppable`), so a slow reader's bar still reaches its end. A run that fails partway leaves its stage unfinished.
   - The kernel leaves out an outline over `STEPV_OCCT_MAX_FRAME`, rather than send a frame the reader would refuse.
@@ -1228,9 +1230,8 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
 
 ### Cache (#62, #54 step 4, 2026-10-12)
 
-A killed or failed run must never leave an entry a later run trusts. Below: the entries, how they
-are written, and which results may be cached at all. The outline artifact follows as #62's last
-part.
+A killed or failed run must never leave an entry a later run trusts, and a run that got as far
+as the outline should leave something a preview can show at once.
 
 - **Entries (`cache::store`, `cache::load`):** `STEPVCE\0`, `ENTRY_VERSION` (u32 LE), the
   payload's length (u64 LE), the payload, then its blake3 hash as the completeness tag. `load`
@@ -1248,7 +1249,9 @@ part.
   The age is by wall clock, so a writer stopped longer than that loses its `.part`: its rename
   fails with `ENOENT`, harmlessly.
 - **Only complete results:** an entry is written only when the kernel's outcome is `Ok` with a
-  summary; `Ok` without one is a "bad kernel output" error. A multi-file assembly with a part file
+  summary. A kernel that exits 0 or 3 without its summary broke the contract, on the plain and
+  the streamed path alike: status `error`, "bad kernel output: the kernel exited without a
+  summary", not a crash, and nothing cached. A multi-file assembly with a part file
   that did not read (`external_missing > 0`) still draws, but is not cached: the part files are
   outside the key.
 - **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file.
@@ -1265,11 +1268,45 @@ part.
   a crash may not repeat, an environment failure is outside the key, and a kernel without
   `cause` says nothing: none of them is cached, since each would block a run that could
   succeed.
+- **One snapshot of the file per run (`cache::FileId`):** its canonical path, length and mtime,
+  taken once before anything reads the file. The entry's key and the artifact's are both made
+  from it, so a file saved mid-run gets nothing from that run: its new mtime is another key.
+  Content read after the snapshot can only be newer, under the old key, which the saved file
+  never looks up.
+- **The outline artifact (`cache::OutlineArtifact`):** JSON `{format: "stepv-outline-artifact",
+  version: 1, header, tree, leaves, bbox, boxes}` at `<key>.outline.json`, keyed on the snapshot
+  alone in its own hash domain. Cached CLI runs (`--png`/`--glb`/`--mesh`/`--topology`, without
+  `--no-cache`) are streamed (`occt::run_streaming`) and write it on `Event::Tree`, before the
+  transfer. A run killed after the outline keeps it. Once the mesh has decoded, the run rewrites
+  it with the model's `bbox` (the B-rep's box, so the same at any deflection). Read back with
+  `cache::load_outline` (#63, the thumbnail fallback), which rejects another format or version.
+  `boxes` is always absent until the kernel streams per-part boxes (#66).
+  - **Why JSON through `write_atomic`, without the entries' magic and checksum:** the front-ends
+    (Swift included) read it without stepv, and JSON is self-delimiting, so a truncated file
+    does not parse. `write_atomic` means no reader sees a partial write, and the `format` and
+    `version` fields reject another schema. A checksum would only catch a complete file
+    corrupted in place. That is not worth a binary frame every front-end must parse, for a hint
+    shown until a run replaces it, never a result.
+  - **Concurrent runs:** each write is whole, and the last rename wins. A run writes the outline
+    only when no current-version artifact is at its key: one already there is of the same file,
+    and may carry the box of a run that completed, which a later run killed after its outline
+    would otherwise drop. The box write always goes through.
 - **Known limits:**
   - the keys share `(len, mtime)`'s blind spot: a file rewritten in place within one mtime tick
-    at the same length;
+    at the same length (#77);
   - a multi-file assembly's part file edited after it was cached is not seen: only the top file
-    is in the key.
+    is in the key (#77);
+  - streaming costs the run its parse again inside the timeout (about 5% on a large assembly,
+    see #54 step 2; #76);
+  - a non-STEP file has no outline, so no artifact (#76);
+  - `view` does not write the artifact yet (#63);
+  - a box can still be lost (#80): run A checks for an artifact at the key (a read and a JSON
+    parse) and finds none; run B, completing, renames its artifact with the box into place; then
+    A's outline write (create, write, `sync_all`, rename) replaces it. The box is missing until
+    the next complete run. The window runs from A's read to A's rename, which is milliseconds or
+    more on a real disk; the directory `fsync` follows the rename and is outside it;
+  - a cache hit returns before the kernel runs, so it writes no artifact: a file cached before
+    #62's artifact gets no outline until its entry misses (#76).
 - **Tests:**
   - `tests/cache.rs`:
     - a truncated and an old-version entry are regenerated;
@@ -1280,7 +1317,15 @@ part.
       hook `STEPV_OCCT_TEST_THROW`) cache their failure;
     - a `chmod 000` copy (`environment`, skipped as root) and OCCT's out of memory
       (`environment`) cache nothing, and the readable copy then succeeds;
-    - invalid arguments to the kernel's C library (`environment`, through `dlopen`).
+    - invalid arguments to the kernel's C library (`environment`, through `dlopen`);
+    - a run killed after its outline leaves the artifact, equal to `occt::outline`, and no entry,
+      and the next run adds the box; the artifact follows the file's length and its mtime;
+    - a file touched mid-run (same length, later mtime) gets neither the run's artifact nor its
+      entry, which stay under the file the run read, the box included;
+    - a mesh that doesn't decode leaves the artifact without a box;
+    - a later run killed after its outline keeps an earlier run's box;
+    - a kernel exit 0 or 3 without a summary is `error`, "the kernel exited without a summary",
+      both streamed and with `--no-cache`.
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn

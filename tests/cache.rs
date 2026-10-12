@@ -1,10 +1,12 @@
-//! The cache (#62) end to end: only complete results are cached, and an
-//! entry that is truncated or of another version is regenerated. Run the
-//! real kernel against `tests/data/`.
+//! The cache (#62) end to end: only complete results are cached, an entry
+//! that is truncated or of another version is regenerated, and a run killed
+//! after its outline leaves the outline artifact but no entry. Run the real
+//! kernel against `tests/data/`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use stepv::{cache, occt};
@@ -47,22 +49,31 @@ impl Home {
             .unwrap_or_default()
     }
 
-    /// Runs stepv, returning its exit code and JSON line.
-    fn stepv(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
-        let out = Command::new(env!("CARGO_BIN_EXE_stepv"))
-            .args(args)
+    /// stepv with this HOME, not yet run.
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_stepv"));
+        cmd.args(args)
             .env("HOME", &self.0)
             .env("XDG_CACHE_HOME", self.0.join("xdg"))
-            .envs(env.iter().copied())
-            .output()
-            .expect("spawn stepv");
-        let json = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .next()
-            .and_then(|l| serde_json::from_str(l).ok())
-            .unwrap_or(Value::Null);
-        (out.status.code().unwrap_or(-1), json)
+            .envs(env.iter().copied());
+        cmd
     }
+
+    /// Runs stepv, returning its exit code and JSON line.
+    fn stepv(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+        let out = self.command(args, env).output().expect("spawn stepv");
+        result(&out)
+    }
+}
+
+/// A finished stepv's exit code and JSON line.
+fn result(out: &std::process::Output) -> (i32, Value) {
+    let json = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|l| serde_json::from_str(l).ok())
+        .unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), json)
 }
 
 impl Drop for Home {
@@ -203,26 +214,40 @@ fn a_memory_capped_run_caches_nothing() {
     assert_eq!(h.png(&input, &[], &[]).0, 0);
 }
 
+/// An executable `sh` script `body` under `h`, as a stand-in kernel.
+fn script(h: &Home, name: &str, body: &str) -> PathBuf {
+    let p = h.0.join(name);
+    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
 #[test]
-fn a_kernel_exit_0_without_a_summary_is_an_error_and_not_cached() {
+fn a_kernel_exit_without_a_summary_is_an_error_and_not_cached() {
     let k = kernel();
     let h = Home::new("nosummary");
-    // The real kernel writes the mesh; its summary goes nowhere.
-    let mute = h.0.join("mute-kernel");
-    std::fs::write(
-        &mute,
-        format!("#!/bin/sh\n'{}' \"$@\" >/dev/null\n", k.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&mute, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (code, j) = h.png(
-        &data("assembly.step"),
-        &[],
-        &[("STEPV_OCCT", mute.to_str().unwrap())],
+    // Exit 0: the real kernel writes the mesh; its summary, or its stream,
+    // goes nowhere. Exit 3: a clean failure that leaves its summary out.
+    let mute = script(
+        &h,
+        "mute-kernel",
+        &format!("'{}' \"$@\" >/dev/null", k.display()),
     );
-    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
-    assert!(j["error"].as_str().unwrap().contains("no summary"), "{j}");
-    h.assert_nothing_cached("no summary");
+    let fail = script(&h, "fail-kernel", "exit 3");
+    for kernel in [&mute, &fail] {
+        let env = [("STEPV_OCCT", kernel.to_str().unwrap())];
+        // Cached, so streamed; then plain.
+        for extra in [&[][..], &["--no-cache"]] {
+            let (code, j) = h.png(&data("assembly.step"), extra, &env);
+            let why = format!("{} {extra:?}: {j}", kernel.display());
+            assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{why}");
+            assert_eq!(
+                j["error"], "bad kernel output: the kernel exited without a summary",
+                "{why}"
+            );
+            h.assert_nothing_cached("no summary");
+        }
+    }
 }
 
 #[test]
@@ -427,5 +452,174 @@ fn invalid_arguments_are_the_environment() {
     assert_eq!(
         (&j["error"], &j["cause"]),
         (&"invalid arguments".into(), &"environment".into())
+    );
+}
+
+#[test]
+fn a_run_killed_after_its_outline_leaves_the_artifact_and_no_entry() {
+    let k = kernel();
+    let h = Home::new("killed");
+    let input = data("assembly.step");
+    let out = h.0.join("o.png");
+    let args = [
+        input.to_str().unwrap(),
+        "--png",
+        out.to_str().unwrap(),
+        "--size",
+        "64",
+    ];
+
+    // The kernel stalls 30 s once the outline is out; the 10 s cap kills it
+    // there, with room for the parse on a loaded machine.
+    let killed = [&args[..], &["--timeout", "10"]].concat();
+    let (code, j) = h.stepv(&killed, &[("STEPV_OCCT_TEST_STALL_MS", "30000")]);
+    assert_eq!(code, 4, "{j}");
+    assert!(h.entries("png").is_empty(), "a killed run cached an output");
+    assert!(
+        h.entries("fail").is_empty(),
+        "a timeout was cached as a failure"
+    );
+
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    let a = cache::load_outline_in(&h.cache_dir(), &input).expect("no outline artifact");
+    assert_eq!((&a.tree, a.leaves), (&outline.tree, outline.leaves));
+    assert_eq!(a.header, stepv::header::read(&input));
+    assert_eq!((a.bbox, a.boxes), (None, None));
+
+    // The timeout blocks nothing: the next run completes and caches.
+    let (code, j) = h.stepv(&args, &[]);
+    assert_eq!((code, &j["cached"]), (0, &Value::Bool(false)), "{j}");
+    assert_eq!(h.entries("png").len(), 1);
+    let a = cache::load_outline_in(&h.cache_dir(), &input).unwrap();
+    assert_eq!(a.tree, outline.tree);
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).unwrap();
+    assert_eq!(a.bbox, Some(bbox));
+}
+
+#[test]
+fn the_artifact_is_keyed_on_the_file_as_it_is_now() {
+    let h = Home::new("stale");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let outline = occt::outline(&kernel(), &input, occt::Limits::DEFAULT).unwrap();
+    let a = cache::OutlineArtifact::new(stepv::header::read(&input), outline);
+    let file = cache::FileId::of(&input).unwrap();
+    cache::store_outline(&cache::outline_path(&h.cache_dir(), &file), &a).unwrap();
+    assert_eq!(
+        cache::load_outline_in(&h.cache_dir(), &input),
+        Some(a.clone())
+    );
+    // Touched: the same length, another mtime, so another key.
+    let mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    let f = std::fs::File::options().write(true).open(&input).unwrap();
+    f.set_modified(mtime + Duration::from_secs(5)).unwrap();
+    assert_eq!(cache::load_outline_in(&h.cache_dir(), &input), None);
+    f.set_modified(mtime).unwrap();
+    assert_eq!(cache::load_outline_in(&h.cache_dir(), &input), Some(a));
+    // Rewritten: another length, so another key.
+    let mut bytes = std::fs::read(&input).unwrap();
+    bytes.extend_from_slice(b"\n");
+    std::fs::write(&input, bytes).unwrap();
+    assert_eq!(cache::load_outline_in(&h.cache_dir(), &input), None);
+}
+
+#[test]
+fn a_file_saved_mid_run_gets_nothing_from_that_run() {
+    kernel();
+    let h = Home::new("savedmidrun");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let out = h.0.join("o.png");
+    let args = [
+        input.to_str().unwrap(),
+        "--png",
+        out.to_str().unwrap(),
+        "--size",
+        "64",
+    ];
+    let before = cache::FileId::of(&input).unwrap();
+    // The kernel holds the run 3 s once the outline is out.
+    let child = h
+        .command(&args, &[("STEPV_OCCT_TEST_STALL_MS", "3000")])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while h.entries("json").is_empty() {
+        assert!(Instant::now() < deadline, "no outline artifact");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Saved in place meanwhile: the same length, a later mtime.
+    let mtime = std::fs::metadata(&input).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&input)
+        .unwrap()
+        .set_modified(mtime + Duration::from_secs(5))
+        .unwrap();
+    let (code, j) = result(&child.wait_with_output().unwrap());
+    assert_eq!(code, 0, "{j}");
+    // Everything the run left is under the file as it was when it began.
+    assert_eq!(
+        cache::load_outline_in(&h.cache_dir(), &input),
+        None,
+        "the saved file was given the earlier run's outline"
+    );
+    // The run's artifact, its box included, is under the file it read.
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).unwrap();
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("no artifact under the file the run read");
+    assert_eq!(a.bbox, Some(bbox));
+    let (code, j) = h.stepv(&args, &[]);
+    assert_eq!((code, &j["cached"]), (0, &Value::Bool(false)), "{j}");
+}
+
+#[test]
+fn the_box_is_stored_only_once_the_mesh_has_decoded() {
+    let k = kernel();
+    let h = Home::new("baddecode");
+    let input = data("assembly.step");
+    // The real kernel, its stream intact, and then its mesh emptied.
+    let spoil = script(
+        &h,
+        "spoil-kernel",
+        &format!(
+            "'{}' \"$@\"; rc=$?\nprev=\nfor a in \"$@\"; do [ \"$prev\" = --mesh ] && : >\"$a\"; prev=$a; done\nexit $rc",
+            k.display()
+        ),
+    );
+    let (code, j) = h.png(&input, &[], &[("STEPV_OCCT", spoil.to_str().unwrap())]);
+    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("bad kernel output"),
+        "{j}"
+    );
+    h.assert_nothing_cached("an undecodable mesh");
+    let a = cache::load_outline_in(&h.cache_dir(), &input).expect("no outline artifact");
+    assert_eq!(a.bbox, None, "a box from a run that did not complete");
+}
+
+#[test]
+fn a_later_run_killed_after_its_outline_keeps_the_box() {
+    kernel();
+    let h = Home::new("keepbox");
+    let input = data("assembly.step");
+    let (code, j) = h.png(&input, &[], &[]);
+    assert_eq!(code, 0, "{j}");
+    let bbox = cache::load_outline_in(&h.cache_dir(), &input).unwrap().bbox;
+    assert!(bbox.is_some());
+    let (code, j) = h.png(
+        &input,
+        // Another size: past the cached output, onto the same artifact.
+        &["--size", "32", "--timeout", "10"],
+        &[("STEPV_OCCT_TEST_STALL_MS", "30000")],
+    );
+    assert_eq!(code, 4, "{j}");
+    assert_eq!(
+        cache::load_outline_in(&h.cache_dir(), &input).unwrap().bbox,
+        bbox
     );
 }

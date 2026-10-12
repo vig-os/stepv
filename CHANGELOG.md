@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure of the input itself is remembered. Timeouts, memory caps, crashes, unreadable inputs,
   unwritable outputs and missing part files no longer are. Neither is a kernel exit without a summary, or a
   multi-file assembly drawn without some of its parts
+- **An outline artifact, left as soon as the outline arrives** ([#62](https://github.com/vig-os/stepv/issues/62)):
+  cached runs are streamed and write `cache::OutlineArtifact` (`<key>.outline.json`: the file's
+  header and assembly tree, and the model's box once a run completes), so a run killed after
+  the outline still leaves something a preview can show at once. Read it with
+  `cache::load_outline`. A run keys the artifact and its output on the file as it was before the
+  run read it, so a file saved mid-run gets nothing from that run. Per-part boxes follow in #66
 - **A time budget for healing each face** ([#51](https://github.com/vig-os/stepv/issues/51)):
   a file written without p-curves (SolidWorks writes none) has the reader rebuild every edge's
   2D curve on each face by projection, and on a few faces that is very slow. The kernel now heals
@@ -41,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tree arrives at 4.3 s of 101 s
   - In Rust as `occt::run_streaming`, which hands each `occt::Event` to the caller as it arrives.
     A run killed partway keeps what arrived and has no summary; a stream that breaks the frame
-    contract is a crash
+    contract has no summary either, and an exit 0 or 3 without one is reported as an error
+    ("the kernel exited without a summary"), not a crash
   - In the C API as `stepv_occt_run_stream`, with a callback, for in-process front-ends
   - Transfer progress is OCCT's own, so it stalls inside one slow solid: Ultimaker 3 sits at
     15.6% for 80 s ([#51](https://github.com/vig-os/stepv/issues/51))
