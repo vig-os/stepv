@@ -25,7 +25,8 @@ stepv — STEP/IGES/BREP preview and thumbnails
 USAGE:
     stepv <input> [--png <out> | --glb <out>] [options]
     stepv <input> --info
-    stepv view <input> [options]     Interactive viewer window
+    stepv view <input> [options]     Interactive viewer window (needs a desktop
+                                     session; fails at once without one)
 
 ARGS:
     <input>              .step / .stp / .iges / .igs / .brep
@@ -257,6 +258,11 @@ fn run(args: &Args) -> (u8, Value) {
         .zip(file.clone())
         .map(|(dir, file)| (cache::outline_path(&dir, &file), info));
     if args.view {
+        // Before the kernel: without a window there is nothing to show its
+        // run in, and a user without a GUI must not wait for it first.
+        if let Err(e) = view::session() {
+            return fail(report, EXIT_FAILED, "error", &e);
+        }
         // The exact B-rep for the inspector (#29) comes with the mesh.
         let topo_tmp = temp_path("json");
         let result = tessellate(args, &mut report, None, Some(&topo_tmp), outline);

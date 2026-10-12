@@ -715,7 +715,54 @@ impl Home {
     }
 }
 
+// The tests that start `view` past its session check need a window session
+// (#84): nix's build sandbox has none, so they are ignored there, and
+// `just view-test` runs them (`--ignored`) on the macOS runner and under
+// Xvfb in the Linux viewer job.
+
 #[test]
+fn a_viewer_without_a_window_session_fails_before_the_kernel() {
+    let h = Home::new("viewnosession");
+    // A kernel that leaves a mark if it is ever started.
+    let mark = h.0.join("kernel-ran");
+    let k = script(
+        &h,
+        "marking-kernel",
+        &format!("touch '{}'\nexit 3", mark.display()),
+    );
+    let mut cmd = h.command(
+        &[
+            "view",
+            data("assembly.step").to_str().unwrap(),
+            "--memory-mb",
+            "1024",
+        ],
+        &[
+            ("STEPV_OCCT", k.to_str().unwrap()),
+            ("STEPV_VIEW_TEST_NO_SESSION", "1"),
+            // A window that opens anyway closes itself.
+            (
+                "STEPV_VIEW_SCREENSHOT",
+                h.0.join("shot.png").to_str().unwrap(),
+            ),
+        ],
+    );
+    // Linux's real check, too: no display at all.
+    cmd.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+    let (code, j) = result(&cmd.output().expect("spawn stepv view"));
+    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
+    let e = j["error"].as_str().unwrap();
+    assert!(e.starts_with("no window session: "), "{j}");
+    assert!(!mark.exists(), "the kernel ran before the session check");
+    // The report is the whole one, header metadata included.
+    assert_eq!(
+        j["info"],
+        serde_json::to_value(stepv::header::read(&data("assembly.step"))).unwrap()
+    );
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
 fn the_view_watchdog_kills_the_kernel_too() {
     let h = Home::new("viewdog");
     // A kernel that never finishes, and says who it is: stepv waits on it
@@ -751,6 +798,7 @@ fn the_view_watchdog_kills_the_kernel_too() {
 }
 
 #[test]
+#[ignore = "needs a window session; run by just view-test"]
 fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
     let k = kernel();
     let h = Home::new("view");
@@ -776,6 +824,7 @@ fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
 }
 
 #[test]
+#[ignore = "needs a window session; run by just view-test"]
 fn a_viewer_with_no_cache_leaves_no_artifact() {
     let k = kernel();
     let h = Home::new("viewnocache");
@@ -799,6 +848,7 @@ fn a_viewer_with_no_cache_leaves_no_artifact() {
 }
 
 #[test]
+#[ignore = "needs a window session; run by just view-test"]
 fn a_complete_view_adds_the_box() {
     kernel();
     let h = Home::new("viewbox");

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     changes when stderr is not a terminal, and stdout's JSON line is the same either way
   - `stepv view` writes the outline artifact as cached CLI runs do, so a viewer whose kernel is
     killed after the outline leaves the tree for the next preview. `--no-cache` writes none
+  - `stepv view` without a window session (over ssh, in a build sandbox) fails at once, before
+    the kernel, with `"no window session: …"` and the reason, instead of after the whole run, or
+    with no report at all where macOS aborts a sessionless window
   - The viewer's own outline-first window follows in [#85](https://github.com/vig-os/stepv/issues/85)
 - **Atomic, versioned cache entries** ([#62](https://github.com/vig-os/stepv/issues/62)):
   an entry is either whole and current or ignored

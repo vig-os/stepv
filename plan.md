@@ -1341,6 +1341,14 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
   adds the box once the mesh has decoded. A viewer whose kernel is killed after the outline (the
   timeout, the memory cap, the user's Ctrl-C) leaves the tree for the next preview. With
   `--no-cache` it writes nothing.
+- **`view` needs a window session, and checks before the kernel (`view::session`, #84):** on
+  macOS a window-server (Aqua) session (`CGSessionCopyCurrentDictionary` is not NULL), elsewhere
+  on Unix `DISPLAY` or `WAYLAND_DISPLAY`. Without one, `view` fails at once, before the kernel
+  starts: exit 3, status `error`, `"no window session: …"` with the reason, and the header
+  metadata as ever. A user over ssh or in a sandbox is told at once instead of after the whole
+  run, and macOS's window layer, which aborts a sessionless process outright, is never reached:
+  that abort lost the stdout report (#84's CI, where nix's builder runs as `_nixbld` with no
+  session). `STEPV_VIEW_TEST_NO_SESSION=1` forces the answer for the tests.
 - **Progress on a terminal (`Progress` in `src/main.rs`):** when stderr is a terminal
   (`IsTerminal`), the run is streamed even with `--no-cache`, and one line on stderr is redrawn
   in place (`\r`, then erase to the end of the line):
@@ -1373,7 +1381,13 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
     moment they exist (`posix_openpt(O_CLOEXEC)`, the slave opened by std), and asserted to be:
     the tests run in parallel, and an inheritable slave passed to another test's stepv and
     kernel would hold this terminal open until that process tree exits.
-  - `tests/cache.rs`, each `view` through `Home::view` (#86): the kernel under `--memory-mb 1024`,
+  - `tests/cache.rs`: `view` with no window session (`STEPV_VIEW_TEST_NO_SESSION`, and no
+    `DISPLAY`) fails with `no window session:` and the header, and never starts the kernel.
+    Without the check, it fails.
+  - `tests/cache.rs`, needing a window session and so `#[ignore]`d in nix's build sandbox, which
+    has none. `scripts/test-window-tests.sh` runs them (`--ignored`), and fails unless every one
+    of them ran and passed: in `just view-test` on the macOS runner (kernel.yml's "GPU viewer on
+    Metal") and under Xvfb in the Linux viewer job. Each `view` through `Home::view` (#86): the kernel under `--memory-mb 1024`,
     stepv's own `--timeout 30` unless the test gives another, `STEPV_VIEW_SCREENSHOT` set so a
     window that opens closes itself, and the viewer's own footprint polled. stepv runs in its own
     process group: past 2 GiB or 120 s the watchdog kills the whole group, never stepv alone

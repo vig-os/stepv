@@ -212,6 +212,78 @@ pub fn choose(software: bool, adapter: Option<Backend>) -> (Backend, Option<&'st
     }
 }
 
+/// Whether this process can open a window at all: a window-server (Aqua)
+/// session on macOS, `DISPLAY` or `WAYLAND_DISPLAY` elsewhere on Unix. `view`
+/// asks before it runs the kernel (#63, #84), so a user without one (ssh, a
+/// build sandbox, a launchd daemon) is told at once instead of after the
+/// whole run. Without a session, macOS's window layer aborts the process
+/// outright, and the report on stdout would be lost with it.
+///
+/// `STEPV_VIEW_TEST_NO_SESSION=1` answers no, for the tests: a session cannot
+/// be taken away from a process that has one on macOS.
+///
+/// # Errors
+/// Without a session, saying why; always without the `viewer` feature.
+pub fn session() -> Result<(), String> {
+    #[cfg(not(feature = "viewer"))]
+    return Err("this stepv was built without the `viewer` feature".into());
+    #[cfg(feature = "viewer")]
+    {
+        let forced = std::env::var_os("STEPV_VIEW_TEST_NO_SESSION").is_some_and(|v| v == "1");
+        if forced || !has_session() {
+            return Err(no_session());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "viewer")]
+fn no_session() -> String {
+    if cfg!(target_os = "macos") {
+        "no window session: this process has no window-server (Aqua) session, \
+         as over ssh or in a build sandbox; run `stepv view` from a logged-in desktop"
+            .into()
+    } else {
+        "no window session: neither DISPLAY nor WAYLAND_DISPLAY is set; run \
+         `stepv view` in an X11 or Wayland session"
+            .into()
+    }
+}
+
+#[cfg(all(feature = "viewer", target_os = "macos"))]
+fn has_session() -> bool {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        // NULL when the caller is not in a window-server (Quartz GUI) session.
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+    // SAFETY: no arguments; a non-null result is a dictionary we own.
+    let d = unsafe { CGSessionCopyCurrentDictionary() };
+    if d.is_null() {
+        return false;
+    }
+    // SAFETY: released once, as the Copy rule asks.
+    unsafe { CFRelease(d) };
+    true
+}
+
+#[cfg(all(feature = "viewer", unix, not(target_os = "macos")))]
+fn has_session() -> bool {
+    ["DISPLAY", "WAYLAND_DISPLAY"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+}
+
+#[cfg(all(feature = "viewer", not(unix)))]
+fn has_session() -> bool {
+    true
+}
+
 /// Opens the viewer on `scene` and runs until the user closes it; returns the
 /// backend that drew it.
 ///
