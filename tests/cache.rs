@@ -1,6 +1,8 @@
-//! The cache (#62) end to end: an entry that is truncated or of another
-//! version is regenerated. Runs the real kernel against `tests/data/`.
+//! The cache (#62) end to end: only complete results are cached, and an
+//! entry that is truncated or of another version is regenerated. Run the
+//! real kernel against `tests/data/`.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -120,4 +122,310 @@ fn a_truncated_or_old_version_entry_is_regenerated() {
         assert_eq!(std::fs::read(&out).unwrap(), good);
     }
     assert_eq!(h.stepv(&args, &[]).1["cached"], true);
+}
+
+#[test]
+fn a_timed_out_run_caches_nothing_and_blocks_nothing() {
+    kernel();
+    let h = Home::new("timeout");
+    let input = data("assembly.step");
+    let out = h.0.join("o.png");
+    let args = [
+        input.to_str().unwrap(),
+        "--png",
+        out.to_str().unwrap(),
+        "--size",
+        "64",
+    ];
+
+    // A kernel that hangs; the 1 s cap kills it.
+    let slow = h.0.join("slow-kernel");
+    std::fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let timed_out = [&args[..], &["--timeout", "1"]].concat();
+    let (code, j) = h.stepv(&timed_out, &[("STEPV_OCCT", slow.to_str().unwrap())]);
+    assert_eq!(code, 4, "{j}");
+    assert!(
+        h.entries("png").is_empty(),
+        "a timed-out run cached an output"
+    );
+    assert!(
+        h.entries("fail").is_empty(),
+        "a timeout was cached as a failure"
+    );
+
+    // The next run, within its limits, completes and caches.
+    let (code, j) = h.stepv(&args, &[]);
+    assert_eq!((code, &j["cached"]), (0, &Value::Bool(false)), "{j}");
+    assert_eq!(h.entries("png").len(), 1);
+    assert_eq!(h.stepv(&args, &[]).1["cached"], true);
+}
+
+impl Home {
+    /// Runs `stepv <input> --png <home>/o.png --size 64 <extra>`.
+    fn png(&self, input: &Path, extra: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+        let out = self.0.join("o.png");
+        let args = [
+            &[input.to_str().unwrap(), "--png", out.to_str().unwrap()],
+            &["--size", "64"][..],
+            extra,
+        ]
+        .concat();
+        self.stepv(&args, env)
+    }
+
+    /// No output entry and no failure cached.
+    fn assert_nothing_cached(&self, why: &str) {
+        assert!(
+            self.entries("png").is_empty(),
+            "{why}: an output was cached"
+        );
+        assert!(
+            self.entries("fail").is_empty(),
+            "{why}: a failure was cached"
+        );
+    }
+}
+
+#[test]
+fn a_memory_capped_run_caches_nothing() {
+    kernel();
+    let h = Home::new("memcap");
+    let input = data("assembly.step");
+    // The kernel's test hook holds 512 MiB; the 64 MiB cap kills it.
+    let (code, j) = h.png(
+        &input,
+        &["--memory-mb", "64"],
+        &[("STEPV_OCCT_TEST_BALLOON_MB", "512")],
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("memory-cap")), "{j}");
+    h.assert_nothing_cached("memory cap");
+    assert_eq!(h.png(&input, &[], &[]).0, 0);
+}
+
+#[test]
+fn a_kernel_exit_0_without_a_summary_is_an_error_and_not_cached() {
+    let k = kernel();
+    let h = Home::new("nosummary");
+    // The real kernel writes the mesh; its summary goes nowhere.
+    let mute = h.0.join("mute-kernel");
+    std::fs::write(
+        &mute,
+        format!("#!/bin/sh\n'{}' \"$@\" >/dev/null\n", k.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&mute, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, j) = h.png(
+        &data("assembly.step"),
+        &[],
+        &[("STEPV_OCCT", mute.to_str().unwrap())],
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
+    assert!(j["error"].as_str().unwrap().contains("no summary"), "{j}");
+    h.assert_nothing_cached("no summary");
+}
+
+#[test]
+fn an_unwritable_mesh_output_is_the_environment_and_not_cached() {
+    kernel();
+    let h = Home::new("readonly");
+    // stepv's mesh goes to the temporary directory: make it read-only.
+    let ro = h.0.join("ro");
+    std::fs::create_dir(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let input = data("assembly.step");
+    let (code, j) = h.png(&input, &[], &[("TMPDIR", ro.to_str().unwrap())]);
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    h.assert_nothing_cached("unwritable mesh");
+    assert_eq!(h.png(&input, &[], &[]).0, 0);
+}
+
+#[test]
+fn missing_part_files_are_the_environment_and_not_cached() {
+    kernel();
+    let h = Home::new("multifile");
+    let dir = h.0.join("asm");
+    std::fs::create_dir(&dir).unwrap();
+    let top = dir.join("bracket.step");
+    std::fs::copy(data("multifile/bracket.step"), &top).unwrap();
+    let restore = |part: &str| {
+        std::fs::copy(data(&format!("multifile/{part}")), dir.join(part)).unwrap();
+    };
+
+    // Neither part file: a failure, and not the file's.
+    let (code, j) = h.png(&top, &[], &[]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    h.assert_nothing_cached("no part files");
+
+    // One of two: a picture, incomplete, so not cached either.
+    restore("pin.stp");
+    let (code, j) = h.png(&top, &[], &[]);
+    assert_eq!(
+        (code, &j["kernel"]["external_missing"]),
+        (0, &1.into()),
+        "{j}"
+    );
+    h.assert_nothing_cached("one part file missing");
+
+    // Both back: the whole assembly, cached.
+    restore("plate.stp");
+    let (code, j) = h.png(&top, &[], &[]);
+    assert_eq!(
+        (code, &j["kernel"]["parts"], &j["cached"]),
+        (0, &3.into(), &false.into()),
+        "{j}"
+    );
+    assert_eq!(h.png(&top, &[], &[]).1["cached"], true);
+}
+
+#[test]
+fn a_bad_input_is_the_input_and_its_failure_is_cached() {
+    kernel();
+    let h = Home::new("badinput");
+    let input = h.0.join("garbage.step");
+    std::fs::write(&input, b"not a step file at all\n").unwrap();
+    let (code, j) = h.png(&input, &[], &[]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_eq!(h.entries("fail").len(), 1);
+    let (code, again) = h.png(&input, &[], &[]);
+    assert_eq!((code, &again["cached"]), (3, &true.into()), "{again}");
+    assert_eq!(again["error"], j["error"]);
+}
+
+#[test]
+fn a_complete_run_has_no_cause() {
+    kernel();
+    let h = Home::new("ok");
+    let (code, j) = h.png(&data("assembly.step"), &[], &[]);
+    assert_eq!(code, 0, "{j}");
+    assert!(j["kernel"]["cause"].is_null(), "{j}");
+}
+
+/// The kernel's C library: `$STEPV_OCCT_LIB`, else this checkout's
+/// `target/kernel/` (`just kernel`), as `kernel()` resolves `$STEPV_OCCT`.
+/// A missing file fails the test, with its path.
+fn kernel_lib() -> PathBuf {
+    let lib = std::env::var_os("STEPV_OCCT_LIB").map_or_else(
+        || {
+            let name = if cfg!(target_os = "macos") {
+                "libstepvocct.dylib"
+            } else {
+                "libstepvocct.so"
+            };
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/kernel")
+                .join(name)
+        },
+        PathBuf::from,
+    );
+    assert!(
+        lib.is_file(),
+        "kernel library not found at {}: run `just kernel` or set STEPV_OCCT_LIB",
+        lib.display()
+    );
+    lib
+}
+
+#[test]
+fn an_input_the_host_will_not_open_is_the_environment() {
+    kernel();
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPING: root ignores mode bits, so the file would open");
+        return;
+    }
+    let h = Home::new("unreadable");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (code, j) = h.png(&input, &[], &[]);
+    std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("cannot open input"),
+        "{j}"
+    );
+    h.assert_nothing_cached("unreadable input");
+    assert_eq!(
+        h.png(&input, &[], &[]).0,
+        0,
+        "readable again, and not blocked"
+    );
+}
+
+#[test]
+fn an_occt_exception_is_the_input_but_its_out_of_memory_is_the_environment() {
+    kernel();
+    let input = data("assembly.step");
+    // The kernel's test hook throws mid-run.
+    let h = Home::new("throw");
+    let (code, j) = h.png(&input, &[], &[("STEPV_OCCT_TEST_THROW", "failure")]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_eq!(h.entries("fail").len(), 1);
+
+    let h = Home::new("throw-oom");
+    let (code, j) = h.png(&input, &[], &[("STEPV_OCCT_TEST_THROW", "oom")]);
+    assert_eq!((code, j["status"].as_str()), (3, Some("memory-cap")), "{j}");
+    assert_eq!(j["kernel"]["cause"], "environment", "{j}");
+    h.assert_nothing_cached("OCCT out of memory");
+}
+
+#[test]
+fn a_file_with_no_geometry_is_the_input() {
+    kernel();
+    let h = Home::new("nogeometry");
+    let input = h.0.join("empty.step");
+    std::fs::write(
+        &input,
+        b"ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n",
+    )
+    .unwrap();
+    let (code, j) = h.png(&input, &[], &[]);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_eq!(h.entries("fail").len(), 1);
+}
+
+#[test]
+fn invalid_arguments_are_the_environment() {
+    use std::ffi::{CStr, CString, c_char, c_int};
+    type Run =
+        unsafe extern "C" fn(*const c_char, *const c_char, f64, f64, *mut c_int) -> *mut c_char;
+    type Free = unsafe extern "C" fn(*mut c_char);
+    let lib = CString::new(kernel_lib().into_os_string().into_encoded_bytes()).unwrap();
+    // SAFETY: the kernel library's C ABI (kernel/stepv_occt.h), called with
+    // the signatures it declares; the summary is freed with its own free.
+    let json = unsafe {
+        let h = libc::dlopen(lib.as_ptr(), libc::RTLD_NOW);
+        assert!(!h.is_null(), "{:?}", CStr::from_ptr(libc::dlerror()));
+        let run = libc::dlsym(h, c"stepv_occt_run".as_ptr());
+        let free = libc::dlsym(h, c"stepv_occt_free".as_ptr());
+        assert!(!run.is_null() && !free.is_null(), "the C API's symbols");
+        let run: Run = std::mem::transmute(run);
+        let free: Free = std::mem::transmute(free);
+        let mut code = 0;
+        // A zero deflection: what no caller should pass.
+        let p = run(
+            c"m.step".as_ptr(),
+            std::ptr::null(),
+            0.0,
+            20.0,
+            &raw mut code,
+        );
+        let json = CStr::from_ptr(p).to_string_lossy().into_owned();
+        free(p);
+        assert_eq!(code, 3, "{json}");
+        json
+    };
+    let j: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        (&j["error"], &j["cause"]),
+        (&"invalid arguments".into(), &"environment".into())
+    );
 }

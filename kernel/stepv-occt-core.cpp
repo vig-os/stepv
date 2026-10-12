@@ -118,6 +118,7 @@
 #include <STEPCAFControl_ExternFile.hxx>
 #include <STEPCAFControl_Reader.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_OutOfMemory.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TDF_Label.hxx>
 #include <TDF_LabelSequence.hxx>
@@ -135,6 +136,7 @@
 #include <XCAFDoc_ShapeTool.hxx>
 #include <gp_Trsf.hxx>
 
+#include <fcntl.h>
 #include <sys/resource.h>
 #include <climits>
 #include <cerrno>
@@ -163,6 +165,18 @@ namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitFailed = 3;
 
+// A failure's "cause" in the summary (#62): kInput when the file itself is at
+// fault, so it fails the same way on any host and a front-end may remember
+// that; kEnvironment when the host, the output or files beside the input are,
+// so the same file may succeed next time.
+constexpr const char* kInput = "input";
+constexpr const char* kEnvironment = "environment";
+
+// What the file's own structure makes impossible: a failure with kInput.
+struct MalformedInput : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 
 // ── JSON output ─────────────────────────────────────────────────────────────
 
@@ -172,6 +186,7 @@ struct Summary {
     std::string format;
     std::string stage = "start";  // the stage reached, or the one that failed
     std::optional<std::string> error;
+    const char* cause = nullptr;  // kInput or kEnvironment, set with `error`
     std::optional<Bnd_Box> bbox;
     double diagonal = 0.0;
     double linear_abs = 0.0;
@@ -223,6 +238,8 @@ std::string to_json(const Summary& s) {
     o << ",\"stage\":\"" << s.stage << "\"";
     o << ",\"error\":";
     if (s.error) o << '"' << json_escape(*s.error) << '"'; else o << "null";
+    o << ",\"cause\":";
+    if (s.error && s.cause) o << '"' << s.cause << '"'; else o << "null";
     o << ",\"format\":\"" << s.format << "\"";
     o << ",\"bbox\":";
     if (s.bbox && !s.bbox->IsVoid()) {
@@ -378,7 +395,7 @@ void walk(const Handle(XCAFDoc_ShapeTool)& st, const Handle(XCAFDoc_ColorTool)& 
           int depth) {
     // A cyclic or absurdly deep assembly graph is malformed input, not a
     // reason to blow the stack.
-    if (depth > 64) throw std::runtime_error("assembly nesting deeper than 64");
+    if (depth > 64) throw MalformedInput("assembly nesting deeper than 64");
 
     if (auto own = label_color(ct, label)) inherited = own;
 
@@ -883,16 +900,27 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
                const Events& ev) {
     const std::string ext = lower_ext(path);
     auto t0 = Clock::now();
+    // A file the host won't let us open is not the file's fault (#62): open
+    // it first, so only a failure after it opened is the input's.
+    auto opened = [&] {
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) return ::close(fd), true;
+        s.error = "cannot open input: " + std::string(std::strerror(errno));
+        s.cause = kEnvironment;
+        return false;
+    };
 
     if (ext == "step" || ext == "stp") {
         s.format = "step";
         s.stage = "read";
+        if (!opened()) return false;
         STEPCAFControl_Reader reader;
         reader.SetColorMode(true);
         reader.SetNameMode(true);
         reader.SetLayerMode(true);
         if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
             s.error = "STEP read failed";
+            s.cause = kInput;
             return false;
         }
         s.t_read_ms = ms_since(t0);
@@ -915,6 +943,7 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         Handle(TransferProgress) progress;
         if (!reader.Transfer(doc, transfer_range(ev, progress))) {
             s.error = "STEP transfer failed";
+            s.cause = kInput;
             return false;
         }
         // OCCT skips an unreadable part file SILENTLY: count them, so a
@@ -929,12 +958,14 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
     } else if (ext == "iges" || ext == "igs") {
         s.format = "iges";
         s.stage = "read";
+        if (!opened()) return false;
         IGESCAFControl_Reader reader;
         reader.SetColorMode(true);
         reader.SetNameMode(true);
         reader.SetLayerMode(true);
         if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
             s.error = "IGES read failed";
+            s.cause = kInput;
             return false;
         }
         s.t_read_ms = ms_since(t0);
@@ -943,15 +974,18 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         Handle(TransferProgress) progress;
         if (!reader.Transfer(doc, transfer_range(ev, progress))) {
             s.error = "IGES transfer failed";
+            s.cause = kInput;
             return false;
         }
     } else if (ext == "brep") {
         s.format = "brep";
         s.stage = "read";
+        if (!opened()) return false;
         TopoDS_Shape shape;
         BRep_Builder builder;
         if (!BRepTools::Read(shape, path.c_str(), builder) || shape.IsNull()) {
             s.error = "BREP read failed";
+            s.cause = kInput;
             return false;
         }
         s.t_read_ms = ms_since(t0);
@@ -962,6 +996,7 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         s.format = "unknown";
         s.stage = "read";
         s.error = "unsupported extension: ." + ext;
+        s.cause = kInput;
         return false;
     }
     s.t_transfer_ms = ms_since(t0);
@@ -980,9 +1015,16 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         s.format = "unknown";
         s.stage = "read";
         s.error = "cannot resolve input path: " + std::string(std::strerror(errno));
+        s.cause = kEnvironment;
         return kExitFailed;
     }
     const std::string input = resolved;
+    // Test hook (tests/cache.rs, #62): an OCCT exception mid-run, to check its
+    // cause: "oom" throws Standard_OutOfMemory, anything else Standard_Failure.
+    if (const char* t = std::getenv("STEPV_OCCT_TEST_THROW")) {
+        if (std::string(t) == "oom") throw Standard_OutOfMemory("test hook");
+        throw Standard_Failure("test hook");
+    }
     stepv::begin_face_budget();
 
     // Off, so "parts_named" counts names an exporter wrote, not ones OCCT
@@ -1020,6 +1062,8 @@ int run(const std::string& input_arg, const std::string& mesh_out,
                             std::to_string(s.external_files) +
                             " part files it references could not be read"
                       : "no geometry in file";
+        // Part files are outside the input: they may be there next time.
+        s.cause = s.external_missing ? kEnvironment : kInput;
         return kExitFailed;
     }
     s.bbox = bbox;
@@ -1099,6 +1143,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         f.open(mesh_out, std::ios::binary | std::ios::trunc);
         if (!f) {
             s.error = "cannot open mesh output: " + mesh_out;
+            s.cause = kEnvironment;
             return kExitFailed;
         }
         f.write("STEPVMSH", 8);
@@ -1153,6 +1198,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         f.close();
         if (!f) {
             s.error = "mesh output write failed";
+            s.cause = kEnvironment;
             return kExitFailed;
         }
     }
@@ -1191,6 +1237,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
     s.stage = "done";
     if (s.triangles == 0 && s.segments == 0) {
         s.error = "file has neither surfaces nor curves to draw";
+        s.cause = s.external_missing ? kEnvironment : kInput;
         return kExitFailed;
     }
     return kExitOk;
@@ -1257,16 +1304,29 @@ extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
     int code = kExitFailed;
     if (!input || !(linear_rel > 0) || !(angular_deg > 0)) {
         s.error = "invalid arguments";
+        s.cause = kEnvironment;
     } else {
         try {
             code = run(input, mesh_out ? mesh_out : "", topology_out ? topology_out : "",
                        edges != 0, linear_rel, angular_deg, true, ev, s);
+        } catch (const Standard_OutOfMemory&) {
+            // A Standard_Failure too: caught first, as the memory it is.
+            s.error = "out of memory";
+            s.cause = kEnvironment;
         } catch (const Standard_Failure& e) {
+            // OCCT gave up on the file's data.
             s.error = std::string("OCCT: ") + e.GetMessageString();
+            s.cause = kInput;
         } catch (const std::bad_alloc&) {
             s.error = "out of memory";
-        } catch (const std::exception& e) {
+            s.cause = kEnvironment;
+        } catch (const MalformedInput& e) {
             s.error = e.what();
+            s.cause = kInput;
+        } catch (const std::exception& e) {
+            // Not known to be the file's: the cautious answer.
+            s.error = e.what();
+            s.cause = kEnvironment;
         }
     }
     if (exit_code) *exit_code = code;

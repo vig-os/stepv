@@ -1228,9 +1228,9 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
 
 ### Cache (#62, #54 step 4, 2026-10-12)
 
-A killed or failed run must never leave an entry a later run trusts. This is the entries and how
-they are written; which results may be cached at all (complete-only, the negative cache) follows
-as #62's second part, and the outline artifact as its third.
+A killed or failed run must never leave an entry a later run trusts. Below: the entries, how they
+are written, and which results may be cached at all. The outline artifact follows as #62's last
+part.
 
 - **Entries (`cache::store`, `cache::load`):** `STEPVCE\0`, `ENTRY_VERSION` (u32 LE), the
   payload's length (u64 LE), the payload, then its blake3 hash as the completeness tag. `load`
@@ -1247,10 +1247,40 @@ as #62's second part, and the outline artifact as its third.
   sweeps those older than `STALE_PART_AGE` (1 h) from the cache directory; never in the user's.
   The age is by wall clock, so a writer stopped longer than that loses its `.part`: its rename
   fails with `ENOENT`, harmlessly.
-- **Known limit:** the keys share `(len, mtime)`'s blind spot: a file rewritten in place within
-  one mtime tick at the same length.
+- **Only complete results:** an entry is written only when the kernel's outcome is `Ok` with a
+  summary; `Ok` without one is a "bad kernel output" error. A multi-file assembly with a part file
+  that did not read (`external_missing > 0`) still draws, but is not cached: the part files are
+  outside the key.
+- **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file.
+  - The summary's `cause` (`occt::Cause`) is `input` when the file, once opened, does not read or
+    transfer, has an unsupported extension, has nothing to draw, nests its assembly more than 64
+    deep, or makes OCCT throw.
+  - It is `environment` when the kernel cannot open the input (it opens the file itself before
+    the reader, so a permission error is never the file's), for path resolution, output I/O and
+    missing part files (nothing to draw because of them included), for out of memory (OCCT's
+    `Standard_OutOfMemory` included), and for invalid arguments or any other exception.
+  - Only the run's summary carries `cause`: the `--serve` and `--outline` error lines don't.
+  - Only `Outcome::Failed` with cause `input` is cached. A
+  timeout or a memory cap depends on the limits (`--timeout`, `--memory-mb` are not in the key),
+  a crash may not repeat, an environment failure is outside the key, and a kernel without
+  `cause` says nothing: none of them is cached, since each would block a run that could
+  succeed.
+- **Known limits:**
+  - the keys share `(len, mtime)`'s blind spot: a file rewritten in place within one mtime tick
+    at the same length;
+  - a multi-file assembly's part file edited after it was cached is not seen: only the top file
+    is in the key.
 - **Tests:**
-  - `tests/cache.rs`: a truncated and an old-version entry are regenerated.
+  - `tests/cache.rs`:
+    - a truncated and an old-version entry are regenerated;
+    - a timeout, a memory cap, a kernel exit 0 without a summary, an unwritable mesh output
+      (`environment`) and missing part files (`environment`) cache nothing, and the next run
+      succeeds;
+    - a garbage file, a file with no geometry and an OCCT exception (`input`, through the test
+      hook `STEPV_OCCT_TEST_THROW`) cache their failure;
+    - a `chmod 000` copy (`environment`, skipped as root) and OCCT's out of memory
+      (`environment`) cache nothing, and the readable copy then succeeds;
+    - invalid arguments to the kernel's C library (`environment`, through `dlopen`).
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn

@@ -31,6 +31,10 @@ pub struct Summary {
     /// `walk`, `mesh`, `extract`, `done`.
     pub stage: String,
     pub error: Option<String>,
+    /// Why the run failed: `None` on success, and from kernels that predate
+    /// it (#62), which say nothing about whether a failure would repeat.
+    #[serde(default)]
+    pub cause: Option<Cause>,
     pub format: String,
     pub bbox: Option<[f64; 6]>,
     pub diagonal: f64,
@@ -95,6 +99,19 @@ pub struct Summary {
     /// OS could not provide all of it. Absent from kernels that predate it.
     #[serde(default)]
     pub sandbox: Option<String>,
+}
+
+/// Whose fault a failed run was (#62).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cause {
+    /// The file itself: it does not read, transfer, or has nothing to draw.
+    /// The same file fails the same way on any host.
+    Input,
+    /// The host, the output, or files beside the input (an external part
+    /// file missing, an unwritable mesh, out of memory): the same file may
+    /// succeed next time.
+    Environment,
 }
 
 impl Summary {
@@ -353,9 +370,9 @@ fn outcome(status: Option<ExitStatus>, over_memory: bool, summary: Option<&Summa
         None => Outcome::Timeout,
         Some(s) => match s.code() {
             Some(0) => Outcome::Ok,
-            // The OS refusing an allocation (std::bad_alloc in the kernel)
-            // surfaces as a clean "out of memory" summary: a memory limit,
-            // just the machine's rather than ours.
+            // The OS refusing an allocation (std::bad_alloc, or OCCT's
+            // Standard_OutOfMemory, in the kernel) surfaces as a clean "out of
+            // memory" summary: a memory limit, just the machine's, not ours.
             Some(3) if summary.is_some_and(|s| s.error.as_deref() == Some("out of memory")) => {
                 Outcome::MemoryCap
             }

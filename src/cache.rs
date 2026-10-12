@@ -337,16 +337,14 @@ mod tests {
     }
 
     /// One writer process for `concurrent_writers_never_tear_an_entry`:
-    /// ignored when run, re-executed by it with the entry's path.
+    /// ignored when run, re-executed by it with the entry's path. It fails
+    /// without them, so it can never pass by writing nothing.
     #[test]
     #[ignore = "a helper process, run by concurrent_writers_never_tear_an_entry"]
     fn writer_process() {
-        if let (Some(p), Ok(b)) = (
-            std::env::var_os("STEPV_TEST_CACHE_ENTRY"),
-            std::env::var("STEPV_TEST_CACHE_BYTE"),
-        ) {
-            write_many(Path::new(&p), b.parse().unwrap());
-        }
+        let path = std::env::var_os("STEPV_TEST_CACHE_ENTRY").expect("STEPV_TEST_CACHE_ENTRY");
+        let byte = std::env::var("STEPV_TEST_CACHE_BYTE").expect("STEPV_TEST_CACHE_BYTE");
+        write_many(Path::new(&path), byte.parse().unwrap());
     }
 
     #[test]
@@ -362,7 +360,7 @@ mod tests {
                     .args(["--ignored", "--exact", "cache::tests::writer_process"])
                     .env("STEPV_TEST_CACHE_ENTRY", &path)
                     .env("STEPV_TEST_CACHE_BYTE", b.to_string())
-                    .stdout(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
                     .spawn()
                     .unwrap()
             })
@@ -388,8 +386,15 @@ mod tests {
             }
         }
         threads.into_iter().for_each(|t| t.join().unwrap());
-        for mut p in procs {
-            assert!(p.wait().unwrap().success());
+        // Each helper ran, and wrote: a filter that stops matching it runs
+        // nothing, and exits 0 all the same.
+        for p in procs {
+            let out = p.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "{stdout}"
+            );
         }
         assert_eq!(torn, 0, "{torn} torn reads ({whole} whole)");
         assert!(whole > 0);
