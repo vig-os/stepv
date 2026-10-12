@@ -1086,6 +1086,63 @@ format. It runs in the kernel's sandbox with nothing writable, like `--serve`. I
 - **Next in #54:** the `SceneEvent` contract and progress, then a per-face healing budget
   (#51), then caching only complete scenes; then the viewer and the CLI show the outline first.
 
+### Events and progress (#54, step 2, 2026-10-12)
+
+`stepv-occt --stream` turns a run's stdout into a stream of frames: `SVEV`, a kind byte, a
+little-endian u32 length, and the payload (`kernel/stepv_occt.h`). Every payload today is one
+JSON object.
+
+- **The kinds:**
+  - `TREE`: the outline, sent between the parse and the transfer. It is built from the run's own
+    reader (`outline_json(STEPControl_Reader&)`), so the file is parsed once. It is left out for
+    IGES and BREP, and when the outline itself fails; the run goes on.
+  - `PROGRESS`: `{"stage", "done", "total"}`. Stages come in order (`transfer`, then `mesh`).
+    Within a stage, `done` never falls and ends at `total`. The kernel sends at most one per
+    stage every 50 ms, besides the first and the last. `transfer` is thousandths of OCCT's own
+    `Message_ProgressIndicator`; `mesh` counts two passes over the prototypes (the mesher, then
+    the recovery ladder).
+  - `DONE`: the summary, with `sandbox`, exactly as on the plain line. It is always the last
+    frame.
+  - Kinds 4 and up are reserved for per-part boxes and meshes (P1). Those payloads will be
+    binary, never base64 inside JSON.
+- **The C API** has the same events through a callback (`stepv_occt_run_stream`); the CLI's
+  callback is what writes the frames. `stepv_occt_run_ex` is that call with no callback.
+- **The Rust side:**
+  - `occt::read_events` decodes a stream. It refuses a frame over `MAX_FRAME` (64 MiB) on its
+    header alone, before allocating, and rejects a bad magic, an unknown kind, a malformed
+    payload, bytes after `DONE`, and a stream that ends without it.
+  - `occt::run_streaming` runs it under the same `supervise()` as `run`, with `Limits`. Decoding
+    happens on the reader thread, which passes events over a bounded channel; the wait loop hands
+    them to the caller. Progress is dropped when the caller falls behind (`try_send`), the
+    outline never is.
+  - Outcomes: a kill (wall clock, memory) keeps the events that arrived and has **no summary**,
+    so nothing downstream can mistake it for a complete scene. A kernel that exits with a broken
+    stream is `Crashed`, whatever its exit code.
+- **Edges of the contract (from the review):**
+  - A stage's first and last progress events are never dropped (`Progress::droppable`), so a slow reader's bar still reaches its end. A run that fails partway leaves its stage unfinished.
+  - The kernel leaves out an outline over `STEPV_OCCT_MAX_FRAME`, rather than send a frame the reader would refuse.
+  - A killed run has no summary, even when the summary was read before the kill landed.
+  - `supervise()` kills and reaps the kernel on every way out, including a panicking callback.
+  - `--stream` ignores SIGPIPE, so a reader that hangs up produces a failed write rather than a signal.
+  - The outline's parse counts against the same `Limits.timeout`, so a run close to its cap can time out when streamed and not when plain.
+- **Measured on Ultimaker 3:** the tree arrives at 4.3 s and the summary at 101 s, in 101 frames.
+  Transfer progress reaches 15.6% by 15 s and then **does not move for 80 s**. OCCT's indicator
+  does not advance inside one solid's shape healing, and solid 221's p-curve projection is that
+  80 s (#51). Progress is honest about where the time goes, but it can't make that wait shorter.
+  The per-face budget (step 3) is what does.
+- **Tests:** `tests/stream.rs` checks:
+  - the outline arrives first and equals `--outline`;
+  - progress is monotonic and every stage finishes;
+  - the summary and mesh match a plain run;
+  - IGES and BREP send no tree;
+  - a clean failure still sends its summary;
+  - a kill after the outline keeps the outline and has no summary (via the
+    `STEPV_OCCT_TEST_STALL_MS` hook);
+  - six fake kernels' broken streams are crashes;
+  - `--stream` refuses `--serve` and `--outline`.
+
+  The decoder's unit tests cover every truncation point and each rejection.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:

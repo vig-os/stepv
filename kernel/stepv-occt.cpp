@@ -1,6 +1,7 @@
 // stepv-occt — the kernel CLI the Rust side runs as a subprocess. All the
 // work is in stepv-occt-core.cpp; this is argument parsing and the stdout
-// contract (one JSON line; OCCT's own chatter goes to stderr).
+// contract (one JSON line, or with --stream the event frames of
+// stepv_occt.h; OCCT's own chatter goes to stderr).
 
 #include "sandbox.h"
 #include "stepv_occt.h"
@@ -14,12 +15,15 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <climits>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -31,6 +35,8 @@ const char* const kUsage =
     "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n"
     "  --serve  read the file once, then answer measurement queries, one JSON\n"
     "           line each, on stdin/stdout (measure.h); no outputs\n"
+    "  --stream  stdout is the run's events as frames (stepv_occt.h): the\n"
+    "           outline, progress, then the summary, in place of its line\n"
     "  --outline  STEP only: the assembly tree and names, read without a\n"
     "           shape transfer, as one JSON line (outline.h); no outputs\n";
 
@@ -125,11 +131,49 @@ void escape_attempt(const std::string& spec) {
         report(false, EINVAL);
     }
 }
+// All of `n` bytes, through short writes and signals.
+bool write_all(int fd, const char* p, std::size_t n) {
+    while (n > 0) {
+        const ssize_t w = write(fd, p, n);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return false;
+        p += w;
+        n -= static_cast<std::size_t>(w);
+    }
+    return true;
+}
+
+// One --stream frame (stepv_occt.h): "SVEV", kind, u32 LE length, payload.
+bool frame(int fd, int kind, const std::string& payload) {
+    if (payload.size() > UINT32_MAX) return false;
+    const auto n = static_cast<std::uint32_t>(payload.size());
+    const char head[9] = {'S', 'V', 'E', 'V', static_cast<char>(kind),
+                          static_cast<char>(n & 0xff), static_cast<char>((n >> 8) & 0xff),
+                          static_cast<char>((n >> 16) & 0xff), static_cast<char>(n >> 24)};
+    return write_all(fd, head, sizeof head) && write_all(fd, payload.data(), payload.size());
+}
+
+// Where --stream's events go, and whether every write so far made it.
+struct Wire {
+    int fd;
+    bool ok;
+};
+
+void on_event(void* ctx, int kind, const char* payload, unsigned long length) {
+    auto* w = static_cast<Wire*>(ctx);
+    if (!w->ok) return;
+    w->ok = frame(w->fd, kind, std::string(payload, length));
+    // Test hook (tests/stream.rs): hold the run once the outline is out, so
+    // a kill lands between it and the summary deterministically.
+    if (kind == STEPV_OCCT_EVENT_TREE)
+        if (const char* ms = std::getenv("STEPV_OCCT_TEST_STALL_MS"))
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::strtoul(ms, nullptr, 10)));
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string input, mesh_out, topology_out;
-    bool edges = false, serve = false, outline = false;
+    bool edges = false, serve = false, outline = false, stream = false;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -145,6 +189,7 @@ int main(int argc, char** argv) {
         else if (a == "--edges") edges = true;
         else if (a == "--serve") serve = true;
         else if (a == "--outline") outline = true;
+        else if (a == "--stream") stream = true;
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -156,9 +201,11 @@ int main(int argc, char** argv) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
     }
-    // --serve and --outline write nothing and exclude each other: refused
-    // here, before any output file is created (and so truncated).
-    if ((serve || outline) && (serve == outline || !mesh_out.empty() || !topology_out.empty())) {
+    // --serve and --outline write nothing and exclude each other and
+    // --stream: refused here, before any output file is created (and so
+    // truncated).
+    if ((serve || outline) &&
+        (serve == outline || stream || !mesh_out.empty() || !topology_out.empty())) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
     }
@@ -254,15 +301,26 @@ int main(int argc, char** argv) {
         return code;
     }
     int code = 3;
-    char* json = stepv_occt_run_ex(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
-                                   topology_out.empty() ? nullptr : topology_out.c_str(),
-                                   edges ? 1 : 0, linear_rel, angular_deg, &code);
+    // A reader that hangs up mid-stream makes the next write fail (EPIPE)
+    // rather than kill the run outright.
+    if (stream) std::signal(SIGPIPE, SIG_IGN);
+    Wire wire{json_fd, true};
+    char* json = stepv_occt_run_stream(
+        input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
+        topology_out.empty() ? nullptr : topology_out.c_str(), edges ? 1 : 0, linear_rel,
+        angular_deg, stream ? on_event : nullptr, &wire, &code);
     if (!json) return 3;
     // The summary says which sandbox the run was in.
     std::string line = json;
     stepv_occt_free(json);
     if (!line.empty() && line[0] == '{')
         line.insert(1, "\"sandbox\":\"" + sandbox + "\"" + (line.size() > 2 ? "," : ""));
+    if (stream) {
+        // A reader that stopped reading cannot be told: it sees the stream
+        // end without its summary, and that is a crash to it.
+        if (!wire.ok || !frame(json_fd, STEPV_OCCT_EVENT_DONE, line)) return 3;
+        return code;
+    }
     line += "\n";
     if (write(json_fd, line.data(), line.size()) < 0) return 3;
     return code;

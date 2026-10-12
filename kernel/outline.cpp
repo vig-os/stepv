@@ -225,6 +225,10 @@ std::string outline_json(const std::string& path) {
     }
     STEPControl_Reader reader;
     if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
+    return outline_json(reader);
+}
+
+std::string outline_json(STEPControl_Reader& reader) {
     const Handle(StepData_StepModel) model = reader.StepModel();
     const Namer namer{model->SourceCodePage() != Resource_FormatType_NoConversion};
     const Interface_Graph& graph = reader.WS()->Graph();
