@@ -1228,9 +1228,8 @@ about 25 s each, at about 350 ms per edge, while their twins on surfaces of the 
 
 ### Cache (#62, #54 step 4, 2026-10-12)
 
-A killed or failed run must never leave an entry a later run trusts. Below: the entries, how they
-are written, and which results may be cached at all. The outline artifact follows as #62's last
-part.
+A killed or failed run must never leave an entry a later run trusts, and a run that got as far
+as the outline should leave something a preview can show at once.
 
 - **Entries (`cache::store`, `cache::load`):** `STEPVCE\0`, `ENTRY_VERSION` (u32 LE), the
   payload's length (u64 LE), the payload, then its blake3 hash as the completeness tag. `load`
@@ -1248,7 +1247,8 @@ part.
   The age is by wall clock, so a writer stopped longer than that loses its `.part`: its rename
   fails with `ENOENT`, harmlessly.
 - **Only complete results:** an entry is written only when the kernel's outcome is `Ok` with a
-  summary; `Ok` without one is a "bad kernel output" error. A multi-file assembly with a part file
+  summary; `Ok` without one is a "bad kernel output" error (a crash, to a streamed run, which a
+  cached run is). A multi-file assembly with a part file
   that did not read (`external_missing > 0`) still draws, but is not cached: the part files are
   outside the key.
 - **The negative cache (`<key>.fail`)** keeps only a failure the kernel puts down to the file.
@@ -1265,11 +1265,23 @@ part.
   a crash may not repeat, an environment failure is outside the key, and a kernel without
   `cause` says nothing: none of them is cached, since each would block a run that could
   succeed.
+- **The outline artifact (`cache::OutlineArtifact`):** JSON `{format: "stepv-outline-artifact",
+  version: 1, header, tree, leaves, bbox, boxes}` at `<key>.outline.json`, keyed on (path, len,
+  mtime) alone in its own hash domain. Cached CLI runs (`--png`/`--glb`/`--mesh`/`--topology`,
+  without `--no-cache`) are streamed (`occt::run_streaming`) and write it atomically on
+  `Event::Tree`, before the transfer; a complete run rewrites it with the model's `bbox`. A run
+  killed after the outline keeps it. Read back with `cache::load_outline` (#63, the thumbnail
+  fallback), which rejects another version. `boxes` is always absent until the kernel streams
+  per-part boxes (#66).
 - **Known limits:**
   - the keys share `(len, mtime)`'s blind spot: a file rewritten in place within one mtime tick
     at the same length;
   - a multi-file assembly's part file edited after it was cached is not seen: only the top file
-    is in the key.
+    is in the key;
+  - streaming costs the run its parse again inside the timeout (about 5% on a large assembly,
+    see #54 step 2);
+  - a non-STEP file has no outline, so no artifact;
+  - `view` does not write the artifact yet (#63).
 - **Tests:**
   - `tests/cache.rs`:
     - a truncated and an old-version entry are regenerated;
@@ -1280,7 +1292,9 @@ part.
       hook `STEPV_OCCT_TEST_THROW`) cache their failure;
     - a `chmod 000` copy (`environment`, skipped as root) and OCCT's out of memory
       (`environment`) cache nothing, and the readable copy then succeeds;
-    - invalid arguments to the kernel's C library (`environment`, through `dlopen`).
+    - invalid arguments to the kernel's C library (`environment`, through `dlopen`);
+    - a run killed after its outline leaves the artifact, equal to `occt::outline`, and no entry,
+      and the next run adds the box; the artifact follows the file.
   - `cache.rs`'s unit tests:
     - 4 processes and 4 threads write 64 KiB entries to one key while a reader verifies each raw
       frame. Swapping `write_atomic` for an in-place `std::fs::write` fails it, with 14 to 20 torn

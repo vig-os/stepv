@@ -15,14 +15,14 @@
 use std::io::Read;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// How many bytes of the file head are parsed for the header. Real headers
 /// are a few hundred bytes; 64 KiB tolerates absurd author lists.
 const HEAD_BYTES: usize = 64 * 1024;
 
 /// What a file says about itself.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Info {
     /// `step`, `iges`, `brep` or `unknown`, from the content when it is
     /// recognisable and the extension otherwise.

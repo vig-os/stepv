@@ -1,6 +1,7 @@
-//! The cache (#62) end to end: only complete results are cached, and an
-//! entry that is truncated or of another version is regenerated. Run the
-//! real kernel against `tests/data/`.
+//! The cache (#62) end to end: only complete results are cached, an entry
+//! that is truncated or of another version is regenerated, and a run killed
+//! after its outline leaves the outline artifact but no entry. Run the real
+//! kernel against `tests/data/`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -204,7 +205,7 @@ fn a_memory_capped_run_caches_nothing() {
 }
 
 #[test]
-fn a_kernel_exit_0_without_a_summary_is_an_error_and_not_cached() {
+fn a_kernel_exit_0_without_a_summary_fails_and_is_not_cached() {
     let k = kernel();
     let h = Home::new("nosummary");
     // The real kernel writes the mesh; its summary goes nowhere.
@@ -220,8 +221,9 @@ fn a_kernel_exit_0_without_a_summary_is_an_error_and_not_cached() {
         &[],
         &[("STEPV_OCCT", mute.to_str().unwrap())],
     );
-    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
-    assert!(j["error"].as_str().unwrap().contains("no summary"), "{j}");
+    // A cached run is streamed, and a stream that ends without its summary
+    // breaks the contract: a crash (`occt::run_streaming`).
+    assert_eq!((code, j["status"].as_str()), (3, Some("crashed")), "{j}");
     h.assert_nothing_cached("no summary");
 }
 
@@ -428,4 +430,61 @@ fn invalid_arguments_are_the_environment() {
         (&j["error"], &j["cause"]),
         (&"invalid arguments".into(), &"environment".into())
     );
+}
+
+#[test]
+fn a_run_killed_after_its_outline_leaves_the_artifact_and_no_entry() {
+    let k = kernel();
+    let h = Home::new("killed");
+    let input = data("assembly.step");
+    let out = h.0.join("o.png");
+    let args = [
+        input.to_str().unwrap(),
+        "--png",
+        out.to_str().unwrap(),
+        "--size",
+        "64",
+    ];
+
+    // The kernel stalls 30 s once the outline is out; the 10 s cap kills it
+    // there, with room for the parse on a loaded machine.
+    let killed = [&args[..], &["--timeout", "10"]].concat();
+    let (code, j) = h.stepv(&killed, &[("STEPV_OCCT_TEST_STALL_MS", "30000")]);
+    assert_eq!(code, 4, "{j}");
+    assert!(h.entries("png").is_empty(), "a killed run cached an output");
+    assert!(
+        h.entries("fail").is_empty(),
+        "a timeout was cached as a failure"
+    );
+
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    let a = cache::load_outline_in(&h.cache_dir(), &input).expect("no outline artifact");
+    assert_eq!((&a.tree, a.leaves), (&outline.tree, outline.leaves));
+    assert_eq!(a.header, stepv::header::read(&input));
+    assert_eq!((a.bbox, a.boxes), (None, None));
+
+    // The timeout blocks nothing: the next run completes and caches.
+    let (code, j) = h.stepv(&args, &[]);
+    assert_eq!((code, &j["cached"]), (0, &Value::Bool(false)), "{j}");
+    assert_eq!(h.entries("png").len(), 1);
+    let a = cache::load_outline_in(&h.cache_dir(), &input).unwrap();
+    assert_eq!(a.tree, outline.tree);
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).unwrap();
+    assert_eq!(a.bbox, Some(bbox));
+}
+
+#[test]
+fn the_artifact_is_keyed_on_the_file_as_it_is_now() {
+    let h = Home::new("stale");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let outline = occt::outline(&kernel(), &input, occt::Limits::DEFAULT).unwrap();
+    let a = cache::OutlineArtifact::new(stepv::header::read(&input), outline);
+    cache::store_outline_in(&h.cache_dir(), &input, &a).unwrap();
+    assert_eq!(cache::load_outline_in(&h.cache_dir(), &input), Some(a));
+    // Rewritten: another length, so another key.
+    let mut bytes = std::fs::read(&input).unwrap();
+    bytes.extend_from_slice(b"\n");
+    std::fs::write(&input, bytes).unwrap();
+    assert_eq!(cache::load_outline_in(&h.cache_dir(), &input), None);
 }

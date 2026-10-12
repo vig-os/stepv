@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure of the input itself is remembered. Timeouts, memory caps, crashes, unreadable inputs,
   unwritable outputs and missing part files no longer are. Neither is a kernel exit without a summary, or a
   multi-file assembly drawn without some of its parts
+- **An outline artifact, left as soon as the outline arrives** ([#62](https://github.com/vig-os/stepv/issues/62)):
+  cached runs are streamed and write `cache::OutlineArtifact` (`<key>.outline.json`: the file's
+  header and assembly tree, and the model's box once a run completes), so a run killed after
+  the outline still leaves something a preview can show at once. Read it with
+  `cache::load_outline`. Per-part boxes follow in #66
 - **A time budget for healing each face** ([#51](https://github.com/vig-os/stepv/issues/51)):
   a file written without p-curves (SolidWorks writes none) has the reader rebuild every edge's
   2D curve on each face by projection, and on a few faces that is very slow. The kernel now heals

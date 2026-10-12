@@ -241,7 +241,7 @@ fn main() -> ExitCode {
 /// The whole run, returning the exit code and the stdout report.
 fn run(args: &Args) -> (u8, Value) {
     let info = header::read(&args.input);
-    let mut report = json!({ "stepv": env!("CARGO_PKG_VERSION"), "info": info });
+    let mut report = json!({ "stepv": env!("CARGO_PKG_VERSION"), "info": &info });
     if args.info {
         report["status"] = json!("info");
         return (EXIT_OK, report);
@@ -249,7 +249,7 @@ fn run(args: &Args) -> (u8, Value) {
     if args.view {
         // The exact B-rep for the inspector (#29) comes with the mesh.
         let topo_tmp = temp_path("json");
-        let result = tessellate(args, &mut report, None, Some(&topo_tmp));
+        let result = tessellate(args, &mut report, None, Some(&topo_tmp), None);
         let topo_bytes = topology_bytes(&report, &topo_tmp);
         let scene = match result {
             Ok((s, _)) => s,
@@ -341,11 +341,13 @@ fn run(args: &Args) -> (u8, Value) {
     }
 
     let topology_tmp = args.topology.as_ref().map(|_| temp_path("json"));
+    let outline_dir = cache::cache_dir().filter(|_| args.cache);
     let result = tessellate(
         args,
         &mut report,
         cache_path.as_deref(),
         topology_tmp.as_deref(),
+        outline_dir.as_deref().map(|d| (d, info)),
     );
     let topology = topology_tmp.as_ref().map(|t| topology_bytes(&report, t));
     let (scene, raw) = match result {
@@ -470,11 +472,16 @@ fn topology_bytes(report: &Value, tmp: &Path) -> std::io::Result<Vec<u8>> {
 
 /// Runs the kernel and decodes its buffers. On failure, fills `report` and
 /// returns the exit code. Shared by `--png`/`--glb` and `view`.
+///
+/// With `outline` (the cache directory and the file's header), the run is
+/// streamed and leaves a [`cache::OutlineArtifact`] once the outline arrives,
+/// whether or not it then completes; a complete run adds the model's box.
 fn tessellate(
     args: &Args,
     report: &mut Value,
     cache_path: Option<&Path>,
     topology_out: Option<&Path>,
+    outline: Option<(&Path, header::Info)>,
 ) -> Result<(Scene, Vec<u8>), u8> {
     // ── Kernel ──
     let kernel = occt::kernel_path();
@@ -487,17 +494,37 @@ fn tessellate(
         ));
     }
     let mesh = temp_path("msh");
-    let result = occt::run(
-        &kernel,
-        &args.input,
-        args.deflection,
-        args.limits,
-        Some(&mesh),
-        topology_out,
-        // The viewer draws and picks the B-rep edges (STEPVMSH v4, #31);
-        // thumbnails, --glb and --mesh (Quick Look's format) keep v3.
-        args.view,
-    );
+    // The viewer draws and picks the B-rep edges (STEPVMSH v4, #31);
+    // thumbnails, --glb and --mesh (Quick Look's format) keep v3.
+    let edges = args.view;
+    let mut artifact = None;
+    let result = match &outline {
+        Some((dir, info)) => occt::run_streaming(
+            &kernel,
+            &args.input,
+            args.deflection,
+            args.limits,
+            Some(&mesh),
+            topology_out,
+            edges,
+            &mut |e| {
+                if let occt::Event::Tree(tree) = e {
+                    let a = cache::OutlineArtifact::new(info.clone(), tree);
+                    store_outline(dir, &args.input, &a);
+                    artifact = Some(a);
+                }
+            },
+        ),
+        None => occt::run(
+            &kernel,
+            &args.input,
+            args.deflection,
+            args.limits,
+            Some(&mesh),
+            topology_out,
+            edges,
+        ),
+    };
     let run = match result {
         Ok(r) => r,
         Err(e) => {
@@ -573,6 +600,10 @@ fn tessellate(
         }
         return Err(fail_in(report, code, status, &msg));
     }
+    if let (Some((dir, _)), Some(mut a)) = (outline, artifact) {
+        a.bbox = run.summary.as_ref().and_then(|s| s.bbox);
+        store_outline(dir, &args.input, &a);
+    }
 
     let scene = std::fs::read(&mesh)
         .map_err(|e| e.to_string())
@@ -622,6 +653,14 @@ fn cache_path(args: &Args, format: Format) -> Option<PathBuf> {
         variant,
     });
     Some(dir.join(format!("{key}.{ext}")))
+}
+
+/// Writes the outline artifact; a failure costs the next run its head
+/// start, not this run its result.
+fn store_outline(dir: &Path, input: &Path, a: &cache::OutlineArtifact) {
+    if let Err(e) = cache::store_outline_in(dir, input, a) {
+        eprintln!("stepv: cannot cache the outline: {e}");
+    }
 }
 
 /// Serves a cache hit, or a cached failure, into `out`. `None` on a miss,

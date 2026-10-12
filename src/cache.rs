@@ -13,12 +13,17 @@
 //! An entry is only ever a COMPLETE result (#62): [`store`] frames it with a
 //! version and a checksum and puts it in place atomically ([`write_atomic`]),
 //! and [`load`] treats anything else (truncated, corrupt, another version) as
-//! a miss. A run killed partway leaves no entry.
+//! a miss. A run killed partway leaves no entry; it may leave an
+//! [`OutlineArtifact`], keyed on the file alone.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{header, topology};
 
 /// Cache key inputs. Every field that can change the OUTPUT must be in here,
 /// which is why the deflection and the output kind are part of the key and not
@@ -245,6 +250,106 @@ pub fn sweep_parts(dir: &Path, age: Duration) {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// The version of the [`OutlineArtifact`] schema; [`load_outline`] rejects
+/// any other.
+pub const OUTLINE_VERSION: u32 = 1;
+
+const OUTLINE_FORMAT: &str = "stepv-outline-artifact";
+
+/// What a run leaves behind for a file as soon as its outline arrives (#62):
+/// the header and the assembly tree, and once a run completes, the model's
+/// box. A preview can show it at once, before (or instead of) a run.
+///
+/// Keyed on the file alone (path, length, mtime), not the deflection or the
+/// output: none of it depends on them. Written whether or not the run that
+/// wrote it then completed, so a large file that timed out shows its tree
+/// the next time. JSON, so the front-ends read it without stepv.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutlineArtifact {
+    /// Always `stepv-outline-artifact`.
+    pub format: String,
+    /// [`OUTLINE_VERSION`].
+    pub version: u32,
+    /// The file's header ([`header::read`]).
+    pub header: header::Info,
+    /// The outline's tree ([`crate::occt::Outline::tree`]).
+    pub tree: Vec<topology::Node>,
+    /// How many leaves `tree` has.
+    pub leaves: usize,
+    /// The model's box, `[xmin, ymin, zmin, xmax, ymax, zmax]`: present once a
+    /// run of the file has completed.
+    pub bbox: Option<[f64; 6]>,
+    /// One box per leaf. Always absent for now: the kernel does not report
+    /// per-part boxes yet (#66).
+    pub boxes: Option<Vec<[f64; 6]>>,
+}
+
+impl OutlineArtifact {
+    /// An artifact for `header` and `outline`, with no boxes yet.
+    #[must_use]
+    pub fn new(header: header::Info, outline: crate::occt::Outline) -> Self {
+        Self {
+            format: OUTLINE_FORMAT.to_owned(),
+            version: OUTLINE_VERSION,
+            header,
+            tree: outline.tree,
+            leaves: outline.leaves,
+            bbox: None,
+            boxes: None,
+        }
+    }
+}
+
+/// Where the [`OutlineArtifact`] for `input` lives under `dir`; `None` when
+/// `input` cannot be stat'ed.
+#[must_use]
+pub fn outline_path(dir: &Path, input: &Path) -> Option<PathBuf> {
+    let canon = std::fs::canonicalize(input).ok()?;
+    let meta = std::fs::metadata(&canon).ok()?;
+    let mtime = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    let path = canon.as_os_str().as_encoded_bytes();
+    let mut h = blake3::Hasher::new();
+    // Its own domain: no output key can hash the same.
+    h.update(OUTLINE_FORMAT.as_bytes());
+    h.update(&(path.len() as u64).to_le_bytes());
+    h.update(path);
+    h.update(&meta.len().to_le_bytes());
+    h.update(&mtime.as_nanos().to_le_bytes());
+    Some(dir.join(format!("{}.outline.json", h.finalize().to_hex())))
+}
+
+/// Writes `artifact` for `input` under `dir`, atomically.
+///
+/// # Errors
+/// When `input` cannot be stat'ed, or the write fails.
+pub fn store_outline_in(
+    dir: &Path,
+    input: &Path,
+    artifact: &OutlineArtifact,
+) -> std::io::Result<()> {
+    let path = outline_path(dir, input)
+        .ok_or_else(|| std::io::Error::other(format!("cannot stat {}", input.display())))?;
+    let json = serde_json::to_vec(artifact).map_err(std::io::Error::other)?;
+    write_atomic(&path, &json)
+}
+
+/// The [`OutlineArtifact`] for `input` under `dir`, if one was written for
+/// the file as it is now (same path, length and mtime) with this
+/// [`OUTLINE_VERSION`].
+#[must_use]
+pub fn load_outline_in(dir: &Path, input: &Path) -> Option<OutlineArtifact> {
+    let bytes = std::fs::read(outline_path(dir, input)?).ok()?;
+    let a: OutlineArtifact = serde_json::from_slice(&bytes).ok()?;
+    (a.format == OUTLINE_FORMAT && a.version == OUTLINE_VERSION).then_some(a)
+}
+
+/// [`load_outline_in`] the [`cache_dir`]: what #63's preview and the
+/// thumbnail fallback read.
+#[must_use]
+pub fn load_outline(input: &Path) -> Option<OutlineArtifact> {
+    load_outline_in(&cache_dir()?, input)
 }
 
 #[cfg(test)]
