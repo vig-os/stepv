@@ -33,6 +33,13 @@ char* stepv_occt_run_ex(const char* input, const char* mesh_out, const char* top
 
 void stepv_occt_free(char* p);
 
+// The assembly outline (#54, outline.h): the tree and names of the STEP file
+// `input`, read from its product structure with no shape transfer, as JSON
+// ({"format": "stepv-outline", ...}, or {"error": ...}) in a malloc'd string
+// for stepv_occt_free. *exit_code is 0, or 3 with the error. Serialised with
+// the runs above.
+char* stepv_occt_outline(const char* input, int* exit_code);
+
 // `stepv-occt --serve` (#33): reads `input` once, writes a ready line
 // ({"ready": true, "sandbox": ..., "parts": n}, or ready false with an
 // error) to `out_fd`, then answers one JSON query per line from `in_fd`

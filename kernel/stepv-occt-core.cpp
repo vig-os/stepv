@@ -77,6 +77,7 @@
 #include "json.h"
 #include "measure.h"
 #include "stepv_occt.h"
+#include "outline.h"
 #include "topology.h"
 
 #include <BRepAdaptor_Curve.hxx>
@@ -1080,6 +1081,14 @@ int run(const std::string& input_arg, const std::string& mesh_out,
 }  // namespace
 
 
+// OCCT's data-exchange layer keeps global state (Interface_Static, the
+// XSControl session): one file at a time per process. The CLI never notices
+// (one run per process); Quick Look issues concurrent requests.
+static std::mutex& serial() {
+    static std::mutex m;
+    return m;
+}
+
 extern "C" char* stepv_occt_run(const char* input, const char* mesh_out, double linear_rel,
                                 double angular_deg, int* exit_code) {
     return stepv_occt_run_ex(input, mesh_out, nullptr, 0, linear_rel, angular_deg, exit_code);
@@ -1095,11 +1104,7 @@ extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out
 extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
                                    const char* topology_out, int edges, double linear_rel,
                                    double angular_deg, int* exit_code) {
-    // OCCT's data-exchange layer keeps global state (Interface_Static, the
-    // XSControl session): one file at a time per process. The CLI never
-    // notices (one run per process); Quick Look issues concurrent requests.
-    static std::mutex serial;
-    std::lock_guard<std::mutex> lock(serial);
+    std::lock_guard<std::mutex> lock(serial());
     static std::once_flag quiet;
     std::call_once(quiet, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
@@ -1129,6 +1134,27 @@ extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
 }
 
 extern "C" void stepv_occt_free(char* p) { std::free(p); }
+
+extern "C" char* stepv_occt_outline(const char* input, int* exit_code) {
+    std::lock_guard<std::mutex> lock(serial());
+    std::string json;
+    int code = kExitFailed;
+    try {
+        if (!input) throw std::runtime_error("invalid arguments");
+        json = stepv::outline_json(input);
+        code = kExitOk;
+    } catch (const Standard_Failure& e) {
+        json = "{\"error\":\"" + json_escape(std::string("OCCT: ") + e.GetMessageString()) + "\"}";
+    } catch (const std::bad_alloc&) {
+        json = "{\"error\":\"out of memory\"}";
+    } catch (const std::exception& e) {
+        json = "{\"error\":\"" + json_escape(e.what()) + "\"}";
+    }
+    if (exit_code) *exit_code = code;
+    char* out = static_cast<char*>(std::malloc(json.size() + 1));
+    if (out) std::memcpy(out, json.c_str(), json.size() + 1);
+    return out;
+}
 
 // ── --serve (#33) ───────────────────────────────────────────────────────────
 

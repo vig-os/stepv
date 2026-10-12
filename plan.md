@@ -1054,6 +1054,38 @@ exactly, and the viewer draws one cap per part in that part's colour.
   - `test-viewer.sh`: the window counts both parts' cap colours, after the kernel reported
     "exact caps for 3 parts".
 
+### Outline before geometry (#54, step 1, 2026-10-12)
+
+#51 showed where a big file's time goes. The Ultimaker 3 assembly reads in about 5 s, then
+spends about 90 s building p-curves. The tree, the names and the part count are all in the parsed
+entities already. So `stepv-occt --outline` (`kernel/outline.cpp`) walks the parsed
+`StepData_StepModel`, with **no shape transfer**, and prints one JSON line in `--topology`'s tree
+format. It runs in the kernel's sandbox with nothing writable, like `--serve`. It is also
+`stepv_occt_outline` in the C API, for macOS, and `occt::outline` in Rust, held to the run's
+`Limits`.
+
+- **What it mirrors:**
+  - the transfer's roots (`XSControl_Reader::RootForTransfer`) and its child order (the NAUO
+    list `STEPControl_ActorRead::TransferEntity` builds from the graph's sharings);
+  - `STEPCAFControl_Reader::ReadNames`' naming: a product's name, else its id; an instance's
+    description, else name, else id;
+  - the kernel's own `walk` rules for which name a node shows.
+- **The contract** is the *product* level of `--topology`'s tree, `topology::products`. A product
+  the transfer splits into unnamed bodies (AP203's hybrid models: a solid plus a wireframe, or a
+  nested group of them) is one leaf. Shapeless products, such as dm1's materials, are left out,
+  as the transfer leaves them out. Leaf numbers count products, so the geometry's tree replaces
+  the outline when it arrives rather than renumbering it.
+- **Checked over the local corpus** (390 STEP files, malformed excluded, plus the 143 MB
+  Ultimaker file): **388 agree exactly** with `products()` of the full run's tree. The other two
+  are multi-file assemblies (`s1-c5-214`, `s1_pe_214`), whose sub-assemblies live in the files
+  they reference. The transfer reads those files; the outline reads only the one it is given.
+  That's deliberate, and documented in `outline.h`.
+- **Time:** Ultimaker 3 takes **4.6 s for the outline against 98.6 s** for the full run. Small
+  files take 0.05–0.2 s. The 221 MB stress assembly takes 5.1 s against 22 s, since the parse
+  itself is most of its cost.
+- **Next in #54:** the `SceneEvent` contract and progress, then a per-face healing budget
+  (#51), then caching only complete scenes; then the viewer and the CLI show the outline first.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:

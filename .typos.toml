@@ -28,6 +28,9 @@ mis = "mis"
 # surrounding prose stays spell-checked.
 CAF = "CAF"
 Caf = "Caf"
+# `TCollection_HAsciiString::UsefullLength()` (sic), used by kernel/outline.cpp
+# as OCCT's own readers do.
+Usefull = "Usefull"
 # freedesktop term (stepv, packaging/linux): a "thumbnailer" is the program a
 # file manager runs to make thumbnails; plural "thumbnailers", not "thumbnails".
 thumbnailers = "thumbnailers"
