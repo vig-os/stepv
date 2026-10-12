@@ -21,6 +21,11 @@ exception version 1.0:
 Corresponding source: https://github.com/Open-Cascade-SAS/OCCT/tree/V7_9_3
 (stepv uses it unmodified, as packaged by nixpkgs).
 
+stepv's kernel/heal.cpp configures OCCT's shape healing with the parameter
+set of OCCT's own fixshape() operator (ShapeProcess_OperLibrary.cxx, LGPL-2.1):
+the same parameter names, order and defaults. No OCCT source is compiled into
+stepv.
+
 OCCT is always DYNAMICALLY linked and kept in separate, replaceable files —
 never compiled into the `stepv` binary:
 
