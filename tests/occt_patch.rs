@@ -13,7 +13,7 @@ fn check() -> PathBuf {
     let k = stepv::occt::kernel_path().with_file_name("occt-patch-check");
     assert!(
         k.is_file(),
-        "occt-patch-check not built next to the kernel: {} (run `just kernel`)",
+        "occt-patch-check not built next to the kernel: {} (run `just kernel`, which configures -DSTEPV_BUILD_TESTS=ON)",
         k.display()
     );
     k

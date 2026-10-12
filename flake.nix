@@ -172,7 +172,12 @@
           src = ./kernel;
           nativeBuildInputs = [ pkgs.cmake ];
           buildInputs = [ occt ];
-          cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
+          # STEPV_BUILD_TESTS: occt-patch-check beside the kernel, for the
+          # nextest check's tests/occt_patch.rs (not shipped).
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+            "-DSTEPV_BUILD_TESTS=ON"
+          ];
           meta.description = "stepv's OCCT kernel: STEP/IGES/BREP to meshes, run as a subprocess";
         };
 
