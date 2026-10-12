@@ -38,7 +38,10 @@ const char* const kUsage =
     "  --stream  stdout is the run's events as frames (stepv_occt.h): the\n"
     "           outline, progress, then the summary, in place of its line\n"
     "  --outline  STEP only: the assembly tree and names, read without a\n"
-    "           shape transfer, as one JSON line (outline.h); no outputs\n";
+    "           shape transfer, as one JSON line (outline.h); no outputs\n"
+    "environment:\n"
+    "  STEPV_OCCT_FACE_BUDGET_MS  time one face's healing may take, in ms\n"
+    "           (default 2000); past it the face is drawn as its outline\n";
 
 // realpath(), or "" when it does not resolve.
 std::string canonical(const std::string& p) {

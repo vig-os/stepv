@@ -1143,6 +1143,61 @@ JSON object.
 
   The decoder's unit tests cover every truncation point and each rejection.
 
+### Per-face healing budget (#51, #54 step 3, 2026-10-12)
+
+OCCT's readers heal every transferred shape with the `FixShape` operator. On a file without
+p-curves that means projecting every edge onto each face it bounds, and on a few faces
+projection is pathological: two B-spline ribbon faces of Ultimaker 3 (2 × 1,079 poles) take
+about 25 s each, at about 350 ms per edge, while their twins on surfaces of the same size take
+1 s. `GeomProjLib::Curve2d` is no way out: 1.3 s per edge on the same faces.
+
+- **The mechanism (`kernel/heal.{h,cpp}`):**
+  - stepv registers its own `FixShape` before any reader exists. OCCT's registry keeps the
+    first operator registered under a name, and `install_face_budget()` checks that ours won.
+  - It sets `ShapeFix_Shape` up from the same context parameters as OCCT's operator. It is our
+    own table, not a copy of OCCT's source: stepv is Apache-2.0, and OCCT is used unmodified.
+  - It fixes the faces itself, one at a time, as `ShapeFix_Shell` and `ShapeFix_Shape` do: shell
+    by shell, then free faces with the two modes `ShapeFix_Shape` sets for one.
+  - The edge tool's projector is a subclass with a clock. It is set through a member pointer,
+    since `myProjector` is protected and has no setter.
+  - Once a face has spent `STEPV_OCCT_FACE_BUDGET_MS` (default 2000) projecting, the next edge
+    throws `stepv::BudgetSpent`. That is not a `Standard_Failure`, so OCCT's handlers let it pass
+    and it abandons the whole face fix.
+  - The face is taken out through the shared `ShapeBuild_ReShape`. Then `ShapeFix_Shape` runs
+    with face fixing off, for the shells and solids.
+- **Why the face must leave the shape:** caught as an ordinary failed projection, the face would
+  stay in its solid without p-curves, and `ShapeFix_Solid::SolidFromShell`'s classification
+  dereferences the missing curve. That is a segfault, not an exception.
+- **The unhealed faces come back** as loose faces in a compound beside the healed shape, and are
+  recorded. The mesher draws each as its outline (`Missing`), without the recovery ladder, and
+  counts it in `faces_over_budget`. The topology still numbers it: loose faces come after the
+  solid's. The ladder's ShapeFix rung carries the same budget.
+- **Measured on Ultimaker 3:**
+
+  | | before | after |
+  | --- | ---: | ---: |
+  | wall | 100.7 s | 42.3 s |
+  | transfer | 92.2 s | 34.2 s |
+  | faces over budget | — | 4 |
+  | peak RSS | 1.56 GB | 1.52 GB |
+
+  It is still 523/523 parts named and coloured, with 62,011 faces and 1.24M triangles.
+- **The corpus is unchanged:** all 401 files give an identical summary, field for field, against
+  `origin/main`'s kernel, and transfer times match.
+- **Still over the CLI's 20 s:** the transfer's remaining time is mostly OCCT's wire
+  self-intersection check. It walks a linked sequence by index (`NCollection_BaseSequence::Find`
+  under `ShapeExtend_WireData::Edge`, quadratic in edges per wire), then ordinary projection
+  (`Extrema_GenExtPS::BuildGrid`), and about 49 s of system time in allocation. Neither is a slow
+  face, so the budget rightly doesn't cover them. Next would be per-solid parallel healing with
+  `MMGT_OPT=0` (#54 review); until then the front-ends show the outline and progress (#54).
+- **Tests:** `tests/heal.rs`, on `tests/data/no-pcurves.step` (the bracket assembly written
+  without p-curves):
+  - the default budget heals and meshes it all, colours intact;
+  - a zero budget leaves exactly its two cylinders unhealed, drawn as outlines, with the faces,
+    names and colours all still there;
+  - a file that carries its p-curves spends nothing;
+  - a budget that isn't a number is the default.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:

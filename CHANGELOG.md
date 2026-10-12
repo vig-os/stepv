@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A time budget for healing each face** ([#51](https://github.com/vig-os/stepv/issues/51)):
+  a file written without p-curves (SolidWorks writes none) has the reader rebuild every edge's
+  2D curve on each face by projection, and on a few faces that is very slow. The kernel now heals
+  faces one at a time with a clock on each, `STEPV_OCCT_FACE_BUDGET_MS` (default 2000). A face
+  past it is left unhealed and drawn as its outline (Missing), and the summary counts it in
+  `faces_over_budget`. On the Ultimaker 3 assembly four ribbon faces go over: the run takes
+  42 s instead of 101 s (transfer 34 s instead of 92 s), with all 523 parts still
+  named and coloured
+  - stepv registers its own `FixShape` operator ahead of OCCT's, set up from the same reader
+    parameters; outside the budget it heals as before
+  - The recovery ladder's ShapeFix rung has the same budget
 - **Streamed runs: the outline, then progress, then the summary** ([#54](https://github.com/vig-os/stepv/issues/54)):
   `stepv-occt --stream` writes a run's events to stdout as frames in place of its one JSON line.
   A STEP file's outline arrives once the file is parsed, from the same parse the run uses; then

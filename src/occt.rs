@@ -55,6 +55,11 @@ pub struct Summary {
     pub faces_degenerate: usize,
     pub faces_approx: usize,
     pub faces_missing: usize,
+    /// Of `faces_missing`: faces whose healing ran past its time budget
+    /// (#51, `STEPV_OCCT_FACE_BUDGET_MS`) and was left undone. Absent from
+    /// older kernels.
+    #[serde(default)]
+    pub faces_over_budget: usize,
     /// Faceless parts in a file with no faces at all: drawn as curves.
     pub sketch_parts: usize,
     /// Faceless parts beside solids: construction geometry.

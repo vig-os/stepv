@@ -7,6 +7,9 @@
 //
 //   assembly.step  an assembly: a plate with a hole (blue, top face red) and
 //                  two instances of one pin (orange), all named
+//   no-pcurves.step  the same assembly with no p-curves: every edge only
+//                  in 3D, as SolidWorks writes them (#51), so the reader's
+//                  healing must project each onto its faces
 //   multifile/     the same assembly as a multi-file STEP: bracket.step holds
 //                  the structure, and each part is a sibling file it
 //                  references (the CAx-IF s1-c5-214 / SolidWorks export style)
@@ -103,6 +106,18 @@ bool step_assembly(const std::string& path) {
     return w.Transfer(bracket(), STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
 }
 
+// Without SURFACE_CURVE/PCURVE entities: the 2D curves are left for the
+// reader to rebuild by projection, the cost #51 budgets.
+bool step_no_pcurves(const std::string& path) {
+    Interface_Static::SetIVal("write.surfacecurve.mode", 0);
+    STEPCAFControl_Writer w;
+    w.SetColorMode(true);
+    w.SetNameMode(true);
+    const bool ok = w.Transfer(bracket(), STEPControl_AsIs) && w.Write(path.c_str()) == IFSelect_RetDone;
+    Interface_Static::SetIVal("write.surfacecurve.mode", 1);
+    return ok;
+}
+
 // Multi-file mode: the parts go to sibling files named after their labels.
 bool step_multifile(const std::string& path) {
     // The writer puts the part files in the working directory and references
@@ -164,6 +179,7 @@ int main(int argc, char** argv) {
         const char* name;
         bool (*make)(const std::string&);
     } jobs[] = {{"assembly.step", step_assembly},
+                {"no-pcurves.step", step_no_pcurves},
                 {"multifile/bracket.step", step_multifile},
                 {"sketch.step", step_sketch},
                 {"box.igs", iges_box},

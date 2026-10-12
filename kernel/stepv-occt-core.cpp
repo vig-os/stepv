@@ -62,7 +62,8 @@
 //                 and nothing missing either (an exporter's sliver)
 //   6 Approx      the mesher gave up; triangles are a UV-grid SAMPLE of the
 //                 surface clipped to the face. Shape is right, edges jagged
-//   7 Missing     nothing worked; no triangles, only the outline
+//   7 Missing     nothing worked; no triangles, only the outline. Also a face
+//                 whose healing ran past its time budget (heal.h): not tried
 // The order is severity: a part's worst face is its maximum status.
 //
 // LineKind: 0 = curve of a part with no faces, in a file with NO faces at
@@ -74,6 +75,7 @@
 //
 // src/occt.rs is the reader; keep the two in step.
 
+#include "heal.h"
 #include "json.h"
 #include "measure.h"
 #include "stepv_occt.h"
@@ -184,6 +186,8 @@ struct Summary {
     // Where each first-pass failure ended up on the recovery ladder.
     std::size_t faces_remeshed = 0, faces_healed = 0, faces_refined = 0, faces_coarse = 0,
                 faces_degenerate = 0, faces_approx = 0, faces_missing = 0;
+    // Of faces_missing: left unhealed by the per-face budget (heal.h, #51).
+    std::size_t faces_over_budget = 0;
     std::size_t sketch_parts = 0;        // faceless parts in a file with no faces
     std::size_t construction_parts = 0;  // faceless parts beside solids
     std::size_t vertices = 0;
@@ -236,7 +240,8 @@ std::string to_json(const Summary& s) {
       << ",\"faces_remeshed\":" << s.faces_remeshed << ",\"faces_healed\":" << s.faces_healed
       << ",\"faces_refined\":" << s.faces_refined << ",\"faces_coarse\":" << s.faces_coarse
       << ",\"faces_degenerate\":" << s.faces_degenerate << ",\"faces_approx\":" << s.faces_approx
-      << ",\"faces_missing\":" << s.faces_missing << ",\"sketch_parts\":" << s.sketch_parts
+      << ",\"faces_missing\":" << s.faces_missing
+      << ",\"faces_over_budget\":" << s.faces_over_budget << ",\"sketch_parts\":" << s.sketch_parts
       << ",\"construction_parts\":" << s.construction_parts;
     o << ",\"vertices\":" << s.vertices << ",\"triangles\":" << s.triangles
       << ",\"segments\":" << s.segments << ",\"edges\":" << s.edges;
@@ -562,6 +567,17 @@ bool degenerate(const TopoDS_Face& face, double diagonal) {
     return std::abs(g.Mass()) < 1e-8 * diagonal * diagonal;
 }
 
+// The outline of a face with no triangles: its edges, so the hole is drawn,
+// not hidden.
+FaceGeom missing(const TopoDS_Face& face, const IMeshTools_Parameters& p, Summary& s) {
+    FaceGeom g;
+    g.status = kMissing;
+    ++s.faces_missing;
+    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next())
+        discretize_edge(TopoDS::Edge(ex.Current()), p.Deflection, p.Angle, g.outline);
+    return g;
+}
+
 // Runs the ladder for a face the first pass left without triangles.
 FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double diagonal,
                  Summary& s) {
@@ -578,6 +594,7 @@ FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double
     // 2. ShapeFix the copy (it may split the face), then mesh.
     try {
         Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(isolated_copy(face));
+        stepv::budget(*fix);
         fix->Perform();
         if (mesh_and_take(fix->Shape(), p, g)) {
             g.status = kHealed;
@@ -585,6 +602,8 @@ FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double
             return g;
         }
     } catch (const Standard_Failure&) {
+    } catch (const stepv::BudgetSpent&) {
+        // The copy's healing ran out of time (heal.h): on to the next rung.
     }
     // 3. Deflection relative to the face itself, not the model. Recovers faces
     //    thousands of times smaller than the model, and boundaries that only
@@ -631,13 +650,8 @@ FaceGeom recover(const TopoDS_Face& face, const IMeshTools_Parameters& p, double
         ++s.faces_approx;
         return g;
     }
-    // 6. Give up on area; keep the outline so the hole is drawn, not hidden.
-    g = FaceGeom{};
-    g.status = kMissing;
-    ++s.faces_missing;
-    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next())
-        discretize_edge(TopoDS::Edge(ex.Current()), p.Deflection, p.Angle, g.outline);
-    return g;
+    // 6. Give up on area; keep the outline.
+    return missing(face, p, s);
 }
 
 using FaceCache = NCollection_DataMap<TopoDS_Shape, FaceGeom, TopTools_ShapeMapHasher>;
@@ -747,7 +761,13 @@ ProtoGeom prototype_geometry(const TopoDS_Shape& shape, const IMeshTools_Paramet
             continue;
         }
         FaceGeom g;
-        if (has_triangles(face)) {
+        if (stepv::over_face_budget(face)) {
+            // Unhealed: its edges lack the 2D curves any meshing needs, and
+            // the ladder's ShapeFix would spend the budget's time again.
+            ++s.faces_unmeshed;
+            ++s.faces_over_budget;
+            g = missing(face, p, s);
+        } else if (has_triangles(face)) {
             append_triangulation(face, g);
         } else {
             ++s.faces_unmeshed;
@@ -959,6 +979,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
         return kExitFailed;
     }
     const std::string input = resolved;
+    stepv::begin_face_budget();
 
     // Off, so "parts_named" counts names an exporter wrote, not ones OCCT
     // invents ("SOLID", "COMPOUND") for unnamed shapes.
@@ -1209,6 +1230,7 @@ extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
     std::call_once(quiet, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     });
+    stepv::install_face_budget();
 
     Summary s;
     Events ev;
@@ -1240,6 +1262,8 @@ extern "C" void stepv_occt_free(char* p) { std::free(p); }
 
 extern "C" char* stepv_occt_outline(const char* input, int* exit_code) {
     std::lock_guard<std::mutex> lock(serial());
+    // Before its reader: OCCT keeps the FixShape registered first (heal.h).
+    stepv::install_face_budget();
     std::string json;
     int code = kExitFailed;
     try {
@@ -1280,6 +1304,7 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
     std::call_once(*new std::once_flag, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     });
+    stepv::install_face_budget();
     const std::string sb = stepv::json_escape(sandbox ? sandbox : "");
     Summary s;
     // The model, as run() reads it, but not meshed: a query needs the exact
@@ -1302,6 +1327,7 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
             Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
             Handle(TDocStd_Document) doc;
             app->NewDocument("BinXCAF", doc);
+            stepv::begin_face_budget();
             if (read_into(resolved, doc, s, Events{})) {
                 Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
                 Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
