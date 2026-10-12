@@ -1756,6 +1756,78 @@ memory is freed at once. Two designs failed before this one:
   requests through the real extensions. The deadline values and their reasoning will be added
   here.
 
+### #74 OCCT patch (2026-10-12)
+
+The healing budget's measurement left most of Ultimaker 3's transfer in OCCT's wire self-intersection check. The
+cause is one loop. `ShapeFix_IntersectionTool::FixSelfIntersectWire` fetched `edge1 =
+sewd->Edge(num1)` inside its inner `num2` loop. `NCollection_BaseSequence::Find` caches only the
+last position, so fetching `num1` and `num2` in turn walked the sequence back and forth on every
+pair. The function was O(n³) in a wire's edges.
+
+- **The patch:** `nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch`. `flake.nix` applies
+  it to nixpkgs' OCCT 7.9.3 (`occt`). The dev shell (`just kernel`, the macOS app's dylibs) and
+  the kernel derivation (the Linux tarball, `nix flake check`) both link that OCCT.
+  - It fetches `edge1` once per `num1`. It fetches it again after the big-segment branch's
+    `Remove(numseg2); Remove(numseg1)`, the one branch that changes the wire at `num1` and does
+    not leave the inner loop (its `num1--; break;` is commented out). Without that re-fetch the
+    hoist is wrong.
+  - A patch that does not apply fails the build. A different OCCT version fails evaluation, so a
+    nixpkgs bump must re-check the patch.
+  - The modified file carries a dated notice. NOTICE describes the change and its licence.
+- **Is `Edge(num1)` in range after the removals?** Yes, always, so it needs no guard.
+  `numseg2 >= num2 + dnum1 >= num1 + 2 + dnum1` and `numseg1 <= num1 + dnum1`, so after both
+  removals `NbEdges() >= num1 + dnum1 >= num1`. The original fetched only on the next iteration,
+  after checking `num2 <= NbEdges()`. The early fetch reads the same edge and changes nothing but
+  the sequence's position cache.
+- **The other changes to the wire leave position `num1` alone:**
+  - splits at `num2` (`SplitEdge1`/`2`, `FindVertAndSplitEdge`);
+  - `UnionVertexes`, which writes `num2 ± 1`. That is never `num1`, because `num2 >= num1 + 2` and
+    the pair `(1, NbEdges)` is skipped;
+  - `CutEdge`, which changes the shared `TShape` in place.
+
+  Every other split at `num1` leaves the loop.
+- **Evidence:**
+  - **The gate (issue #74):** 214k fuzzed wires, 173,459 real healing calls on the corpus and
+    37,339 on Ultimaker, all with 0 differences. A hoist without the re-fetch differs on about
+    56k of the fuzzed wires.
+  - **Here:** the corpus summaries are identical, Ultimaker's output matches, and the timings
+    are below.
+- **Corpus:** `corpus-diff.py`, comparing `origin/main`'s kernel with this branch's, found 0 of
+  401 files differ.
+- **Measured on Ultimaker 3:** two runs each, one after the other, on sage.
+
+  | | before | after |
+  | --- | ---: | ---: |
+  | read | 4.9 s, 4.8 s | 4.9 s, 4.8 s |
+  | transfer | 36.4 s, 35.0 s | 28.8 s, 28.8 s |
+  | mesh | 4.2 s, 4.2 s | 4.2 s, 4.3 s |
+  | wall | 48.7 s, 44.3 s | 41.2 s, 38.3 s |
+  | faces over budget | 4 | 4 |
+
+  The mesh and the topology files are byte-identical. The whole file saves 6 to 7.5 s, much less
+  than the gate's 25.5 s → 3.8 s summed over its hottest wire. The transfer's remaining time is
+  mostly projection and allocation (see "Per-face healing budget" above), and #73 (parallel
+  healing) addresses it.
+- **Tests:** `tests/occt_patch.rs` runs `kernel/occt-patch-check`, which is built beside the
+  kernel against the same OCCT.
+  - **Scaling.** The fix time of a convex 800-gon and of a 3,200-gon gives a growth exponent:
+    3.00 to 3.06 unpatched, 2.00 to 2.01 patched. The test requires < 2.5. It is a ratio of two CPU times in one
+    process, not a wall-clock threshold. A deterministic count is not possible from outside the
+    library: the cost is the sequence walk inside `Find`, and OCCT's public API cannot see it.
+  - **Equality.** 200 generated self-intersecting wires (splitmix64, the same on every platform)
+    must fix exactly as `tests/occt-patch/wires.txt` records. That file was recorded with the
+    unpatched OCCT. 91 of the wires reach the big-segment branch. The gate's hoist without the
+    re-fetch changes 39 of them.
+- **Not patched:** `scripts/test-linux-sandbox.sh` and `scripts/test-linux-viewer.sh` build the
+  kernel in Debian containers against Debian's packaged OCCT, as before. They test the sandbox
+  and the viewer, never ship, and do not run `tests/occt_patch.rs`. The patch changes only
+  time, so their results do not depend on it. A source build (`cmake -S kernel`, crates.io) uses
+  whatever OCCT the user has.
+- **Dropping the patch:** remove it once an OCCT release that stepv builds against carries the
+  fix. Upstream `master` still fetches inside the loop (checked 2026-10-12). Filing it upstream is
+  the step after this merge. When the patch goes, keep `tests/occt_patch.rs`: it then checks
+  upstream's fix.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
