@@ -221,6 +221,58 @@ pub fn run(
         cmd.arg("--topology").arg(out);
     }
 
+    let Supervised {
+        status,
+        over_memory,
+        stdout: text,
+        wall,
+    } = supervise(cmd, limits)?;
+    let summary: Option<Summary> = text
+        .lines()
+        .next()
+        .and_then(|l| serde_json::from_str(l).ok());
+
+    let outcome = match status {
+        None if over_memory => Outcome::MemoryCap,
+        None => Outcome::Timeout,
+        Some(s) => match s.code() {
+            Some(0) => Outcome::Ok,
+            // The OS refusing an allocation (std::bad_alloc in the kernel)
+            // surfaces as a clean "out of memory" summary: a memory limit,
+            // just the machine's rather than ours.
+            Some(3)
+                if summary
+                    .as_ref()
+                    .is_some_and(|s| s.error.as_deref() == Some("out of memory")) =>
+            {
+                Outcome::MemoryCap
+            }
+            Some(3) => Outcome::Failed,
+            code => Outcome::Crashed {
+                signal: s.signal(),
+                code,
+            },
+        },
+    };
+    Ok(Run {
+        outcome,
+        summary,
+        wall,
+    })
+}
+
+/// How a supervised kernel process ended.
+struct Supervised {
+    /// `None`: killed, at the wall clock or the memory cap.
+    status: Option<std::process::ExitStatus>,
+    over_memory: bool,
+    stdout: String,
+    wall: Duration,
+}
+
+/// Spawns `cmd` (stdout piped) and holds it to `limits`: killed past the wall
+/// clock, or once its footprint passes the cap (polled every 5 ms).
+fn supervise(mut cmd: Command, limits: Limits) -> std::io::Result<Supervised> {
     let start = Instant::now();
     let mut child = cmd.spawn()?;
     // Drain stdout on a thread so a chatty kernel can never fill the pipe and
@@ -257,38 +309,111 @@ pub fn run(
         std::thread::sleep(Duration::from_millis(2));
     };
     let wall = start.elapsed();
-    let text = reader.join().unwrap_or_default();
-    let summary: Option<Summary> = text
+    Ok(Supervised {
+        status,
+        over_memory,
+        stdout: reader.join().unwrap_or_default(),
+        wall,
+    })
+}
+
+/// A STEP file's assembly outline (#54, `kernel/outline.h`): the tree and
+/// names of its products, read from the product structure alone, so it
+/// arrives in the time the file takes to parse rather than after the
+/// transfer.
+///
+/// It is [`crate::topology::products`] of the tree `--topology` writes after
+/// the full run: the same products, names and order, with a product the
+/// transfer splits into unnamed bodies as one leaf. The geometry's tree
+/// replaces it when it arrives. A multi-file assembly's products in other
+/// files are leaves: only the given file is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    /// The roots, in file order; a leaf's `part` numbers the outline's
+    /// leaves (products), not the mesh's parts.
+    pub tree: Vec<crate::topology::Node>,
+    /// How many leaves the tree has.
+    pub leaves: usize,
+}
+
+/// Why there is no outline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineError(pub String);
+
+impl std::fmt::Display for OutlineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutlineError {}
+
+/// Reads the assembly outline of the STEP file `input` (`stepv-occt
+/// --outline`), held to `limits` like a run.
+///
+/// # Errors
+/// When `input` is not STEP, does not read, or the kernel cannot be spawned,
+/// times out, passes the memory cap, crashes, or answers something that is
+/// not a valid outline (leaves not numbered `0..leaves` in order).
+pub fn outline(kernel: &Path, input: &Path, limits: Limits) -> Result<Outline, OutlineError> {
+    #[derive(Deserialize)]
+    struct Wire {
+        format: Option<String>,
+        version: Option<u32>,
+        tree: Option<Vec<crate::topology::Node>>,
+        leaves: Option<usize>,
+        error: Option<String>,
+    }
+    let mut cmd = Command::new(kernel);
+    cmd.env_remove("LD_LIBRARY_PATH");
+    cmd.arg(input)
+        .arg("--outline")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let s =
+        supervise(cmd, limits).map_err(|e| OutlineError(format!("cannot start kernel: {e}")))?;
+    let fail = |m: &str| Err(OutlineError(m.to_owned()));
+    let Some(status) = s.status else {
+        return fail(if s.over_memory {
+            "memory cap exceeded"
+        } else {
+            "wall-clock cap exceeded"
+        });
+    };
+    let wire: Option<Wire> = s
+        .stdout
         .lines()
         .next()
         .and_then(|l| serde_json::from_str(l).ok());
-
-    let outcome = match status {
-        None if over_memory => Outcome::MemoryCap,
-        None => Outcome::Timeout,
-        Some(s) => match s.code() {
-            Some(0) => Outcome::Ok,
-            // The OS refusing an allocation (std::bad_alloc in the kernel)
-            // surfaces as a clean "out of memory" summary: a memory limit,
-            // just the machine's rather than ours.
-            Some(3)
-                if summary
-                    .as_ref()
-                    .is_some_and(|s| s.error.as_deref() == Some("out of memory")) =>
-            {
-                Outcome::MemoryCap
-            }
-            Some(3) => Outcome::Failed,
-            code => Outcome::Crashed {
-                signal: s.signal(),
-                code,
-            },
-        },
+    let Some(wire) = wire else {
+        return fail(&format!("kernel answered no outline ({status})"));
     };
-    Ok(Run {
-        outcome,
-        summary,
-        wall,
+    if let Some(e) = wire.error {
+        return Err(OutlineError(e));
+    }
+    let (Some("stepv-outline"), Some(1), Some(tree), Some(count)) =
+        (wire.format.as_deref(), wire.version, wire.tree, wire.leaves)
+    else {
+        return fail("not a stepv-outline version 1");
+    };
+    // The leaves are numbered 0, 1, ... in tree order.
+    fn leaves(n: &crate::topology::Node, out: &mut Vec<usize>) {
+        match n {
+            crate::topology::Node::Part { part, .. } => out.push(*part),
+            crate::topology::Node::Assembly { children, .. } => {
+                children.iter().for_each(|c| leaves(c, out));
+            }
+        }
+    }
+    let mut seen = Vec::new();
+    tree.iter().for_each(|n| leaves(n, &mut seen));
+    if !seen.iter().copied().eq(0..count) {
+        return fail("outline leaves are not numbered in order");
+    }
+    Ok(Outline {
+        tree,
+        leaves: count,
     })
 }
 

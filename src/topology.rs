@@ -24,7 +24,7 @@ pub struct Topology {
 }
 
 /// One node of the assembly tree.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum Node {
     /// A leaf: `parts[part]`.
@@ -147,6 +147,44 @@ impl std::fmt::Display for TopologyError {
 
 impl std::error::Error for TopologyError {}
 
+/// The product-level tree of `tree`: every assembly with nothing named
+/// anywhere below it (one product the transfer split into several bodies, as
+/// AP203's hybrid models are, sometimes nested a level) becomes one leaf
+/// with its name, and the leaves are renumbered `0..` in order. This is what
+/// [`crate::occt::Outline`] promises to equal.
+#[must_use]
+pub fn products(tree: &[Node]) -> Vec<Node> {
+    fn unnamed(n: &Node) -> bool {
+        match n {
+            Node::Part { name, .. } => name.is_empty(),
+            Node::Assembly { name, children } => name.is_empty() && children.iter().all(unnamed),
+        }
+    }
+    fn go(n: &Node, next: &mut usize) -> Node {
+        let leaf = |name: &str, next: &mut usize| {
+            *next += 1;
+            Node::Part {
+                name: name.to_owned(),
+                part: *next - 1,
+            }
+        };
+        match n {
+            Node::Part { name, .. } => leaf(name, next),
+            Node::Assembly { name, children }
+                if !children.is_empty() && children.iter().all(unnamed) =>
+            {
+                leaf(name, next)
+            }
+            Node::Assembly { name, children } => Node::Assembly {
+                name: name.clone(),
+                children: children.iter().map(|c| go(c, next)).collect(),
+            },
+        }
+    }
+    let mut next = 0;
+    tree.iter().map(|n| go(n, &mut next)).collect()
+}
+
 impl Topology {
     /// Parses and validates a kernel topology file: version, and every index
     /// in range.
@@ -226,6 +264,51 @@ impl Topology {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree(json: &str) -> Vec<Node> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_product_split_into_unnamed_bodies_is_one_product() {
+        // NIST's hybrid AP203 parts: a solid and a wireframe under one name.
+        let t = tree(r#"[{"name":"ctc","children":[{"name":"","part":0},{"name":"","part":1}]}]"#);
+        assert_eq!(products(&t), tree(r#"[{"name":"ctc","part":0}]"#));
+    }
+
+    #[test]
+    fn products_renumber_the_leaves_and_keep_real_assemblies() {
+        // as1: a split PLATE beside a real sub-assembly of named parts.
+        let t = tree(
+            r#"[{"name":"as1","children":[
+                {"name":"PLATE","children":[{"name":"","part":0},{"name":"","part":1}]},
+                {"name":"NUT_BOLT","children":[{"name":"BOLT","part":2},{"name":"NUT","part":3}]}]}]"#,
+        );
+        assert_eq!(
+            products(&t),
+            tree(
+                r#"[{"name":"as1","children":[{"name":"PLATE","part":0},
+                    {"name":"NUT_BOLT","children":[{"name":"BOLT","part":1},{"name":"NUT","part":2}]}]}]"#
+            )
+        );
+    }
+
+    #[test]
+    fn unnamed_bodies_nested_a_level_are_still_one_product() {
+        // NIST CTC 02 (AP242): a body, an unnamed group of two, a body.
+        let t = tree(
+            r#"[{"name":"ctc2","children":[{"name":"","part":0},
+                {"name":"","children":[{"name":"","part":1},{"name":"","part":2}]},
+                {"name":"","part":3}]}]"#,
+        );
+        assert_eq!(products(&t), tree(r#"[{"name":"ctc2","part":0}]"#));
+    }
+
+    #[test]
+    fn an_assembly_with_one_named_child_is_not_collapsed() {
+        let t = tree(r#"[{"name":"a","children":[{"name":"","part":0},{"name":"pin","part":1}]}]"#);
+        assert_eq!(products(&t), t);
+    }
 
     const ONE_BOX: &str = r#"{"format":"stepv-topology","version":1,"units":"mm",
         "tree":[{"name":"assy","children":[{"name":"box","part":0}]}],

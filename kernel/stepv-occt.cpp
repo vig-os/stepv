@@ -30,7 +30,9 @@ const char* const kUsage =
     "                  [--linear-rel <f>] [--angular-deg <f>]\n"
     "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n"
     "  --serve  read the file once, then answer measurement queries, one JSON\n"
-    "           line each, on stdin/stdout (measure.h); no outputs\n";
+    "           line each, on stdin/stdout (measure.h); no outputs\n"
+    "  --outline  STEP only: the assembly tree and names, read without a\n"
+    "           shape transfer, as one JSON line (outline.h); no outputs\n";
 
 // realpath(), or "" when it does not resolve.
 std::string canonical(const std::string& p) {
@@ -127,7 +129,7 @@ void escape_attempt(const std::string& spec) {
 
 int main(int argc, char** argv) {
     std::string input, mesh_out, topology_out;
-    bool edges = false, serve = false;
+    bool edges = false, serve = false, outline = false;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -142,6 +144,7 @@ int main(int argc, char** argv) {
         else if (a == "--topology") topology_out = value();
         else if (a == "--edges") edges = true;
         else if (a == "--serve") serve = true;
+        else if (a == "--outline") outline = true;
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -150,6 +153,12 @@ int main(int argc, char** argv) {
         else { std::fputs(kUsage, stderr); return kExitUsage; }
     }
     if (input.empty() || !(linear_rel > 0) || !(angular_deg > 0)) {
+        std::fputs(kUsage, stderr);
+        return kExitUsage;
+    }
+    // --serve and --outline write nothing and exclude each other: refused
+    // here, before any output file is created (and so truncated).
+    if ((serve || outline) && (serve == outline || !mesh_out.empty() || !topology_out.empty())) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
     }
@@ -231,8 +240,18 @@ int main(int argc, char** argv) {
     if (serve) {
         // Sandboxed like a run, with nothing writable: queries in, answers
         // out, on the descriptors it already has.
-        if (!mesh_out.empty() || !topology_out.empty()) return kExitUsage;
         return stepv_occt_serve(input.c_str(), sandbox.c_str(), STDIN_FILENO, json_fd);
+    }
+    if (outline) {
+        // Sandboxed like --serve, with nothing writable: one JSON line out.
+        int code = 3;
+        char* json = stepv_occt_outline(input.c_str(), &code);
+        if (!json) return 3;
+        std::string line = json;
+        stepv_occt_free(json);
+        line += "\n";
+        if (write(json_fd, line.data(), line.size()) < 0) return 3;
+        return code;
     }
     int code = 3;
     char* json = stepv_occt_run_ex(input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
