@@ -1118,6 +1118,13 @@ JSON object.
   - Outcomes: a kill (wall clock, memory) keeps the events that arrived and has **no summary**,
     so nothing downstream can mistake it for a complete scene. A kernel that exits with a broken
     stream is `Crashed`, whatever its exit code.
+- **Edges of the contract (from the review):**
+  - A stage's first and last progress events are never dropped (`Progress::droppable`), so a slow reader's bar still reaches its end. A run that fails partway leaves its stage unfinished.
+  - The kernel leaves out an outline over `STEPV_OCCT_MAX_FRAME`, rather than send a frame the reader would refuse.
+  - A killed run has no summary, even when the summary was read before the kill landed.
+  - `supervise()` kills and reaps the kernel on every way out, including a panicking callback.
+  - `--stream` ignores SIGPIPE, so a reader that hangs up produces a failed write rather than a signal.
+  - The outline's parse counts against the same `Limits.timeout`, so a run close to its cap can time out when streamed and not when plain.
 - **Measured on Ultimaker 3:** the tree arrives at 4.3 s and the summary at 101 s, in 101 frames.
   Transfer progress reaches 15.6% by 15 s and then **does not move for 80 s**. OCCT's indicator
   does not advance inside one solid's shape healing, and solid 221's p-curve projection is that

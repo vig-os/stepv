@@ -38,13 +38,15 @@ void stepv_occt_free(char* p);
 //
 //   STEPV_OCCT_EVENT_TREE      the outline, as stepv_occt_outline returns it,
 //                              right after the file is parsed. STEP only, and
-//                              left out when the outline itself fails: the
-//                              run goes on without it.
+//                              left out when the outline itself fails or is
+//                              over STEPV_OCCT_MAX_FRAME: the run goes on
+//                              without it.
 //   STEPV_OCCT_EVENT_PROGRESS  {"stage": "transfer"|"mesh", "done": k,
 //                              "total": n}. Stages in that order; within one,
 //                              done never falls and ends at total. transfer
 //                              counts thousandths of OCCT's own progress,
-//                              mesh counts two passes over the prototypes.
+//                              mesh counts two passes over the prototypes. A
+//                              run that fails in a stage leaves it unfinished.
 //                              At most one per stage every 50 ms, besides the
 //                              first and the last.
 //   STEPV_OCCT_EVENT_DONE      the summary. Never passed to the callback: it
@@ -55,14 +57,18 @@ void stepv_occt_free(char* p);
 //
 // `stepv-occt --stream` writes these to stdout as frames, in place of the
 // one JSON line: "SVEV", the kind as one byte, the payload's length as a
-// little-endian u32, the payload. The last frame is DONE (the summary, with
-// "sandbox" as on the line); a stream that ends without it is a crash.
+// little-endian u32, the payload, of at most STEPV_OCCT_MAX_FRAME bytes. The
+// last frame is DONE (the summary, with "sandbox" as on the line); a stream
+// that ends without it is a crash.
+#define STEPV_OCCT_MAX_FRAME (64UL << 20)
 #define STEPV_OCCT_EVENT_TREE 1
 #define STEPV_OCCT_EVENT_PROGRESS 2
 #define STEPV_OCCT_EVENT_DONE 3
 
-// Called on the thread running the call, with the payload valid for the
-// call alone. It must not call back into the kernel.
+// Called one call at a time, though not always on the thread running the
+// run: transfer progress comes from whichever thread OCCT advances it on.
+// The payload is valid for the call alone. It must not call back into the
+// kernel.
 typedef void (*stepv_occt_event_fn)(void* ctx, int kind, const char* payload,
                                     unsigned long length);
 

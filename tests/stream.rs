@@ -253,3 +253,35 @@ fn stream_refuses_serve_and_outline() {
         assert!(out.stdout.is_empty(), "--stream {flag}");
     }
 }
+
+#[test]
+fn a_slow_reader_still_sees_every_stage_finish() {
+    // A front-end busy building its tree UI when the outline arrives.
+    let mut events = Vec::new();
+    let run = occt::run_streaming(
+        &kernel(),
+        &data("assembly.step"),
+        Deflection::PREVIEW,
+        limits(),
+        None,
+        None,
+        false,
+        &mut |e| {
+            if matches!(e, Event::Tree(_)) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            events.push(e);
+        },
+    )
+    .unwrap();
+    assert_eq!(run.outcome, Outcome::Ok, "{:?}", run.summary);
+    assert_monotonic(&events);
+    for stage in [Stage::Transfer, Stage::Mesh] {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Progress(p) if p.stage == stage && p.done == p.total)),
+            "{stage:?} never finished: {events:?}"
+        );
+    }
+}

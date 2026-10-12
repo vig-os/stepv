@@ -295,7 +295,8 @@ struct Events {
 };
 
 // OCCT's own progress through a transfer, in thousandths. Show() is called
-// under the indicator's lock, so from one thread at a time.
+// under the indicator's lock: one thread at a time, though not necessarily
+// the run's, so Events' state is only ever touched serially.
 class TransferProgress : public Message_ProgressIndicator {
 public:
     explicit TransferProgress(const Events& ev) : ev_(ev) {}
@@ -882,7 +883,8 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
             } catch (const Standard_Failure&) {
             } catch (const std::exception&) {
             }
-            if (!outline.empty()) ev.emit(STEPV_OCCT_EVENT_TREE, outline);
+            if (!outline.empty() && outline.size() <= STEPV_OCCT_MAX_FRAME)
+                ev.emit(STEPV_OCCT_EVENT_TREE, outline);
         }
         s.stage = "transfer";
         t0 = Clock::now();

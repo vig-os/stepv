@@ -301,6 +301,9 @@ int main(int argc, char** argv) {
         return code;
     }
     int code = 3;
+    // A reader that hangs up mid-stream makes the next write fail (EPIPE)
+    // rather than kill the run outright.
+    if (stream) std::signal(SIGPIPE, SIG_IGN);
     Wire wire{json_fd, true};
     char* json = stepv_occt_run_stream(
         input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),

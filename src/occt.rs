@@ -231,8 +231,13 @@ pub fn run(
 /// that arrived and has no summary: it is not complete, whatever arrived. A
 /// kernel that exits with a stream that breaks the contract ([`read_events`])
 /// has crashed, whatever its exit code says. Progress is coalesced: when
-/// `on_event` falls behind, intermediate progress events are dropped, never
-/// the outline or the order.
+/// `on_event` falls behind, progress within a stage is dropped, but never a
+/// stage's first or last event ([`Progress::droppable`]), the outline or the
+/// order.
+///
+/// The outline costs the run its parse time again inside `limits.timeout`
+/// (about 5% of a large assembly's run): a run near its cap can time out
+/// streamed and not plain.
 ///
 /// # Errors
 /// Only when the kernel cannot be spawned at all, as [`run`].
@@ -254,11 +259,12 @@ pub fn run_streaming(
         cmd,
         limits,
         move |out| {
+            let mut stage = None;
             read_events(BufReader::new(out), |e| match e {
-                Event::Progress(_) => {
+                Event::Progress(p) if p.droppable(&mut stage) => {
                     let _ = tx.try_send(e);
                 }
-                Event::Tree(_) => {
+                e => {
                     let _ = tx.send(e);
                 }
             })
@@ -278,6 +284,8 @@ pub fn run_streaming(
             },
             None,
         ),
+        // Killed: not complete, even when the summary made it out first.
+        (None, _) => (outcome(None, s.over_memory, None), None),
         (status, stream) => {
             let summary = stream.ok();
             (outcome(status, s.over_memory, summary.as_ref()), summary)
@@ -370,7 +378,17 @@ fn supervise<T: Send + 'static>(
     mut tick: impl FnMut(),
 ) -> std::io::Result<Supervised<T>> {
     let start = Instant::now();
-    let mut child = cmd.spawn()?;
+    // Killed and reaped on every way out, a panicking `tick` among them: the
+    // kernel never outlives its supervisor's limits.
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Reap(cmd.spawn()?);
+    let child = &mut child.0;
     let stdout = child.stdout.take().expect("stdout is piped");
     let reader = std::thread::spawn(move || read(stdout));
 
@@ -554,6 +572,16 @@ pub struct Progress {
 }
 
 impl Progress {
+    /// Whether a reader that has fallen behind may drop this event: not when
+    /// it starts a stage (`stage` is the last one seen, and is updated) or
+    /// finishes one, so a progress bar never sticks short of its end.
+    #[must_use]
+    pub fn droppable(&self, stage: &mut Option<Stage>) -> bool {
+        let fresh = *stage != Some(self.stage);
+        *stage = Some(self.stage);
+        !fresh && self.done < self.total
+    }
+
     /// `done / total`, in `0.0..=1.0`.
     #[must_use]
     pub fn fraction(&self) -> f64 {
@@ -575,9 +603,9 @@ pub enum Stage {
     Mesh,
 }
 
-/// The largest frame [`read_events`] accepts, checked before it allocates.
-/// An outline is the largest today: a million nodes (its bound) of short
-/// names fit.
+/// The largest frame [`read_events`] accepts, checked before it allocates:
+/// `STEPV_OCCT_MAX_FRAME` (`kernel/stepv_occt.h`), which the kernel holds
+/// its frames to (an outline over it is left out, not sent).
 pub const MAX_FRAME: u32 = 64 << 20;
 
 /// A `--stream` that breaks its contract (`kernel/stepv_occt.h`). The kernel
@@ -1162,6 +1190,24 @@ mod tests {
             read_events(&full[..first + 3], |_| {}).unwrap_err(),
             StreamError::Truncated
         );
+    }
+
+    #[test]
+    fn a_stage_s_first_and_last_progress_are_never_dropped() {
+        let p = |stage, done, total| Progress { stage, done, total };
+        let mut stage = None;
+        let kept: Vec<bool> = [
+            p(Stage::Transfer, 0, 1000),
+            p(Stage::Transfer, 400, 1000),
+            p(Stage::Transfer, 1000, 1000),
+            p(Stage::Mesh, 0, 4),
+            p(Stage::Mesh, 2, 4),
+            p(Stage::Mesh, 4, 4),
+        ]
+        .iter()
+        .map(|e| !e.droppable(&mut stage))
+        .collect();
+        assert_eq!(kept, [true, false, true, true, false, true]);
     }
 
     #[test]
