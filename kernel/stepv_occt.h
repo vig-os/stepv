@@ -82,8 +82,18 @@ typedef void (*stepv_occt_event_fn)(void* ctx, int kind, const char* payload,
                                     unsigned long length);
 
 // stepv_occt_run_ex, passing its events to `on_event` (NULL: none) with
-// `ctx` as they happen.
-char* stepv_occt_run_stream(const char* input, const char* mesh_out, const char* topology_out,
+// `ctx` as they happen, and reading `input` as `format`: "step", "iges" or
+// "brep" (NULL: by its extension).
+//
+// `input` may be "/dev/fd/N", a descriptor the caller opened (#91): it is
+// read from its start, needs `format`, and is not resolved, so a multi-file
+// assembly's part files are missing from it (#92). A descriptor without
+// `format`, a `format` not one of the three, or a descriptor that is not
+// open or cannot seek fails with cause "environment": the caller asked
+// wrongly, and the file is not at fault. A file that does not read as the
+// format named is "input", as one with a wrong extension is.
+char* stepv_occt_run_stream(const char* input, const char* format, const char* mesh_out,
+                            const char* topology_out,
                             int edges, double linear_rel, double angular_deg,
                             stepv_occt_event_fn on_event, void* ctx, int* exit_code);
 
@@ -91,14 +101,16 @@ char* stepv_occt_run_stream(const char* input, const char* mesh_out, const char*
 // `input`, read from its product structure with no shape transfer, as JSON
 // ({"format": "stepv-outline", ...}, or {"error": ...}) in a malloc'd string
 // for stepv_occt_free. *exit_code is 0, or 3 with the error. Serialised with
-// the runs above.
-char* stepv_occt_outline(const char* input, int* exit_code);
+// the runs above. `input` and `format` as stepv_occt_run_stream's.
+char* stepv_occt_outline(const char* input, const char* format, int* exit_code);
 
 // `stepv-occt --serve` (#33): reads `input` once, writes a ready line
 // ({"ready": true, "sandbox": ..., "parts": n}, or ready false with an
 // error) to `out_fd`, then answers one JSON query per line from `in_fd`
-// until it closes (protocol in measure.h). Returns the exit code.
-int stepv_occt_serve(const char* input, const char* sandbox, int in_fd, int out_fd);
+// until it closes (protocol in measure.h). Returns the exit code. `input`
+// and `format` as stepv_occt_run_stream's.
+int stepv_occt_serve(const char* input, const char* format, const char* sandbox, int in_fd,
+                     int out_fd);
 
 #ifdef __cplusplus
 }

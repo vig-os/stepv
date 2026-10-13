@@ -25,6 +25,7 @@
 
 #include "outline.h"
 
+#include "input.h"
 #include "json.h"
 
 #include <Interface_EntityIterator.hxx>
@@ -48,7 +49,11 @@
 #include <XSControl_TransferReader.hxx>
 #include <XSControl_WorkSession.hxx>
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -209,20 +214,18 @@ struct Walker {
     }
 };
 
-std::string lower_ext(const std::string& path) {
-    const auto dot = path.rfind('.');
-    std::string e = dot == std::string::npos ? "" : path.substr(dot + 1);
-    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return std::tolower(c); });
-    return e;
-}
-
 }  // namespace
 
-std::string outline_json(const std::string& path) {
-    const std::string ext = lower_ext(path);
-    if (ext != "step" && ext != "stp") {
+std::string outline_json(const std::string& path, const std::string& format) {
+    std::string why;
+    const std::string fmt = reader_format(path, format, why);
+    if (fmt.empty()) throw std::runtime_error(why);
+    if (fmt != "step") {
         throw std::runtime_error("an outline needs a STEP file; IGES and BREP have no product structure");
     }
+    // Read from its start, as a run reads it (stepv-occt-core.cpp).
+    if (const auto fd = input_fd(path); fd && ::lseek(*fd, 0, SEEK_SET) != 0)
+        throw std::runtime_error("cannot rewind input descriptor: " + std::string(std::strerror(errno)));
     STEPControl_Reader reader;
     if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
     return outline_json(reader);

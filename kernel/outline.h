@@ -29,7 +29,8 @@ class STEPControl_Reader;
 
 namespace stepv {
 
-// The outline of the STEP file at `path` as one JSON object:
+// The outline of the STEP file at `path` (read as `format` when given, as
+// stepv-occt --format; input.h) as one JSON object:
 //
 //   {"format": "stepv-outline", "version": 1,
 //    "tree": [node], "leaves": n}      node as in topology.cpp's "tree", a
@@ -37,7 +38,7 @@ namespace stepv {
 //
 // Throws std::runtime_error with what went wrong: not a STEP file, or one
 // that does not read.
-std::string outline_json(const std::string& path);
+std::string outline_json(const std::string& path, const std::string& format = "");
 
 // The same, of a file `reader` has already read (ReadFile done, nothing
 // transferred): how a streamed run (--stream) sends the outline before its
