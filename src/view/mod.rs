@@ -398,6 +398,20 @@ pub fn run(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn a_loader_that_panics_ends_the_wait() {
+        // The loader owns its sender (`run_view`): a panic drops it, and the
+        // software viewer's wait ends instead of blocking for ever.
+        let (tx, rx) = std::sync::mpsc::channel::<Load>();
+        let loader = std::thread::spawn(move || {
+            let _ = tx.send(Load::Tree(Vec::new(), 0));
+            panic!("a loader bug");
+        });
+        assert!(loader.join().is_err());
+        assert!(wait(&rx).is_none());
+    }
+
     #[test]
     fn no_adapter_falls_back_to_software_and_says_so() {
         let (b, note) = choose(false, None);

@@ -1383,8 +1383,18 @@ keeps the tree on a failed run.
 - **Closing the window mid-load cancels the run (#85):** `occt::run_streaming` takes a `cancel`
   flag, which `supervise`'s tick checks every 2 ms and then kills the kernel: the outcome is
   `Outcome::Cancelled`, with no summary. `view` sets it once its window closes, so nothing runs
-  on for nobody. The report says status `cancelled`, "the viewer was closed before the run
-  finished", exit 0: the user chose it. Nothing is cached for it.
+  on for nobody. The report says status `cancelled`, exit 0, with the reason in `message`
+  ("the viewer was closed before the run finished"), not `error`: the user chose it, nothing
+  failed. Nothing is cached for it. The loader owns the channel's sender, so a loader that
+  panics closes it, and nothing waits on it for ever.
+- **The pipelines are checked before the window opens (#85 review):** eframe's creator builds
+  the viewer's pipelines inside a wgpu validation scope (`pipelines` in `src/view/app.rs`). A
+  GPU that refuses them fails the creator, which hands the load back, and `view::run` falls
+  back to the software viewer, as it did when the whole viewer was built there. So the window
+  opens only on a GPU that can draw. What is left to refuse after `Done` is the scene's
+  buffers (a scene past the device's limits): that closes the window with the error.
+  `STEPV_VIEW_REJECT_PIPELINES` refuses them, for the tests, beside
+  `STEPV_VIEW_REJECT_ADAPTERS`.
 - **Known limits:**
   - `--software`, or a machine with no usable GPU adapter, has no tree panel: the software
     viewer still waits for the whole run before it opens (#90);
@@ -1412,7 +1422,11 @@ keeps the tree on a failed run.
     - with a cached artifact and a kernel that never writes a byte, the loading frame shows the
       artifact's rows, and no scene; the run times out as before (exit 4);
     - closed once it has drawn the tree (`STEPV_VIEW_CLOSE_LOADING=1`), with the kernel stalled
-      30 s: exit 0, `cancelled`, in under 20 s, and the kernel's process is gone.
+      30 s: exit 0, `cancelled` with its `message` and no `error`, in under 20 s, and the
+      kernel's process is gone;
+    - with the pipelines refused (`STEPV_VIEW_REJECT_PIPELINES`), the software viewer draws
+      the scene (status `ok`, backend `software`, the fallback said on stderr).
+  - `view`'s unit tests: a loader that panics ends the software viewer's wait.
   - `tests/cache.rs`: `view` with no window session (`STEPV_VIEW_TEST_NO_SESSION`, and no
     `DISPLAY`) fails with `no window session:` and the header, and never starts the kernel.
     Without the check, it fails.

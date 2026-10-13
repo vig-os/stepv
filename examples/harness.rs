@@ -292,7 +292,11 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,
         Outcome::MemoryCap => Verdict::MemoryCap,
-        Outcome::Cancelled => unreachable!("occt::run is never cancelled"),
+        // occt::run takes no cancel: a run that says so broke its contract.
+        Outcome::Cancelled => {
+            note = Some("cancelled, though the harness never cancels".into());
+            Verdict::Crash
+        }
         Outcome::Crashed { signal, code } => {
             note = Some(format!("signal {signal:?}, exit {code:?}"));
             Verdict::Crash

@@ -984,6 +984,12 @@ fn closing_the_viewer_mid_load_cancels_the_kernel() {
         VIEW_DEADLINE,
     );
     assert_eq!((code, j["status"].as_str()), (0, Some("cancelled")), "{j}");
+    // Not an error: a message says what happened.
+    assert!(j.get("error").is_none(), "{j}");
+    assert_eq!(
+        j["message"], "the viewer was closed before the run finished",
+        "{j}"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(20),
         "the stall was waited out"
@@ -997,5 +1003,34 @@ fn closing_the_viewer_mid_load_cancels_the_kernel() {
     assert!(
         unsafe { libc::kill(pid, 0) } != 0,
         "the kernel {pid} outlived the viewer"
+    );
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_gpu_that_refuses_the_pipelines_falls_back_to_software() {
+    kernel();
+    let h = Home::new("viewpipelines");
+    // The pipelines are checked before the window opens, so a refusal still
+    // hands the load to the software viewer, which draws the scene.
+    let (code, j, err) = h.view_within(
+        &data("assembly.step"),
+        &[],
+        &[("STEPV_VIEW_REJECT_PIPELINES", "1")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (0, Some("ok")), "{j}");
+    assert_eq!(j["backend"], "software", "{j}");
+    let note = err
+        .lines()
+        .find(|l| l.starts_with("stepv: the GPU viewer could not start ("))
+        .unwrap_or_else(|| panic!("no fallback note: {err}"));
+    assert!(
+        note.contains("the GPU refused the viewer's pipelines"),
+        "{note}"
+    );
+    assert!(
+        h.0.join("shot.png").is_file(),
+        "the software viewer drew nothing"
     );
 }

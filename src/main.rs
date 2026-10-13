@@ -393,7 +393,7 @@ fn run(args: &Args) -> (u8, Value) {
 /// `stepv view`: the window opens at once, on the tree and the run's
 /// progress, while the kernel runs on a thread of its own, and the scene
 /// follows (#85). Closing the window first cancels the run: status
-/// `cancelled`, exit 0.
+/// `cancelled`, exit 0, and a `message` (not an `error`) saying so.
 fn run_view(
     args: &Args,
     mut report: Value,
@@ -446,7 +446,9 @@ fn run_view(
     let cancel = AtomicBool::new(false);
     let (ran, loaded) = std::thread::scope(|s| {
         let (report, cancel) = (&mut report, &cancel);
-        let loader = s.spawn(move || load_view(args, report, outline, &tx, cancel));
+        // The loader owns the sender: however it ends, a panic included,
+        // the channel closes with it, and the window never waits on it.
+        let loader = s.spawn(move || load_view(args, report, outline, tx, cancel));
         let ran = view::run(rx, &format!("stepv — {name}"), &opts);
         // The window is closed: a run still going is for nobody.
         cancel.store(true, Ordering::Relaxed);
@@ -480,7 +482,7 @@ fn load_view(
     args: &Args,
     report: &mut Value,
     outline: Option<(PathBuf, header::Info)>,
-    tx: &std::sync::mpsc::Sender<view::Load>,
+    tx: std::sync::mpsc::Sender<view::Load>,
     cancel: &AtomicBool,
 ) -> Result<(), u8> {
     // The exact B-rep for the inspector (#29) comes with the mesh.
@@ -491,7 +493,7 @@ fn load_view(
         None,
         Some(&topo_tmp),
         outline,
-        Some((tx, cancel)),
+        Some((&tx, cancel)),
     );
     let topo_bytes = topology_bytes(report, &topo_tmp);
     let scene = match result {
@@ -723,6 +725,12 @@ fn tessellate(
             && let Some(cp) = cache_path
         {
             remember_failure(cp, status, &msg);
+        }
+        if run.outcome == Outcome::Cancelled {
+            // Not an error: the report's `message` says what happened.
+            report["status"] = json!(status);
+            report["message"] = json!(msg);
+            return Err(code);
         }
         return Err(fail_in(report, code, status, &msg));
     }

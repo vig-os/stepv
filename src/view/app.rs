@@ -183,6 +183,7 @@ impl Viewer {
     /// the load is done, in a window already open (#85).
     fn new(
         rs: &egui_wgpu::RenderState,
+        renderer: Renderer,
         scene: &Scene,
         topology: Option<Topology>,
         opts: &Options,
@@ -200,10 +201,10 @@ impl Viewer {
             ),
         };
         let info = rs.adapter.get_info();
-        // A validation error here (a driver that claims more than it does)
-        // becomes an Err, and the software fallback, not a panic.
+        // The pipelines passed their check before the window opened
+        // (`pipelines`); what is left to refuse is this scene's buffers (a
+        // scene past the device's limits), reported in the open window.
         let scope = rs.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let renderer = Renderer::new(&rs.device);
         let mut gpu_scene = GpuScene::upload(&rs.device, &renderer, Layout::new(scene));
         // Only solids are capped (#34): the topology knows which prototypes
         // have a volume; without it, every closed part counts.
@@ -220,7 +221,7 @@ impl Viewer {
             gpu_scene.set_solids(&solid);
         }
         if let Some(e) = pollster::block_on(scope.pop()) {
-            return Err(format!("the GPU refused the viewer's pipelines: {e}"));
+            return Err(format!("the GPU refused the scene's buffers: {e}"));
         }
         Ok(Self {
             renderer,
@@ -1202,6 +1203,9 @@ enum Stage {
 /// the [`Viewer`] once the scene arrives.
 struct Window {
     load: std::sync::mpsc::Receiver<Load>,
+    /// The pipelines, built and checked before the window opened; the
+    /// viewer takes them on `Done`.
+    renderer: Option<Renderer>,
     stage: Stage,
     opts: Options,
     error: Arc<Mutex<Option<String>>>,
@@ -1224,7 +1228,10 @@ impl Window {
                 Load::Done(l) => {
                     let opts = self.opts.loaded(&l);
                     let (e, m) = (self.error.clone(), self.measured.clone());
-                    match Viewer::new(rs, &l.scene, l.topology, &opts, e, m) {
+                    let Some(r) = self.renderer.take() else {
+                        return;
+                    };
+                    match Viewer::new(rs, r, &l.scene, l.topology, &opts, e, m) {
                         Ok(v) => {
                             ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
                             if self.opts.screenshot.is_some() {
@@ -1335,6 +1342,25 @@ impl eframe::App for Window {
     }
 }
 
+/// The viewer's pipelines on `device`, or why the GPU refused them: a
+/// validation error (a driver that claims more than it does) becomes an Err,
+/// and the software fallback, not a panic. `STEPV_VIEW_REJECT_PIPELINES`
+/// refuses them, for the tests.
+fn pipelines(device: &wgpu::Device) -> Result<Renderer, String> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let renderer = Renderer::new(device);
+    let refused = pollster::block_on(scope.pop())
+        .map(|e| e.to_string())
+        .or_else(|| {
+            std::env::var_os("STEPV_VIEW_REJECT_PIPELINES")
+                .map(|_| "STEPV_VIEW_REJECT_PIPELINES is set".to_owned())
+        });
+    match refused {
+        Some(e) => Err(format!("the GPU refused the viewer's pipelines: {e}")),
+        None => Ok(renderer),
+    }
+}
+
 /// Runs the GPU viewer, open at once on `load`. On failure before the window
 /// opened, hands `load` back so the caller can fall back to the software
 /// viewer.
@@ -1397,11 +1423,16 @@ pub(super) fn run(
                 )
                 .into());
             }
+            // Before the window is the viewer's: a GPU that cannot build the
+            // pipelines hands the load back, and view::run falls back to the
+            // software viewer, as it did before the window opened first.
+            let renderer = pipelines(&rs.device)?;
             theme::install(&cc.egui_ctx, opts2.theme);
             let load = slot2.lock().unwrap().take().ok_or("no load")?;
             *used2.lock().unwrap() = Some(Backend::from_wgpu(rs.adapter.get_info().backend));
             Ok(Box::new(Window {
                 load,
+                renderer: Some(renderer),
                 stage: Stage::Loading {
                     tree: None,
                     progress: None,
