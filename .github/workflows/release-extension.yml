@@ -76,16 +76,16 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
 
       # The patched OCCT (#74, flake.nix) is in no public cache: pull it from
-      # the project's Cachix cache (plan.md "Binary cache"), and push what this
-      # job builds. Without the token (fork PRs) it only pulls; a fork PR is
-      # never pushed from even if it had one.
+      # the project's Cachix cache (plan.md "Binary cache") and push what the
+      # release builds. This workflow runs only from release.yml's own
+      # dispatch; a pull request (never expected here) would get no token.
       - name: Cachix
         if: vars.CACHIX_CACHE != ''
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
         with:
           name: ${{ vars.CACHIX_CACHE }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          authToken: ${{ github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ github.event_name == 'pull_request' }}
 
       - name: Build the relocatable tarball
         env:
@@ -131,16 +131,16 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
 
       # The patched OCCT (#74, flake.nix) is in no public cache: pull it from
-      # the project's Cachix cache (plan.md "Binary cache"), and push what this
-      # job builds. Without the token (fork PRs) it only pulls; a fork PR is
-      # never pushed from even if it had one.
+      # the project's Cachix cache (plan.md "Binary cache") and push what the
+      # release builds. This workflow runs only from release.yml's own
+      # dispatch; a pull request (never expected here) would get no token.
       - name: Cachix
         if: vars.CACHIX_CACHE != ''
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
         with:
           name: ${{ vars.CACHIX_CACHE }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          authToken: ${{ github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ github.event_name == 'pull_request' }}
 
       - name: Import the Developer ID certificate
         id: signing
@@ -223,16 +223,16 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
 
       # The patched OCCT (#74, flake.nix) is in no public cache: pull it from
-      # the project's Cachix cache (plan.md "Binary cache"), and push what this
-      # job builds. Without the token (fork PRs) it only pulls; a fork PR is
-      # never pushed from even if it had one.
+      # the project's Cachix cache (plan.md "Binary cache") and push what the
+      # release builds. This workflow runs only from release.yml's own
+      # dispatch; a pull request (never expected here) would get no token.
       - name: Cachix
         if: vars.CACHIX_CACHE != ''
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
         with:
           name: ${{ vars.CACHIX_CACHE }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          authToken: ${{ github.event_name != 'pull_request' && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ github.event_name == 'pull_request' }}
 
       - name: Choose the credential
         id: cred

@@ -20,17 +20,6 @@
     flake-utils.follows = "vigos/flake-utils";
   };
 
-  # The project's binary cache (plan.md "Binary cache"): the patched OCCT
-  # (#74) is in no public cache, so without this every machine builds it
-  # (~35 min on sage, ~55 min on a GitHub Linux runner). A substituter named
-  # here is used only by users nix trusts, or with --accept-flake-config.
-  nixConfig = {
-    extra-substituters = [ "https://gerchowl.cachix.org" ];
-    extra-trusted-public-keys = [
-      "gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU="
-    ];
-  };
-
   outputs =
     {
       self,
@@ -261,7 +250,58 @@
         # per-module dev-shell builds. Assigning these is the consumer's job by
         # construction — dropping the line is a visible omission, which is why
         # mkRustProject hands all three back together.
-        inherit (rust) checks;
+        checks = rust.checks // {
+          # The provenance of tests/occt-patch/wires-<system>.txt (#74): the
+          # check tool built against nixpkgs' UNPATCHED OCCT must reproduce
+          # this platform's reference byte for byte, and must FAIL the scaling
+          # test (exponent >= 2.5). That proves the reference was recorded
+          # without the patch, and that tests/occt_patch.rs catches the O(n^3).
+          # Cheap: one C++ file against OCCT from cache.nixos.org.
+          occt-patch-reference = pkgs.stdenv.mkDerivation {
+            name = "stepv-occt-patch-reference";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./kernel
+                ./tests/occt-patch
+              ];
+            };
+            nativeBuildInputs = [ pkgs.cmake ];
+            buildInputs = [ pkgs.opencascade-occt ];
+            dontUseCmakeConfigure = true;
+            buildPhase = ''
+              runHook preBuild
+              cmake -S kernel -B build -DCMAKE_BUILD_TYPE=Release -DSTEPV_BUILD_TESTS=ON
+              cmake --build build --target occt-patch-check -j"$NIX_BUILD_CORES"
+              runHook postBuild
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              ref=tests/occt-patch/wires-${pkgs.stdenv.hostPlatform.system}.txt
+              build/occt-patch-check wires > wires.txt
+              if ! cmp -s wires.txt "$ref"; then
+                echo "unpatched OCCT does not reproduce $ref:"
+                diff "$ref" wires.txt | head -n 4
+                exit 1
+              fi
+              echo "unpatched OCCT reproduces $ref"
+              line=$(build/occt-patch-check scaling 800)
+              echo "unpatched scaling: $line"
+              exponent=$(printf '%s\n' "$line" | sed -n 's/.*"exponent":\([0-9][0-9.]*\)}$/\1/p')
+              if [ -z "$exponent" ]; then
+                echo "no exponent in: $line"
+                exit 1
+              fi
+              if ! awk -v e="$exponent" 'BEGIN { exit !(e + 0 >= 2.5) }'; then
+                echo "unpatched OCCT grows as n^$exponent, below 2.5: tests/occt_patch.rs would not catch the O(n^3)"
+                exit 1
+              fi
+              runHook postCheck
+            '';
+            installPhase = "cp wires.txt $out";
+          };
+        };
 
         # `stepv` is the CLI alone (what crates.io ships); `default` is the
         # product: the CLI with the kernel in libexec/stepv, where
