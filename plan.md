@@ -1492,7 +1492,8 @@ service whose sandbox opens nothing by path: it holds the file only as a descrip
   as a STEP file named `.igs` always was.
 - **Sandbox:** a descriptor's read grant is `/dev/fd/N` itself, and nothing by path: Seatbelt
   matches that name, and Landlock's rule, opened through the magic link, lands on the file
-  alone. The file's directory stays closed, and so do the `$HOME` rules' concerns.
+  alone. The file's directory stays closed, and so do the `$HOME` rules' concerns. (#102
+  replaced this: the descriptor is read directly, never re-opened, and granted nothing.)
 - **Rust:** `occt::Input` (`Path`, or `Fd { fd, format }` with `occt::Format`) for `occt::run`,
   `run_streaming` and `outline`; `&Path` and `&PathBuf` convert, so path callers are unchanged.
   The descriptor is inherited at its own number (close-on-exec cleared in the child alone).
@@ -1506,6 +1507,51 @@ service whose sandbox opens nothing by path: it holds the file only as a descrip
   through `Input::Fd` match the path's, and a pipe fails with `environment`.
   `tests/sandbox.rs`: an fd input's sibling file is refused by the sandbox. All fail on the
   previous kernel.
+
+### The descriptor read directly (#102, 2026-10-13)
+
+[#102](https://github.com/vig-os/stepv/issues/102): #91 passed `/dev/fd/N` as a path and let
+OCCT's path readers re-open it.
+- On the `macos-15-arm64` CI runner, the sandbox the kernel inherits from #64's Quick Look
+  service denies that re-open: "cannot open input: Operation not permitted" (#98's CI).
+- macOS 26.4 allows it, which is why #79's probe passed.
+- The root cause is the re-open by name. Reading the descriptor that is already open goes
+  through no path check, so **the kernel reads the descriptor itself and never opens
+  `/dev/fd/N`** (`kernel/input.h`).
+
+- **STEP and BREP: an `istream` over the descriptor** (`FdStreamBuf`, which reads with `pread`
+  from offset 0, so the caller's shared offset is left as it was).
+  - The kernel uses `STEPCAFControl_Reader::ReadStream`, `STEPControl_Reader::ReadStream` (for
+    the outline) and `BRepTools::Read(shape, istream, builder)`.
+  - OCCT 7.9.3's path readers open an `istream` and run the same parser on it: `StepFile_Read`
+    and `BRepTools::Read`. Only the open differs, and there is no copy.
+- **IGES: a private temporary copy.**
+  - OCCT 7.9.3 has no IGES stream reader: `IGESSelect_WorkLibrary` doesn't override
+    `IFSelect_WorkLibrary::ReadStream`, whose default fails.
+  - The kernel copies the descriptor into `$TMPDIR/stepv-input-XXXXXX.igs` (its real path:
+    macOS's `/var` is a symlink) and reads that by path.
+  - `stepv-occt` makes the copy before its sandbox, which grants that one file to read.
+  - The sandbox can't let the kernel remove a file it may read (Landlock removes through the
+    parent directory). So a child forked before the sandbox, holding only its end of a pipe,
+    unlinks the copy when the pipe closes. On a normal exit the kernel waits for it; a kernel
+    killed outright still has its copy removed.
+  - In-process C ABI callers, which have no sandbox of their own, get a copy that is unlinked
+    when the read returns.
+- **Sandbox:** a descriptor input is granted nothing by path now, not even `/dev/fd/N`. Only
+  the IGES copy is granted.
+- **Kept from #91:**
+  - A descriptor that is not open or can't seek (a pipe) fails with cause `environment`, and
+    so does a read error on the descriptor.
+  - A file that doesn't read as the format named is `input`.
+- **Tests (`tests/fd.rs`):**
+  - The descriptor's file is set to mode 000 once it is open, so re-opening `/dev/fd/N` fails
+    on macOS (fdesc) and on Linux (`/proc/self/fd`) alike, for any user but root. A run,
+    `--outline` and `--serve` must give what the path gives, for all three formats.
+  - The previous kernel fails this with "cannot open input: Permission denied", the same
+    failure as macOS 15's.
+  - With a private `$TMPDIR`, the IGES copy is gone after a successful run and after a failed
+    one.
+- **Path inputs:** unchanged code. The corpus diff against the previous kernel is in #102's PR.
 
 ### Work queue (ordered, 2026-10-04)
 

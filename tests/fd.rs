@@ -146,7 +146,8 @@ fn the_kernel_reads_its_descriptor_without_reopening_it() {
         let copy = dir.0.join(name);
         std::fs::copy(data(name), &copy).unwrap();
         let file = File::open(&copy).unwrap();
-        std::fs::set_permissions(&copy, std::os::unix::fs::PermissionsExt::from_mode(0)).unwrap();
+        std::fs::set_permissions(&copy, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
         assert!(
             File::open(format!("/dev/fd/{}", file.as_raw_fd())).is_err(),
             "{name}: the test's premise: a re-open of the descriptor fails"
@@ -164,11 +165,30 @@ fn the_kernel_reads_its_descriptor_without_reopening_it() {
             std::fs::read(&by_path).unwrap(),
             "{name}: mesh"
         );
-        let (code, ready) = kernel_run(k.as_path(), "/dev/fd/3", Some(&file), &["--format", format, "--serve"]);
-        assert_eq!((code, &ready["ready"]), (0, &Value::Bool(true)), "{name} --serve: {ready}");
+        let (code, ready) = kernel_run(
+            k.as_path(),
+            "/dev/fd/3",
+            Some(&file),
+            &["--format", format, "--serve"],
+        );
+        assert_eq!(
+            (code, &ready["ready"]),
+            (0, &Value::Bool(true)),
+            "{name} --serve: {ready}"
+        );
         if format == "step" {
-            let want = kernel_run(k.as_path(), data(name).to_str().unwrap(), None, &["--outline"]);
-            let got = kernel_run(k.as_path(), "/dev/fd/3", Some(&file), &["--format", format, "--outline"]);
+            let want = kernel_run(
+                k.as_path(),
+                data(name).to_str().unwrap(),
+                None,
+                &["--outline"],
+            );
+            let got = kernel_run(
+                k.as_path(),
+                "/dev/fd/3",
+                Some(&file),
+                &["--format", format, "--outline"],
+            );
             assert_eq!(got, want, "{name} --outline");
         }
     }
