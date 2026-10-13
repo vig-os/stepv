@@ -177,7 +177,11 @@ int wires() {
         const int L = 4 + rng.below(24), G = 4;
         std::vector<gp_Pnt2d> P;
         while (int(P.size()) < L) {
-            gp_Pnt2d q(rng.below(G + 1), rng.below(G + 1));
+            // Two statements, not two arguments: C++ leaves argument order
+            // unspecified, and GCC draws y first where clang draws x.
+            const int x = rng.below(G + 1);
+            const int y = rng.below(G + 1);
+            gp_Pnt2d q(x, y);
             if (rng.below(4) == 0) q.SetX(q.X() + 0.5);
             if (!P.empty() && P.back().Distance(q) < 1e-9) continue;
             P.push_back(q);
