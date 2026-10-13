@@ -37,12 +37,12 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
     private let lock = NSLock()
     private var child: pid_t = 0
     private var used = false
-    private var cancelled = false
+    private var cancelled: UInt64?
 
     /// The connection went: kill the kernel, if one runs.
     func cancel() {
         lock.lock(); defer { lock.unlock() }
-        cancelled = true
+        if cancelled == nil { cancelled = DispatchTime.now().uptimeNanoseconds }
         if child > 0 { kill(child, SIGKILL) }
     }
 
@@ -102,7 +102,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         let t0 = DispatchTime.now().uptimeNanoseconds
         var pid: pid_t = 0
         lock.lock()
-        let rc = cancelled ? ECANCELED : posix_spawn(&pid, kernel, &fa, &attr, cargv, cenv)
+        let rc = cancelled != nil ? ECANCELED : posix_spawn(&pid, kernel, &fa, &attr, cargv, cenv)
         if rc == 0 { child = pid }
         lock.unlock()
         posix_spawn_file_actions_destroy(&fa)
@@ -140,6 +140,9 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
                                 (connection?.remoteObjectProxy as? StepvRunObserver)?
                                     .event(Int(frame.kind), payload: frame.payload)
                             }
+                            // A break after good frames in one chunk: now,
+                            // not at the next read.
+                            if let failed = reader.failed { throw failed }
                         } catch {
                             streamError = error as? StepvStreamError
                             kill(pid, SIGKILL)
@@ -155,8 +158,15 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             } else {
                 usleep(2000)
             }
-            let w = waitpid(pid, &status, WNOHANG)
-            if w == pid { reaped = true; break }
+            // Exited? Seen without reaping it: the pid is no longer ours to
+            // kill once it is reaped, so cancel() must stop aiming at it first.
+            var info = siginfo_t()
+            if waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == pid {
+                lock.lock(); child = 0; lock.unlock()
+                waitpid(pid, &status, 0)
+                reaped = true
+                break
+            }
             let now = DispatchTime.now().uptimeNanoseconds
             if streamError != nil {
                 continue  // killed already: wait for the reap
@@ -168,7 +178,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             }
             if killedFor != nil {
                 let k0 = DispatchTime.now().uptimeNanoseconds
-                kill(pid, SIGKILL)
+                lock.lock(); kill(pid, SIGKILL); child = 0; lock.unlock()
                 waitpid(pid, &status, 0)
                 reaped = true
                 let gone = kill(pid, 0) == -1 && errno == ESRCH
@@ -176,13 +186,13 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             }
         }
         close(out[0])
-        lock.lock(); child = 0; let wasCancelled = cancelled; lock.unlock()
+        lock.lock(); let wasCancelled = cancelled; lock.unlock()
         let ms = Int(elapsedMs(since: t0))
         let how = status & 0x7f == 0 ? "exit \((status >> 8) & 0xff)" : "signal \(status & 0x7f)"
 
         let result: (StepvRunOutcome, String, Data?, FileHandle?)
-        if wasCancelled {
-            result = (.crashed, "\(tag): cancelled, kernel pid \(pid) killed", nil, nil)
+        if let wasCancelled {
+            result = (.crashed, "\(tag): cancelled, kernel pid \(pid) \(how), reaped \(String(format: "%.1f", elapsedMs(since: wasCancelled))) ms after the cancel", nil, nil)
         } else if let killedFor {
             result = (killedFor, "\(tag): kernel pid \(pid) killed at \(ms) ms", nil, nil)
         } else if let streamError {

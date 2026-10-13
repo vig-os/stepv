@@ -1572,7 +1572,8 @@ memory is freed at once. Two designs failed before this one:
 - The extension sends the file over as a `FileHandle`: a URL carries no permission across XPC,
   and the service can't open the file by path.
 - The service `posix_spawn`s its own `Contents/Helpers/stepv-occt /dev/fd/3 --format … --stream
-  --mesh …` (#91). The kernel inherits the descriptor as fd 3 and nothing else
+  --mesh …` (#91). The kernel inherits the descriptor as fd 3, besides
+  stdin and stderr (`/dev/null`) and stdout (the frames), and nothing else
   (`POSIX_SPAWN_CLOEXEC_DEFAULT`).
 - The service forwards TREE and PROGRESS as the kernel writes them. It replies with the summary
   and the mesh, which it writes in its container and hands back as an open, unlinked file, so no
@@ -1591,8 +1592,10 @@ memory is freed at once. Two designs failed before this one:
   - Resident size includes the shared dylibs and drops as the compressor takes pages, so under
     memory pressure this cap acts later than the CLI's.
 - **The kernel's frames:** `macos/Shared/StepvFrames.swift` is the Swift twin of `read_events`,
-  with the same bounds (`STEPV_OCCT_MAX_FRAME`, kinds 1 to 3, nothing after DONE). It decodes
-  incrementally, as the pipe delivers. A broken stream is a crashed kernel: the service kills
+  with the same framing bounds (`STEPV_OCCT_MAX_FRAME`, kinds 1 to 3, nothing after DONE). It
+  decodes incrementally, as the pipe delivers. The payloads stay JSON bytes: the extension that
+  shows them parses them, so `read_events`' payload checks (valid JSON, progress done ≤ total)
+  belong to part 2's consumer. A broken stream is a crashed kernel: the service kills
   it and reports it.
 - **Bundling:** each service carries its own copy of the OCCT closure, 31 dylibs and 51 MB, in
   its own `Contents/Frameworks`, at `@rpath`.

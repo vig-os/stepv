@@ -64,7 +64,8 @@ rc=$?
 [ $rc -eq 124 ] && echo "FAIL: the probe timed out"
 
 # From the service's own log: it killed the deadline run and the capped
-# one, and reaped them; it killed the cancelled one; and every kernel it
+# one, and reaped them; the cancelled one died of its SIGKILL (signal 9,
+# not its own exit: slow.step takes seconds); and every kernel it
 # spawned in this run is gone, killed or finished.
 sleep 1
 timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
@@ -77,7 +78,7 @@ for line in open(sys.argv[1]):
 PY
 for want in 'killed \(deadline\) at [0-9]+ ms, reaped in [0-9.]+ ms, gone=true' \
             'killed \(memory\) at [0-9]+ ms, reaped in [0-9.]+ ms, gone=true' \
-            'cancelled, kernel pid [0-9]+ killed'; do
+            'cancelled, kernel pid [0-9]+ signal 9, reaped [0-9.]+ ms after the cancel'; do
   if line=$(grep -E -m1 "$want" "$tmp/log.txt"); then
     echo "ok: logged: ${line#*: }"
   else

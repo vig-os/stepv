@@ -100,6 +100,7 @@ final class StepvSupervisorRun: NSObject, StepvRunObserver {
                deadlineMs: Int, memoryMB: Int) {
         let handle: FileHandle
         do { handle = try FileHandle(forReadingFrom: file) } catch {
+            connection.resume()  // invalidated in finish: never left suspended
             return finish(StepvRunResult(outcome: .refused, detail: "cannot open the file: \(error.localizedDescription)"))
         }
         connection.resume()

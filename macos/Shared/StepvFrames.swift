@@ -53,7 +53,9 @@ enum StepvStreamError: Error, Equatable, CustomStringConvertible {
 /// later call throws it.
 struct StepvFrameReader {
     private var buffer = Data()
-    private var failed: StepvStreamError?
+    /// The error that ended the stream, once there is one: set even when
+    /// the call that met it returned frames.
+    private(set) var failed: StepvStreamError?
     private(set) var sawDone = false
 
     mutating func feed(_ bytes: Data) throws -> [StepvFrame] {

@@ -86,7 +86,7 @@ let slow = Probe(a[5], "step", deadlineMs: 1500)
 usleep(200_000)
 let beside = Probe(a[2], "step")
 let rb = beside.wait()
-let slowStillRunning = slow.result == nil
+slow.lock.lock(); let slowStillRunning = slow.result == nil; slow.lock.unlock()
 check(rb?.outcome == .done && slowStillRunning,
       "concurrent: \(String(format: "%.0f", beside.ms)) ms while the slow run went on — \(meshLine(rb))")
 let rs = slow.wait()
