@@ -306,3 +306,60 @@ fn the_rust_api_passes_an_fd() {
     assert_eq!(run.outcome, Outcome::Failed);
     assert_eq!(run.summary.unwrap().cause, Some(Cause::Environment));
 }
+
+/// `--lifeline N` (#64): when the caller's end of the pipe closes, as it
+/// does when the caller dies, even by SIGKILL, the kernel exits at once,
+/// rather than run on unsupervised. The balloon hook holds the kernel for
+/// 5 s; the lifeline must end it well before that. Without the lifeline
+/// (the control) it lives the 5 s.
+#[test]
+fn the_kernel_exits_when_its_lifeline_closes() {
+    let Some(k) = kernel() else { return };
+    for lifeline in [true, false] {
+        let mut fds = [0; 2];
+        // SAFETY: fds is a writable [c_int; 2], as pipe() requires.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_end, write_end) = (fds[0], fds[1]);
+        let mut cmd = Command::new(&k);
+        cmd.arg(data("box.brep"))
+            .env("STEPV_OCCT_TEST_BALLOON_MB", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if lifeline {
+            cmd.args(["--lifeline", "3"]);
+        }
+        // SAFETY: dup2, fcntl and close are async-signal-safe, on the
+        // child's copies: the read end becomes fd 3, the write end is the
+        // parent's alone.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(read_end, 3) == -1 || libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(write_end);
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().expect("spawn kernel");
+        // SAFETY: both ends are this process's own descriptors.
+        unsafe { libc::close(read_end) };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let closed = std::time::Instant::now();
+        // SAFETY: as above; the caller "dies" here.
+        unsafe { libc::close(write_end) };
+        let status = child.wait().unwrap();
+        let lived = closed.elapsed();
+        if lifeline {
+            assert!(
+                lived < std::time::Duration::from_secs(1),
+                "the kernel outlived its lifeline by {lived:?}"
+            );
+            assert_eq!(status.code(), Some(4), "{status}");
+        } else {
+            assert!(
+                lived > std::time::Duration::from_secs(3),
+                "the control ended early ({lived:?}): the balloon hold is not 5 s"
+            );
+        }
+    }
+}

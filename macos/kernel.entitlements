@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The kernel the supervisor spawns (#64): it inherits the service's
+	     sandbox. Without "inherit" a sandboxed child traps (SIGTRAP); with
+	     it, the binary runs only as a sandboxed process's child, which is
+	     why the CLI's own stepv-occt (Contents/MacOS) is a separate copy,
+	     signed without it. scripts/test-macos.sh holds it to exactly this. -->
+	<key>com.apple.security.app-sandbox</key><true/>
+	<key>com.apple.security.inherit</key><true/>
+</dict>
+</plist>

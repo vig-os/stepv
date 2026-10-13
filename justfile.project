@@ -224,6 +224,14 @@ linux-view-test *shots:
 macos-test *args: macos-app
     scripts/test-macos.sh {{ args }}
 
+# #64: Quick Look end to end (scripts/ql-e2e): install the build, then let
+# Quick Look itself run the extensions on the fixtures, and probe the
+# supervisor service. Needs a window session; never uses qlmanage.
+[group('macos')]
+ql-e2e: macos-install
+    scripts/ql-e2e/build.sh
+    scripts/ql-e2e/run-all.sh
+
 # DMG; signed with STEPV_SIGN_IDENTITY and notarised when Apple credentials exist.
 [group('macos')]
 macos-package: macos-app

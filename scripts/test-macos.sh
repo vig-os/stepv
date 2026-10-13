@@ -11,7 +11,10 @@
 #   3. The app bundle is contained (#18): each extension is App-Sandboxed
 #      with read-only access to the file it is given and nothing else, and
 #      the bundled CLI's kernel runs under its sandbox profile.
-#   4. With --quicklook and stepv.app installed in /Applications: Quick Look
+#   4. The Swift SVEV reader (#64), and each extension's supervisor service:
+#      its layout, signatures and entitlements, and the service itself
+#      (scripts/ql-e2e/supervisor.sh).
+#   5. With --quicklook and stepv.app installed in /Applications: Quick Look
 #      itself produces a thumbnail for every format, through our extension.
 #
 # Needs: target/release/stepv + target/kernel + target/macos/stepv.app
@@ -97,6 +100,14 @@ v4=$("$tmp/snapshot" "$tmp/v4.msh" "$tmp/v4.png") || fail "Swift cannot read STE
   || fail "v4 decodes as '$v4', v3 as '$v3'"
 echo "ok: STEPVMSH v4 reads in Swift as v3 does ($v4)"
 
+# The Swift SVEV reader (#64) against read_events' contract, on a real
+# kernel stream and on every way a stream breaks.
+"$kernel" "$root/tests/data/assembly.step" --stream >"$tmp/assembly.svev"
+env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -swift-version 5 \
+  -target "$(uname -m)-apple-macos14.0" \
+  "$root/macos/Shared/StepvFrames.swift" "$root/macos/Tests/FramesTests/main.swift" -o "$tmp/frames-tests"
+"$tmp/frames-tests" "$tmp/assembly.svev" || fail "the Swift SVEV reader"
+
 app="$root/target/macos/stepv.app"
 for x in "$app"/Contents/PlugIns/*.appex; do
   ents=$(codesign -d --entitlements - --xml "$x" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \
@@ -104,6 +115,31 @@ for x in "$app"/Contents/PlugIns/*.appex; do
   [ "$ents" = '{"com.apple.security.app-sandbox": true, "com.apple.security.files.user-selected.read-only": true}' ] \
     || fail "$(basename "$x"): entitlements must be exactly app-sandbox + read-only files, got $ents"
 done
+# Each extension's supervisor service (#64): sandboxed with nothing more;
+# its kernel inherits that sandbox; the kernel's dylibs are the service's
+# own (its sandbox cannot read the app's); nothing points outside it.
+entitlements() {
+  codesign -d --entitlements - --xml "$1" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))'
+}
+for x in "$app"/Contents/PlugIns/*.appex; do
+  xpc="$x/Contents/XPCServices/StepvSupervisor.xpc"
+  [ -x "$xpc/Contents/MacOS/StepvSupervisor" ] || fail "$(basename "$x"): no supervisor service"
+  [ "$(entitlements "$xpc")" = '{"com.apple.security.app-sandbox": true}' ] \
+    || fail "$(basename "$x"): the supervisor must be exactly app-sandbox, got $(entitlements "$xpc")"
+  [ "$(entitlements "$xpc/Contents/Helpers/stepv-occt")" = '{"com.apple.security.app-sandbox": true, "com.apple.security.inherit": true}' ] \
+    || fail "$(basename "$x"): the supervisor's kernel must be exactly app-sandbox + inherit"
+  deps=$(otool -L "$xpc/Contents/Helpers/stepv-occt" | tail -n +2 | awk '{print $1}' | grep -v '^/usr/lib/\|^/System/' || true)
+  for d in $deps; do
+    [ -e "$xpc/Contents/Frameworks/${d#@rpath/}" ] || fail "$(basename "$x"): the kernel's $d is not in its service"
+  done
+done
+codesign --verify --deep --strict "$app" || fail "codesign --verify --deep --strict"
+echo "ok: each extension embeds its supervisor, kernel and Frameworks, signed and minimally entitled"
+# The service itself, outside Quick Look: runs, events, the deadline kill,
+# a concurrent run, no throttle, the memory cap, cancel (scripts/ql-e2e).
+"$root/scripts/ql-e2e/supervisor.sh" "$app" || fail "the supervisor service"
+
 report=$("$app/Contents/MacOS/stepv" "$root/tests/data/assembly.step" --png "$tmp/bundled.png" --no-cache)
 sandbox=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["kernel"]["sandbox"])' "$report")
 [ "$sandbox" = macos-profile ] || fail "the bundled kernel ran in sandbox '$sandbox'"

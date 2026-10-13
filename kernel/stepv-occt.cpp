@@ -32,6 +32,9 @@
 namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
+// The lifeline closed (--lifeline): the caller is gone, and no summary was
+// written. Not 3, which is a clean failure its summary explains.
+constexpr int kExitLifeline = 4;
 const char* const kUsage =
     "usage: stepv-occt <input> [--format step|iges|brep] [--mesh <out>]\n"
     "                  [--topology <out.json>] [--edges] [--linear-rel <f>]\n"
@@ -48,6 +51,11 @@ const char* const kUsage =
     "           outline, progress, then the summary, in place of its line\n"
     "  --outline  STEP only: the assembly tree and names, read without a\n"
     "           shape transfer, as one JSON line (outline.h); no outputs\n"
+    "  --lifeline N  descriptor N is a pipe's read end whose writer is the\n"
+    "           caller: when it closes (the caller exited, or let go), this\n"
+    "           process exits at once, with status 4 and no summary (#64)\n"
+    "exit status: 0 geometry, 3 a failure the summary explains, 2 usage,\n"
+    "  4 the lifeline closed\n"
     "environment:\n"
     "  STEPV_OCCT_FACE_BUDGET_MS  time one face's healing may take, in ms\n"
     "           (default 2000); past it the face is drawn as its outline\n";
@@ -230,6 +238,7 @@ private:
 int main(int argc, char** argv) {
     std::string input, format, mesh_out, topology_out;
     bool edges = false, serve = false, outline = false, stream = false;
+    int lifeline = -1;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -247,6 +256,12 @@ int main(int argc, char** argv) {
         else if (a == "--serve") serve = true;
         else if (a == "--outline") outline = true;
         else if (a == "--stream") stream = true;
+        else if (a == "--lifeline") {
+            char* end = nullptr;
+            const long fd = std::strtol(value(), &end, 10);
+            if (*end || fd < 0 || fd > INT_MAX) { std::fputs(kUsage, stderr); return kExitUsage; }
+            lifeline = static_cast<int>(fd);
+        }
         else if (a == "--linear-rel") linear_rel = std::strtod(value(), nullptr);
         else if (a == "--angular-deg") angular_deg = std::strtod(value(), nullptr);
         else if (a == "-h" || a == "--help") { std::fputs(kUsage, stdout); return kExitOk; }
@@ -265,6 +280,20 @@ int main(int argc, char** argv) {
         (serve == outline || stream || !mesh_out.empty() || !topology_out.empty())) {
         std::fputs(kUsage, stderr);
         return kExitUsage;
+    }
+
+    // The lifeline (#64): a supervisor that dies, even by SIGKILL, closes the
+    // pipe's write end, and this read returns. Without it the kernel would
+    // run on with no deadline and no memory cap. A detached thread blocked
+    // in read(): nothing to poll, and the run itself is never touched.
+    if (lifeline >= 0) {
+        std::thread([lifeline] {
+            char c;
+            while (true) {
+                const ssize_t n = read(lifeline, &c, 1);
+                if (n == 0 || (n < 0 && errno != EINTR)) _exit(kExitLifeline);
+            }
+        }).detach();
     }
 
     // Test hook for the memory cap (tests/cli.rs): allocate and touch this many

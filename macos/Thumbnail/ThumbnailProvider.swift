@@ -8,7 +8,9 @@ import QuickLookThumbnailing
 final class ThumbnailProvider: QLThumbnailProvider {
     override func provideThumbnail(for request: QLFileThumbnailRequest,
                                    _ handler: @escaping (QLThumbnailReply?, Error?) -> Void) {
-        stepvLog.info("thumbnail request: \(request.fileURL.lastPathComponent, privacy: .public)")
+        // Notice, not info: persisted, so scripts/ql-e2e can tell a request
+        // the extension got from one Quick Look answered from its cache.
+        stepvLog.notice("thumbnail request: \(request.fileURL.path, privacy: .public)")
         let side = max(request.maximumSize.width, request.maximumSize.height) * request.scale
         let run = StepvKernel.tessellate(request.fileURL, linearRel: StepvKernel.thumbnail.linearRel,
                                          angularDeg: StepvKernel.thumbnail.angularDeg)
@@ -17,10 +19,13 @@ final class ThumbnailProvider: QLThumbnailProvider {
         else {
             // No thumbnail: Quick Look falls back to the generic icon, which is
             // better than a wrong picture.
+            stepvLog.notice("thumbnail \(request.fileURL.path, privacy: .public): none: \(run.error ?? "no geometry", privacy: .public)")
             handler(nil, ThumbnailError.noGeometry(run.error))
             return
         }
         let size = request.maximumSize
+        // What scripts/ql-e2e reads back, as the preview's line.
+        stepvLog.notice("thumbnail \(request.fileURL.path, privacy: .public): drawn, \(Int(side)) px")
         handler(QLThumbnailReply(contextSize: size, currentContextDrawing: {
             // Aspect-fit the square render into the requested box.
             let s = min(size.width, size.height)
