@@ -10,14 +10,13 @@
 #     Info.plist                  UTI declarations for STEP/IGES/BREP
 #     MacOS/stepv-host            the container app (registers the extensions)
 #     MacOS/stepv, stepv-occt     the CLI and its kernel, for Terminal use
-#     Frameworks/                 libstepvocct.dylib (the kernel as a library)
-#                                 and its OCCT dylibs, out of /nix/store: ONE
-#                                 copy, shared by the CLI and both extensions
+#     Frameworks/                 the CLI kernel's OCCT dylibs, out of
+#                                 /nix/store
 #     PlugIns/StepvThumbnail.appex, StepvPreview.appex: Swift, statically
 #                                 linking libstepv_capi.a (the Rust renderer +
-#                                 header reader) and loading the kernel
-#                                 IN-PROCESS: the extension sandbox forbids
-#                                 exec, but not loading a dylib
+#                                 header reader), and no kernel: a Quick Look
+#                                 extension may not spawn one (#79), so its
+#                                 supervisor service does (#64)
 #       Contents/XPCServices/StepvSupervisor.xpc (#64), in each extension:
 #                                 the service that runs the kernel as its
 #                                 child; Helpers/stepv-occt (app-sandbox +
@@ -41,9 +40,8 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 arch=$(uname -m)
 bin=${STEPV_BIN:-$root/target/release/stepv}
 occt=${STEPV_OCCT:-$root/target/kernel/stepv-occt}
-lib_occt=${STEPV_OCCT_LIB:-$root/target/kernel/libstepvocct.dylib}
 lib_capi=${STEPV_CAPI_LIB:-$root/target/release/libstepv_capi.a}
-for f in "$bin" "$occt" "$lib_occt" "$lib_capi"; do
+for f in "$bin" "$occt" "$lib_capi"; do
   [ -e "$f" ] || { echo "build-macos-app: missing $f — run: cargo build --release --workspace && just kernel" >&2; exit 1; }
 done
 
@@ -74,8 +72,7 @@ appex() { # name, frameworks...
   swiftc -module-name "$name" -parse-as-library -application-extension \
     -import-objc-header "$src/Shared/Bridge.h" \
     "$src"/Shared/*.swift "$src"/"${name#Stepv}"/*.swift \
-    "$lib_capi" -liconv -L "$(dirname "$lib_occt")" -lstepvocct \
-    -Xlinker -rpath -Xlinker @executable_path/../../../../Frameworks \
+    "$lib_capi" -liconv \
     -Xlinker -e -Xlinker _NSExtensionMain "${fwflags[@]}" -o "$dir/MacOS/$name"
   sed "s/@VERSION@/$version/g" "$src/${name#Stepv}/Info.plist" > "$dir/Info.plist"
 }
@@ -102,10 +99,9 @@ supervisor() { # the appex's name; its bundle id from its Info.plist
 supervisor StepvThumbnail
 supervisor StepvPreview
 
-# ── CLI + kernel, and every /nix/store dylib they need, made relocatable,
-#    INSIDE each extension: a Quick Look extension's sandbox cannot see the
-#    containing app's files, so a shared copy in stepv.app/Contents/MacOS reads
-#    as "doesn't exist" from the extension. ──
+# ── The kernels, and every /nix/store dylib they need, made relocatable:
+#    the CLI's against the app's Frameworks, each supervisor's against its
+#    own (a sandboxed service cannot read the app around it). ──
 relocate() { # $1: a Mach-O; $2: the Frameworks dir it resolves against
   local f=$1 fw=$2 dep base
   while read -r dep; do
@@ -119,15 +115,10 @@ relocate() { # $1: a Mach-O; $2: the Frameworks dir it resolves against
     install_name_tool -change "$dep" "@rpath/$base" "$f" 2>/dev/null
   done < <(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep '^/nix/store/' || true)
 }
-# ONE copy of the kernel library and OCCT, in the app's Contents/Frameworks,
-# shared by both extensions (rpath @executable_path/../../../../Frameworks)
-# and the bundled CLI. Loading a dylib from the containing app is allowed in
-# the extension sandbox; only exec is not.
+# The CLI kernel's OCCT, in the app's Contents/Frameworks (the supervisors'
+# kernels each have their own copy, below: #101).
 fw="$app/Contents/Frameworks"
 mkdir -p "$fw"
-install -m644 "$lib_occt" "$fw/libstepvocct.dylib"
-chmod u+w "$fw/libstepvocct.dylib"
-relocate "$fw/libstepvocct.dylib" "$fw"
 # The CLI for Terminal use: `stepv.app/Contents/MacOS/stepv`, with its kernel.
 install -m755 "$bin" "$app/Contents/MacOS/stepv"
 install -m755 "$occt" "$app/Contents/MacOS/stepv-occt"

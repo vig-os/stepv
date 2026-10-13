@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **macOS: the Quick Look extensions run the kernel out of process** ([#64](https://github.com/vig-os/stepv/issues/64), part 2):
+  - Both extensions hand the file to their supervisor service and link no kernel and no OCCT
+  - The preview shows the header at once, then the assembly tree and the progress, then the
+    scene. Quick Look is told it is ready as soon as the tree is up (or on the mesh or a
+    failure, when there is no tree), and at the latest after 20 s
+  - Deadlines: 15 s for a thumbnail (Quick Look's ~20 s watchdog), 120 s for a preview's run.
+    A file past them keeps its icon or says why
+  - A cancelled or stuck preview no longer leaves its memory in the extension: the kernel is
+    killed and its memory is freed
 - **macOS: the supervisor service bounds how many kernels run at once** ([#64](https://github.com/vig-os/stepv/issues/64), PR 2a):
   - At most clamp(RAM / (4 × 4096 MB), 1, cores) kernels per service, so about a quarter of
     the memory each. Further requests wait in order. Their deadline counts from when they were
@@ -27,8 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `just ql-e2e` (`scripts/ql-e2e/`) runs both extensions through Quick Look itself, and probes
     the service. `scripts/test-macos.sh` probes the service and checks its signing
   - The app grows from 57 to 174 MB
-    ([#101](https://github.com/vig-os/stepv/issues/101)). The extensions still run the kernel in-process; part 2
-    moves them onto the service
+    ([#101](https://github.com/vig-os/stepv/issues/101))
 - **The kernel reads a file its caller opened** ([#91](https://github.com/vig-os/stepv/issues/91),
   for Quick Look's sandboxed service, [#64](https://github.com/vig-os/stepv/issues/64)):
   - `stepv-occt /dev/fd/N --format step|iges|brep` reads inherited descriptor N from its start.
