@@ -31,6 +31,13 @@ done
 # Canonical (/private/var, not /var): the extensions log the real path.
 QL_E2E_DIR=$(cd -P "$(mktemp -d)" && pwd); export QL_E2E_DIR
 e2e_start=$(date '+%Y-%m-%d %H:%M:%S')
+now() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$e2e"; }
+# The run's log from this request's start on (e2elog.py), one line per
+# event: time, the service that logged it (thumbnail|preview), the message.
+log_from() {
+  timeout 60 /usr/bin/log show --start "$e2e_start" --style ndjson --info \
+    --predicate 'subsystem == "ch.exoma.stepv"' 2>/dev/null | python3 "$e2e/e2elog.py" "$1"
+}
 trap 'rm -rf "$QL_E2E_DIR"' EXIT
 rc=0
 "$e2e/supervisor.sh" "$built" || rc=1
@@ -48,22 +55,19 @@ huge="$QL_E2E_DIR/huge.step"
 "$root/target/kernel/stress-gen" "$root/tests/data/assembly.step" 4000 "$huge" >/dev/null 2>&1 \
   || { echo "FAIL: stress-gen"; rc=1; }
 echo "== thumb huge.step (past the deadline), and box.brep beside it"
-since=$(date '+%Y-%m-%d %H:%M:%S')
+since=$(now)
 t0=$SECONDS
 timeout 60 "$bin/ql-thumb" "$huge" 256 40 >"$QL_E2E_DIR/huge.txt" 2>&1 &
 held=$!
-logged() { timeout 60 /usr/bin/log show --start "$since" --style ndjson --info \
-  --predicate 'subsystem == "ch.exoma.stepv"' 2>/dev/null | python3 -c '
-import json, sys
-for line in sys.stdin:
-    try: print(json.loads(line).get("eventMessage", ""))
-    except ValueError: pass' >"$QL_E2E_DIR/held.log"; grep -qE "$1" "$QL_E2E_DIR/held.log"; }
-until logged 'kernel pid [0-9]+ spawned'; do
+logged() { log_from "$since" >"$QL_E2E_DIR/held.log"; grep -qE "$1" "$QL_E2E_DIR/held.log"; }
+until logged $'\tthumbnail\t.*kernel pid [0-9]+ spawned'; do
   [ $((SECONDS - t0)) -le 20 ] || { echo "FAIL: huge.step's kernel did not start within 20 s"; rc=1; break; }
   sleep 0.5
 done
-# huge.step's own kernel: the first the thumbnail service spawned since.
-huge_pid=$(grep -E -m1 'kernel pid [0-9]+ spawned' "$QL_E2E_DIR/held.log" | sed -E 's/.*kernel pid ([0-9]+) spawned.*/\1/')
+# huge.step's own kernel: the first the thumbnail service spawned from its
+# request on.
+huge_pid=$(grep -E -m1 $'\tthumbnail\t.*kernel pid [0-9]+ spawned' "$QL_E2E_DIR/held.log" \
+  | sed -E 's/.*kernel pid ([0-9]+) spawned.*/\1/')
 "$e2e/ql-e2e.sh" thumb "$root/tests/data/box.brep" || rc=1
 if kill -0 "$held" 2>/dev/null; then echo "ok: concurrent: box.brep drew while huge.step still ran"; else
   echo "FAIL: concurrent: huge.step was done before box.brep was"; rc=1; fi
@@ -71,7 +75,7 @@ wait "$held"
 held_s=$((SECONDS - t0))
 sed 's/^/  /' "$QL_E2E_DIR/huge.txt"
 until logged "thumbnail $huge: none:" || [ $((SECONDS - t0)) -gt 90 ]; do sleep 0.5; done
-kill_line=$(grep -E -m1 "kernel pid ${huge_pid:-none} killed \\(deadline\\)" "$QL_E2E_DIR/held.log")
+kill_line=$(grep -E -m1 $'\tthumbnail\t'".*kernel pid ${huge_pid:-none} killed \\(deadline\\)" "$QL_E2E_DIR/held.log" | cut -f3)
 if [ -n "$kill_line" ] && ! grep -q "type=thumbnail" "$QL_E2E_DIR/huge.txt" && [ "$held_s" -lt 25 ]; then
   echo "ok: deadline: no thumbnail in ${held_s} s; ${kill_line#*: }"
 else
@@ -89,42 +93,38 @@ if [ -n "$ms" ] && [ "$ms" -lt 3000 ]; then echo "ok: no throttle: ${ms} ms"; el
 
 # A preview closed while its kernel runs (#64): Quick Look releases the
 # extension's view controller, which cancels the run, and the preview
-# service kills that kernel. From the service's log: the kernel spawned for
-# huge.step is cancelled with SIGKILL, reaped, within 3 s of the close (at
-# 8 s), and gone.
+# service kills that kernel. From the log, scoped to this request: the
+# preview service's kernel for it is cancelled with SIGKILL within 3 s of
+# the host's own logged close (at 8 s; the host quits at 14 s, so a kill at
+# the quit cannot pass), reaped within 1 s of the cancel, and gone.
 echo "== preview huge.step, closed at 8 s while its kernel runs"
 closed="$QL_E2E_DIR/huge-closed.step"
 cat "$huge" >"$closed"
-since=$(date '+%Y-%m-%d %H:%M:%S')
+since=$(now)
 # open -W does not always block for this host: poll the log for the verdict.
 timeout 60 open -n -W -a "$bin/ql-preview-host.app" --args "$closed" 14 8
 t0=$SECONDS
 while :; do
-  verdict=$(timeout 60 /usr/bin/log show --start "$e2e_start" --style ndjson --info \
-    --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' 2>/dev/null | python3 -c '
-import json, re, sys
+  verdict=$(log_from "$since" | python3 -c '
+import re, sys
 from datetime import datetime
-since = datetime.fromisoformat(sys.argv[1])
-previews, spawn, cancel = set(), None, None
+closed_file = sys.argv[1]
+spawn = closed = cancel = None
 for line in sys.stdin:
-    try: e = json.loads(line)
-    except ValueError: continue
-    if "timestamp" not in e: continue  # the closing summary record of log show
-    m, ts = e.get("eventMessage", ""), datetime.fromisoformat(e["timestamp"][:26])
-    # Which service a pid is: its start line names it (the image path cannot).
-    s = re.search(r"service pid (\d+) started.*preview\.supervisor", m)
-    if s: previews.add(s.group(1))
-    if ts < since: continue
-    s = re.search(r"service pid (\d+)[,)].*kernel pid (\d+) spawned", m)
-    if s and s.group(1) in previews and not spawn: spawn = (s.group(2), ts)
+    t, svc, m = line.rstrip("\n").split("\t", 2)
+    t = datetime.fromisoformat(t)
+    if m == f"preview host closed {closed_file}": closed = t
+    s = re.search(r"kernel pid (\d+) spawned", m)
+    if svc == "preview" and s and not spawn: spawn = s.group(1)
     c = re.search(r"cancelled, kernel pid (\d+) signal 9, reaped ([\d.]+) ms after the cancel", m)
-    if c and spawn and c.group(1) == spawn[0]: cancel = (ts, float(c.group(2)))
+    if svc == "preview" and c and c.group(1) == spawn: cancel = (t, float(c.group(2)))
 if not spawn: print("FAIL no preview kernel spawned"); sys.exit()
-if not cancel: print(f"FAIL kernel pid {spawn[0]} was never cancelled"); sys.exit()
-after = (cancel[0] - spawn[1]).total_seconds()
-ok = after <= 8 + 3 and cancel[1] <= 1000
-print(("ok " if ok else "FAIL ") + f"{spawn[0]} cancelled {after:.1f} s after its spawn, reaped {cancel[1]:.1f} ms after the cancel")' "$since")
-  [[ "$verdict" == "FAIL kernel pid"*"never cancelled" || "$verdict" == "FAIL no preview"* ]] || break
+if not closed: print("FAIL the host never logged its close"); sys.exit()
+if not cancel: print(f"FAIL kernel pid {spawn} was never cancelled"); sys.exit()
+after = (cancel[0] - closed).total_seconds()
+ok = 0 <= after <= 3 and cancel[1] <= 1000
+print(("ok " if ok else "FAIL ") + f"{spawn} cancelled {after:.2f} s after the close, reaped {cancel[1]:.1f} ms after the cancel")' "$closed")
+  [[ "$verdict" == "FAIL kernel pid"*"never cancelled" || "$verdict" == "FAIL no preview"* || "$verdict" == "FAIL the host never"* ]] || break
   [ $((SECONDS - t0)) -lt 30 ] || break
   sleep 1
 done

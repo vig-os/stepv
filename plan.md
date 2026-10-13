@@ -1788,6 +1788,20 @@ memory is freed at once. Two designs failed before this one:
     whose `deinit` cancels its run, and the service kills that kernel.
   - ql-e2e closes a preview of the 4000-part file at 8 s. Its kernel must be cancelled with
     SIGKILL and reaped within 3 s, and gone.
+- **One controller, one preview** (measured on sage, macOS 26.4):
+  - When the previewed item changes (`QLPreviewView.previewItem` set to another file), Quick
+    Look creates a **new** view controller for it and releases the old one. The old one's
+    `deinit` cancels its run, and its kernel was killed at the switch.
+  - So `preparePreviewOfFile` is not called twice on one controller, and there is no second
+    session to cancel.
+- **Log scoping in ql-e2e:**
+  - Every assertion keeps only the events from its own request's start on, to the
+    microsecond (`scripts/ql-e2e/e2elog.py`), and attributes supervisor lines to their service
+    by pid.
+  - `log show --start` takes whole seconds. In #107's CI the repeated cache-control request
+    (7 ms, from Quick Look's cache) passed on the "drawn" line of the request before it, for
+    the same file, in the same second.
+  - Reproduced locally 5 of 5 before the fix; caught 5 of 5 after.
 - **Preview backstop:** past 122 s (the run's 120 s cap plus the thumbnail's 2 s margin), the
   preview gives up on a service that never replied: it cancels the run, shows why, and drops any
   later reply. macos/Tests/PreviewSessionTests checks this against a fake service.

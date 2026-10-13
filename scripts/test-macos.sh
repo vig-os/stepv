@@ -146,13 +146,17 @@ for x in "$app"/Contents/PlugIns/*.appex; do
 done
 # Nothing in an extension runs the kernel in-process (#64): no libstepvocct,
 # no OCCT linked into its binary; its supervisor service runs the kernel.
-# Fails closed: a binary otool cannot read is a failure, not a pass.
+# Fails closed: anything otool cannot read as a Mach-O binary with linked
+# libraries is a failure, not a pass (otool -L exits 0 on a text file).
 links_no_kernel() {
   local deps
+  otool -h "$1" 2>/dev/null | grep -q 'Mach header' || return 1
   deps=$(otool -L "$1" 2>/dev/null) || return 1
-  [ -n "$deps" ] && ! grep -qE 'stepvocct|libTK' <<<"$deps"
+  grep -q '(compatibility version' <<<"$deps" && ! grep -qE 'stepvocct|libTK' <<<"$deps"
 }
+printf 'not a binary\n' >"$tmp/text-file"
 ! links_no_kernel /nonexistent || fail "the linkage check passes a binary that does not exist"
+! links_no_kernel "$tmp/text-file" || fail "the linkage check passes a text file"
 for x in "$app"/Contents/PlugIns/*.appex; do
   links_no_kernel "$x/Contents/MacOS/$(basename "$x" .appex)" \
     || fail "$(basename "$x") links the kernel in-process, or otool cannot read it"
