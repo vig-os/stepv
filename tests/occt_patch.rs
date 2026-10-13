@@ -56,9 +56,11 @@ fn fix_self_intersect_wire_is_quadratic() {
 /// exactly as the unpatched one did on the same platform
 /// (`tests/occt-patch/wires-<system>.txt`, each recorded with nixpkgs'
 /// unpatched OCCT 7.9.3 there). A hoist without the re-fetch differs on 39 of
-/// them. One reference per platform, because OCCT itself does not fix every
-/// wire alike everywhere: unpatched, x86_64-linux (gcc) splits seed 194 once
-/// more than aarch64-darwin (clang).
+/// them. One reference per platform, because OCCT's own floating-point results
+/// differ across platforms: unpatched, x86_64-linux splits seed 194 once more
+/// than aarch64-darwin. The generator is integer-only and builds the same wires
+/// everywhere; whether the compiler or the architecture (FMA contraction on
+/// aarch64, say) makes OCCT differ is unconfirmed.
 #[test]
 fn fix_self_intersect_wire_matches_unpatched_occt() {
     let os = match std::env::consts::OS {

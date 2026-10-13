@@ -51,16 +51,26 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
 
       # The patched OCCT (#74, flake.nix) is in no public cache: pull it from
-      # the project's Cachix cache (plan.md "Binary cache"), and push what this
-      # job builds. Without the token (fork PRs) it only pulls; a fork PR is
-      # never pushed from even if it had one.
+      # the project's Cachix cache (plan.md "Binary cache"). Only `main` pushes
+      # (a push, or a dispatch on main). Any other run, a pull request above
+      # all, gets no token and only pulls: code under review must never write
+      # to the cache the releases build from.
       - name: Cachix
         if: vars.CACHIX_CACHE != ''
         uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866  # v17
         with:
           name: ${{ vars.CACHIX_CACHE }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          authToken: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') && secrets.CACHIX_AUTH_TOKEN || '' }}
+          skipPush: ${{ !(github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
+
+      - name: A pull request holds no Cachix token
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -e "$HOME/.config/cachix/cachix.dhall" ] || [ -n "${CACHIX_AUTH_TOKEN:-}" ]; then
+            echo "::error::a pull-request run has a Cachix token (cachix.dhall or CACHIX_AUTH_TOKEN)"
+            exit 1
+          fi
+          echo "Cachix: pull only on a pull request (skipPush true, no cachix.dhall, no CACHIX_AUTH_TOKEN)"
 
       - name: Build the product and the kernel
         run: nix build --print-build-logs .#default .#kernel

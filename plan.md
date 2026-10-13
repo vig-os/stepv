@@ -1820,9 +1820,16 @@ pair. The function was O(n³) in a wire's edges.
     with nixpkgs' unpatched OCCT on its platform: `aarch64-darwin` on sage, `x86_64-linux` on
     anvil. 91 of the wires reach the big-segment branch. The gate's hoist without the re-fetch
     changes 39 of them.
-    - **Why one file per platform:** OCCT itself does not fix every wire alike everywhere.
-      Unpatched, x86_64-linux (gcc) splits seed 194 once more than aarch64-darwin (clang). On
-      anvil, the patched and unpatched OCCT agree on all 200 wires.
+    - **Why one file per platform:** OCCT's own floating-point results differ across platforms.
+      Unpatched, x86_64-linux splits seed 194 once more than aarch64-darwin. The generator is
+      integer-only and builds the same wires everywhere, and on anvil the patched and unpatched
+      OCCT agree on all 200 wires. Whether the compiler or the architecture (FMA contraction on
+      aarch64, say) causes it is unconfirmed.
+    - **Provenance, in CI:** the flake check `occt-patch-reference` builds `occt-patch-check`
+      against nixpkgs' unpatched `pkgs.opencascade-occt` (from cache.nixos.org). It requires
+      that build to reproduce this platform's reference byte for byte, and to fail the scaling
+      test (exponent >= 2.5; 2.92 on sage). Both kernel lanes run it in `nix flake check`. Pointed
+      at the patched OCCT, it fails (2.03).
     - A platform without a file fails the test and says how to record one; it never skips.
     - The first Linux run differed on every seed. The generator drew a point's x and y as two
       arguments of one call, and GCC evaluates arguments in the other order; the draws are now
@@ -1927,15 +1934,30 @@ the real assembly's transfer time is #51.
     mainly the patched OCCT, the kernel and the dev shell's own derivations.
   - **Pulling:** anyone can pull, with the key
     `gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU=`.
-    - `flake.nix`'s `nixConfig` names the cache and its key. Nix uses it for trusted users, or
-      with `--accept-flake-config`.
-    - The fleet hosts have it in nix.conf (g-fleet #505).
-  - **Pushing:** only CI on trusted events (pushes to `main`, PRs from this repo and releases),
-    with the repo secret `CACHIX_AUTH_TOKEN` and the variable `CACHIX_CACHE=gerchowl`, plus the
-    fleet hosts that hold g-fleet's sops token.
-    - devkit's `ci.yml` does this through `setup-devkit-toolchain`. `kernel.yml` and
-      `release-extension.yml` run `cachix/cachix-action` themselves.
-    - A fork PR has no token, so it only pulls, and `skipPush` stops it pushing even if it had one.
+    - The fleet hosts have it in nix.conf (g-fleet #505), and CI gets it from cachix-action.
+    - Anyone else opts in through their own nix.conf:
+
+      ```
+      extra-substituters = https://gerchowl.cachix.org
+      extra-trusted-public-keys = gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU=
+      ```
+
+    - `flake.nix` has no `nixConfig`. Lix prints six warning lines on every `nix eval` for one,
+      and non-interactive runs ignore it.
+  - **Pushing:** only `main` and the releases, never a pull request.
+    - `kernel.yml` pushes on a push to `main` or a dispatch on `main`. `release-extension.yml`
+      pushes from `release.yml`'s dispatch.
+    - Every other run, and a PR above all, gets no token (`authToken` empty, `skipPush` true),
+      so code under review can't write store paths into the cache that releases build from.
+      `kernel.yml`'s step "A pull request holds no Cachix token" fails a PR run if
+      `cachix.dhall` or `CACHIX_AUTH_TOKEN` is present.
+    - The fleet hosts that hold g-fleet's sops token can also push. This is how the cache was
+      seeded: aarch64-darwin from sage, x86_64-linux built on anvil and pushed from sage.
+    - **Open:** devkit's managed `ci.yml` hands `secrets.CACHIX_AUTH_TOKEN` to
+      `setup-devkit-toolchain` on pull requests too, so its jobs still push from same-repo PRs.
+      That file is regenerated on upgrade, so the fix belongs in devkit: vig-os/devkit#1784
+      (seeded CI cache plus a trusted-only release push; "same-repo PRs can poison a shared
+      writable cache").
   - **Rotating the token:** in g-fleet, run `just cachix-key gerchowl` (it checks the token and
     re-encrypts `secrets/cachix.yaml`), then `just cachix-gh-secret vig-os/stepv`.
 

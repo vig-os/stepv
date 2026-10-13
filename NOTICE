@@ -25,8 +25,10 @@ Modification. The OCCT that stepv's packages ship (and that its nix build
 links against) is built with one patch, to one file:
 
   file:    src/ShapeFix/ShapeFix_IntersectionTool.cxx (library TKShHealing)
-  patch:   nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch
-           (in this repository; applied by flake.nix)
+  patch:   nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch, a
+           path from the root of stepv's source archive for this release
+           (https://github.com/vig-os/stepv/releases, the tag of this
+           package's version); flake.nix applies it
   what:    ShapeFix_IntersectionTool::FixSelfIntersectWire() fetches the
            outer loop's edge once per outer iteration (and again after the
            branch that removes it), instead of on every inner iteration.
