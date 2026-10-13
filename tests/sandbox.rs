@@ -127,6 +127,12 @@ fn kernel_at(
     escape: Option<&str>,
     home: Option<&Path>,
 ) -> Option<KernelRun> {
+    let mut cmd = Command::new(kernel_bin()?);
+    cmd.arg(input).arg("--mesh").arg(mesh);
+    launch(cmd, escape, home)
+}
+
+fn kernel_bin() -> Option<PathBuf> {
     let k = stepv::occt::kernel_path();
     if !k.is_file() {
         if std::env::var_os("STEPV_SKIP_KERNEL_TESTS").is_some_and(|v| v == "1") {
@@ -135,8 +141,10 @@ fn kernel_at(
         }
         panic!("kernel not found at {} — run `just kernel`", k.display());
     }
-    let mut cmd = Command::new(k);
-    cmd.arg(input).arg("--mesh").arg(mesh);
+    Some(k)
+}
+
+fn launch(mut cmd: Command, escape: Option<&str>, home: Option<&Path>) -> Option<KernelRun> {
     if let Some(e) = escape {
         cmd.env("STEPV_OCCT_TEST_ESCAPE", e);
     }
@@ -239,6 +247,34 @@ fn refuses_reads_outside_the_input_directory() {
     let b = Layout::new("read");
     let canary = b.path("elsewhere/canary");
     let Some(r) = kernel(&b, Some(&format!("read:{}", s(&canary)))) else {
+        return;
+    };
+    r.assert_refused("read");
+    r.assert_did_the_work(&b);
+}
+
+/// An fd input (#91) grants that one file: nothing beside it, by name.
+#[test]
+fn an_fd_input_opens_nothing_by_path() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let b = Layout::new("fd");
+    let file = std::fs::File::open(b.path("in/assembly.step")).unwrap();
+    let n = file.as_raw_fd();
+    let Some(k) = kernel_bin() else { return };
+    let mut cmd = Command::new(k);
+    cmd.arg(format!("/dev/fd/{n}"))
+        .args(["--format", "step", "--mesh"])
+        .arg(b.path("out/assembly.msh"));
+    // SAFETY: fcntl is async-signal-safe, on the child's copy of `n`.
+    unsafe {
+        cmd.pre_exec(move || match libc::fcntl(n, libc::F_SETFD, 0) {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    let sibling = format!("read:{}", s(&b.path("in/sibling.step")));
+    let Some(r) = launch(cmd, Some(&sibling), None) else {
         return;
     };
     r.assert_refused("read");

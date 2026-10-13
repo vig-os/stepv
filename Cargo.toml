@@ -100,8 +100,9 @@ default = ["viewer"]
 # capi tripwire, scripts/check-capi-deps.sh).
 viewer = ["dep:minifb", "dep:eframe", "dep:egui-phosphor", "dep:bytemuck", "dep:pollster"]
 
-# proc_pid_rusage: the macOS half of the kernel memory cap (src/occt.rs).
-[target.'cfg(target_os = "macos")'.dependencies]
+# proc_pid_rusage: the macOS half of the kernel memory cap; fcntl: handing
+# the kernel an fd input (src/occt.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

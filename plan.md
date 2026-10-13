@@ -1402,6 +1402,44 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
     - a complete `view` stores the box, equal to the summary's, whether or not a window can
       then open.
 
+### Input from a descriptor (#91, #64 step 1, 2026-10-13)
+
+[#64](https://github.com/vig-os/stepv/issues/64) runs Quick Look's kernel as the child of an XPC
+service whose sandbox opens nothing by path: it holds the file only as a descriptor (#79 round 2:
+`open()` by path is EPERM, `open("/dev/fd/3")` works). The kernel used to `realpath` its input
+(macOS resolves `/dev/fd/3` to the device, not the file) and to pick the reader by extension.
+
+- **`/dev/fd/N`, not `--fd N`:** the input stays a path, so OCCT's path-based readers (STEP,
+  IGES, BREP) work unchanged, on macOS (devfs) and Linux (`/proc/self/fd`) alike, and the
+  supervisor needs no second spelling. An input that is exactly `/dev/fd/N` is a descriptor
+  (`kernel/input.h`); it is never resolved, and it is rewound before reading (on macOS opening
+  `/dev/fd/N` shares N's offset, so wherever the caller left it would be where the reader starts).
+- **`--format step|iges|brep`:** required with a descriptor, optional with a path, where it
+  overrides the extension. `--outline` and `--serve` take both too. The C ABI's
+  `stepv_occt_run_stream`, `stepv_occt_outline` and `stepv_occt_serve` gained a `format`
+  argument (NULL: by extension); `stepv_occt_run`, the Quick Look extensions' entry, is unchanged.
+- **Causes (#62):** a descriptor without `--format`, a `--format` with no reader, or a
+  descriptor that is not open or cannot seek (a pipe) fails at stage `read` with cause
+  `environment`: the caller asked wrongly, the same file reads when asked right, and a front-end
+  must not remember the file as bad. A file that does not read as the format named is `input`,
+  as a STEP file named `.igs` always was.
+- **Sandbox:** a descriptor's read grant is `/dev/fd/N` itself, and nothing by path: Seatbelt
+  matches that name, and Landlock's rule, opened through the magic link, lands on the file
+  alone. The file's directory stays closed, and so do the `$HOME` rules' concerns.
+- **Rust:** `occt::Input` (`Path`, or `Fd { fd, format }` with `occt::Format`) for `occt::run`,
+  `run_streaming` and `outline`; `&Path` and `&PathBuf` convert, so path callers are unchanged.
+  The descriptor is inherited at its own number (close-on-exec cleared in the child alone).
+- **Known limit:** a multi-file assembly's part files are unreachable from a descriptor; the run
+  reports them in `external_missing` and fails with cause `environment`, as for missing files by
+  path. Handing the parts over too is
+  [#92](https://github.com/vig-os/stepv/issues/92).
+- **Tests:** `tests/fd.rs`: STEP, IGES and BREP as fd 3 with the file deleted after opening give
+  the summary (minus timings and peak memory) and mesh bytes of a run by path; no `--format`,
+  `--format dwg` and a wrong format fail with the causes above; `occt::run` and `occt::outline`
+  through `Input::Fd` match the path's, and a pipe fails with `environment`.
+  `tests/sandbox.rs`: an fd input's sibling file is refused by the sandbox. All fail on the
+  previous kernel.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:

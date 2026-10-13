@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The kernel reads a file its caller opened** ([#91](https://github.com/vig-os/stepv/issues/91),
+  for Quick Look's sandboxed service, [#64](https://github.com/vig-os/stepv/issues/64)):
+  - `stepv-occt /dev/fd/N --format step|iges|brep` reads inherited descriptor N from its start.
+    The path is not resolved, and the sandbox grants that descriptor alone, nothing by path
+  - `--format` is required with a descriptor and overrides the extension for a path. A missing
+    or unknown format, or a descriptor that cannot seek, fails with cause `environment`
+  - Rust: `occt::Input` and `occt::Format`; `occt::run`, `run_streaming` and `outline` take an
+    `Input::Fd` as well as a path
+  - C ABI: `stepv_occt_run_stream`, `stepv_occt_outline` and `stepv_occt_serve` take a `format`
+    argument (NULL: by extension)
+  - A multi-file assembly's part files cannot be reached from a descriptor: they are reported
+    missing ([#92](https://github.com/vig-os/stepv/issues/92))
 - **Progress on a terminal, and the viewer leaves the outline too** ([#63](https://github.com/vig-os/stepv/issues/63), part 1):
   - When stderr is a terminal, `stepv` shows one line of progress there, redrawn in place:
     the part count once the outline arrives (at once from a cached outline artifact), then

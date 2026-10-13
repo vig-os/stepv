@@ -3,6 +3,7 @@
 // contract (one JSON line, or with --stream the event frames of
 // stepv_occt.h; OCCT's own chatter goes to stderr).
 
+#include "input.h"
 #include "sandbox.h"
 #include "stepv_occt.h"
 
@@ -22,6 +23,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,8 +32,14 @@ namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
 const char* const kUsage =
-    "usage: stepv-occt <input> [--mesh <out>] [--topology <out.json>] [--edges]\n"
-    "                  [--linear-rel <f>] [--angular-deg <f>]\n"
+    "usage: stepv-occt <input> [--format step|iges|brep] [--mesh <out>]\n"
+    "                  [--topology <out.json>] [--edges] [--linear-rel <f>]\n"
+    "                  [--angular-deg <f>]\n"
+    "  <input>  a STEP, IGES or BREP file, or /dev/fd/N: descriptor N, opened\n"
+    "           by the caller and inherited, read from its start (#91)\n"
+    "  --format  the reader, in place of the extension's; required with\n"
+    "           /dev/fd/N. A multi-file assembly's part files are not\n"
+    "           reachable from a descriptor: they are reported missing\n"
     "  --edges  the mesh is STEPVMSH v4, with the B-rep edges as polylines\n"
     "  --serve  read the file once, then answer measurement queries, one JSON\n"
     "           line each, on stdin/stdout (measure.h); no outputs\n"
@@ -175,7 +183,7 @@ void on_event(void* ctx, int kind, const char* payload, unsigned long length) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string input, mesh_out, topology_out;
+    std::string input, format, mesh_out, topology_out;
     bool edges = false, serve = false, outline = false, stream = false;
     double linear_rel = 0.001, angular_deg = 20.0;  // = stepv::Deflection::PREVIEW
     for (int i = 1; i < argc; ++i) {
@@ -188,6 +196,7 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (a == "--mesh") mesh_out = value();
+        else if (a == "--format") format = value();
         else if (a == "--topology") topology_out = value();
         else if (a == "--edges") edges = true;
         else if (a == "--serve") serve = true;
@@ -232,7 +241,10 @@ int main(int argc, char** argv) {
     //
     // Both paths are resolved here, outside it: inside, realpath() of a
     // relative path cannot read the working directory's ancestry (macOS).
-    const std::string input_path = canonical(input);
+    // A descriptor (input.h) is not resolved: it is compared with the
+    // outputs by the path it really has.
+    const std::optional<int> in_fd = stepv::input_fd(input);
+    const std::string input_path = in_fd ? fd_path(*in_fd) : canonical(input);
     // An output that IS the input, or two outputs on one path: creating the
     // outputs truncates them, so refuse before touching anything.
     {
@@ -254,7 +266,12 @@ int main(int argc, char** argv) {
     std::string read_root = input_dir;
     const char* home_env = std::getenv("HOME");
     const std::string home = home_env ? canonical(home_env) : "";
-    if (input_dir == "/" ||
+    // A descriptor grants itself and no path: its file's directory, and any
+    // file by name, stay closed (Landlock follows /dev/fd/N to the file;
+    // Seatbelt matches the name /dev/fd/N).
+    if (in_fd)
+        read_root = input;
+    else if (input_dir == "/" ||
         (!home.empty() && !input_dir.empty() &&
          (home == input_dir || home.rfind(input_dir + "/", 0) == 0)))
         read_root = input_path;
@@ -276,7 +293,8 @@ int main(int argc, char** argv) {
     }
     const std::string sandbox = stepv::enter_sandbox(read_root, writable);
     // Unresolvable: the core reports it, in its own words.
-    if (!input_path.empty()) input = input_path;
+    if (!in_fd && !input_path.empty()) input = input_path;
+    const char* fmt = format.empty() ? nullptr : format.c_str();
 
     if (const char* e = std::getenv("STEPV_OCCT_TEST_ESCAPE")) escape_attempt(e);
 
@@ -290,12 +308,12 @@ int main(int argc, char** argv) {
     if (serve) {
         // Sandboxed like a run, with nothing writable: queries in, answers
         // out, on the descriptors it already has.
-        return stepv_occt_serve(input.c_str(), sandbox.c_str(), STDIN_FILENO, json_fd);
+        return stepv_occt_serve(input.c_str(), fmt, sandbox.c_str(), STDIN_FILENO, json_fd);
     }
     if (outline) {
         // Sandboxed like --serve, with nothing writable: one JSON line out.
         int code = 3;
-        char* json = stepv_occt_outline(input.c_str(), &code);
+        char* json = stepv_occt_outline(input.c_str(), fmt, &code);
         if (!json) return 3;
         std::string line = json;
         stepv_occt_free(json);
@@ -309,7 +327,7 @@ int main(int argc, char** argv) {
     if (stream) std::signal(SIGPIPE, SIG_IGN);
     Wire wire{json_fd, true};
     char* json = stepv_occt_run_stream(
-        input.c_str(), mesh_out.empty() ? nullptr : mesh_out.c_str(),
+        input.c_str(), fmt, mesh_out.empty() ? nullptr : mesh_out.c_str(),
         topology_out.empty() ? nullptr : topology_out.c_str(), edges ? 1 : 0, linear_rel,
         angular_deg, stream ? on_event : nullptr, &wire, &code);
     if (!json) return 3;

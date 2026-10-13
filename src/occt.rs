@@ -11,7 +11,8 @@
 //! [`read_mesh`] is its only reader.
 
 use std::io::{BufReader, Read};
-use std::os::unix::process::ExitStatusExt;
+use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -213,22 +214,123 @@ impl Limits {
     };
 }
 
+/// What the kernel reads: a file by its path, or a file the caller already
+/// opened (#91). A `&Path` or `&PathBuf` converts into [`Input::Path`].
+#[derive(Debug, Clone, Copy)]
+pub enum Input<'a> {
+    /// Read by path; the extension picks the reader. A multi-file STEP
+    /// assembly finds its part files beside it.
+    Path(&'a Path),
+    /// An open file, inherited by the kernel as `/dev/fd/N` at its own
+    /// number `N` and read from its start: for a caller that may hold the
+    /// file but not open it by name, as #64's sandboxed Quick Look service.
+    /// The kernel's sandbox grants it this file and nothing by path.
+    ///
+    /// `fd` must not be stdin, stdout or stderr (the spawn fails with
+    /// [`std::io::ErrorKind::InvalidInput`]), and must seek: a pipe fails
+    /// the run with [`Cause::Environment`], as a `format` the file does not
+    /// read as fails it with [`Cause::Input`]. The kernel rewinds it and
+    /// reads it through; where the offset is shared (macOS), the caller
+    /// finds it moved. A multi-file
+    /// assembly's part files are unreachable from it: the run reports them
+    /// missing (`external_missing`, #92).
+    Fd { fd: BorrowedFd<'a>, format: Format },
+}
+
+/// The reader for an [`Input::Fd`], which has no extension to go by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Step,
+    Iges,
+    Brep,
+}
+
+impl Format {
+    /// The kernel's `--format` value, as the summary's `format` says it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Step => "step",
+            Self::Iges => "iges",
+            Self::Brep => "brep",
+        }
+    }
+}
+
+impl<'a> From<&'a Path> for Input<'a> {
+    fn from(p: &'a Path) -> Self {
+        Self::Path(p)
+    }
+}
+
+impl<'a> From<&'a PathBuf> for Input<'a> {
+    fn from(p: &'a PathBuf) -> Self {
+        Self::Path(p)
+    }
+}
+
+impl Input<'_> {
+    /// Names the input on `cmd`'s command line, and hands the kernel the
+    /// descriptor, if any.
+    fn pass(self, cmd: &mut Command) -> std::io::Result<()> {
+        match self {
+            Self::Path(p) => {
+                cmd.arg(p);
+            }
+            Self::Fd { fd, format } => {
+                let n = fd.as_raw_fd();
+                // The child's 0, 1 and 2 are its stdio, set up before this.
+                if n <= 2 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "an fd input cannot be stdin, stdout or stderr",
+                    ));
+                }
+                cmd.arg(format!("/dev/fd/{n}"))
+                    .arg("--format")
+                    .arg(format.as_str());
+                // SAFETY: between fork and exec, fcntl is async-signal-safe
+                // and touches nothing but the child's copy of `n`, which
+                // the borrow keeps open until the spawn returns.
+                unsafe {
+                    cmd.pre_exec(move || {
+                        // Inherited: every std descriptor is close-on-exec.
+                        if libc::fcntl(n, libc::F_SETFD, 0) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Runs the kernel on `input`, writing mesh buffers to `mesh_out` and the
 /// exact topology ([`crate::topology`]) to `topology_out`, each if given.
 ///
 /// # Errors
-/// Only when the kernel cannot be spawned at all. Every failure of the kernel
-/// itself is reported through [`Run::outcome`].
-pub fn run(
+/// Only when the kernel cannot be spawned at all, an [`Input::Fd`] of
+/// stdio among the reasons. Every failure of the kernel itself is reported
+/// through [`Run::outcome`].
+pub fn run<'a>(
     kernel: &Path,
-    input: &Path,
+    input: impl Into<Input<'a>>,
     deflection: Deflection,
     limits: Limits,
     mesh_out: Option<&Path>,
     topology_out: Option<&Path>,
     edges: bool,
 ) -> std::io::Result<Run> {
-    let cmd = command(kernel, input, deflection, mesh_out, topology_out, edges);
+    let cmd = command(
+        kernel,
+        input.into(),
+        deflection,
+        mesh_out,
+        topology_out,
+        edges,
+    )?;
     let s = supervise(
         cmd,
         limits,
@@ -273,9 +375,9 @@ pub fn run(
 /// # Errors
 /// Only when the kernel cannot be spawned at all, as [`run`].
 #[allow(clippy::too_many_arguments)]
-pub fn run_streaming(
+pub fn run_streaming<'a>(
     kernel: &Path,
-    input: &Path,
+    input: impl Into<Input<'a>>,
     deflection: Deflection,
     limits: Limits,
     mesh_out: Option<&Path>,
@@ -283,7 +385,14 @@ pub fn run_streaming(
     edges: bool,
     on_event: &mut dyn FnMut(Event),
 ) -> std::io::Result<Run> {
-    let mut cmd = command(kernel, input, deflection, mesh_out, topology_out, edges);
+    let mut cmd = command(
+        kernel,
+        input.into(),
+        deflection,
+        mesh_out,
+        topology_out,
+        edges,
+    )?;
     cmd.arg("--stream");
     let (tx, rx) = mpsc::sync_channel::<Event>(64);
     let s = supervise(
@@ -327,12 +436,12 @@ pub fn run_streaming(
 /// The kernel's command line for a run.
 fn command(
     kernel: &Path,
-    input: &Path,
+    input: Input,
     deflection: Deflection,
     mesh_out: Option<&Path>,
     topology_out: Option<&Path>,
     edges: bool,
-) -> Command {
+) -> std::io::Result<Command> {
     let mut cmd = Command::new(kernel);
     // The nix product's wrapper sets it for the viewer's window and GPU
     // libraries; the sandboxed kernel needs none of them (#32 review).
@@ -340,8 +449,8 @@ fn command(
     // A run that draws decides what to heal by its own clock; replaying
     // another run's decisions is the measurement server's (#51).
     cmd.env_remove("STEPV_OCCT_UNHEALED");
-    cmd.arg(input)
-        .arg("--linear-rel")
+    input.pass(&mut cmd)?;
+    cmd.arg("--linear-rel")
         .arg(deflection.linear_rel.to_string())
         .arg("--angular-deg")
         .arg(deflection.angular_deg.to_string())
@@ -358,7 +467,7 @@ fn command(
     if let Some(out) = topology_out {
         cmd.arg("--topology").arg(out);
     }
-    cmd
+    Ok(cmd)
 }
 
 /// How a run ended, from how its process did and the summary it gave.
@@ -498,17 +607,25 @@ impl std::fmt::Display for OutlineError {
 impl std::error::Error for OutlineError {}
 
 /// Reads the assembly outline of the STEP file `input` (`stepv-occt
-/// --outline`), held to `limits` like a run.
+/// --outline`; a path or a descriptor, [`Input`]), held to `limits` like a
+/// run.
 ///
 /// # Errors
 /// When `input` is not STEP, does not read, or the kernel cannot be spawned,
 /// times out, passes the memory cap, crashes, or answers something that is
 /// not a valid outline (leaves not numbered `0..leaves` in order).
-pub fn outline(kernel: &Path, input: &Path, limits: Limits) -> Result<Outline, OutlineError> {
+pub fn outline<'a>(
+    kernel: &Path,
+    input: impl Into<Input<'a>>,
+    limits: Limits,
+) -> Result<Outline, OutlineError> {
     let mut cmd = Command::new(kernel);
     cmd.env_remove("LD_LIBRARY_PATH");
-    cmd.arg(input)
-        .arg("--outline")
+    input
+        .into()
+        .pass(&mut cmd)
+        .map_err(|e| OutlineError(format!("cannot start kernel: {e}")))?;
+    cmd.arg("--outline")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

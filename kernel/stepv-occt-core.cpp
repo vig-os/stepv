@@ -76,6 +76,7 @@
 // src/occt.rs is the reader; keep the two in step.
 
 #include "heal.h"
+#include "input.h"
 #include "json.h"
 #include "measure.h"
 #include "stepv_occt.h"
@@ -885,24 +886,26 @@ static_assert(sizeof(float) == 4 && sizeof(double) == 8, "IEEE-754 widths assume
 
 // ── Readers ─────────────────────────────────────────────────────────────────
 
-std::string lower_ext(const std::string& path) {
-    auto dot = path.find_last_of('.');
-    if (dot == std::string::npos) return {};
-    std::string e = path.substr(dot + 1);
-    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return e;
-}
-
-// Reads `path` into `doc`. Fills the read/transfer timings and returns false
-// with s.error set on failure. A STEP file's outline goes to `ev` between the
+// Reads `path` into `doc`, with the reader `format` names (input.h; "": the
+// extension's). Fills the read/transfer timings and returns false with
+// s.error set on failure. A STEP file's outline goes to `ev` between the
 // parse and the transfer, and the transfer's progress after it.
-bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Summary& s,
-               const Events& ev) {
-    const std::string ext = lower_ext(path);
+bool read_into(const std::string& path, const std::string& format,
+               const Handle(TDocStd_Document)& doc, Summary& s, const Events& ev) {
+    std::string why;
+    const std::string fmt = stepv::reader_format(path, format, why);
     auto t0 = Clock::now();
     // A file the host won't let us open is not the file's fault (#62): open
     // it first, so only a failure after it opened is the input's.
     auto opened = [&] {
+        // A descriptor is read from its start, wherever its caller left it:
+        // on macOS, opening /dev/fd/N shares N's offset. One that cannot
+        // seek (a pipe) or is not open is the caller's to fix.
+        if (const auto in = stepv::input_fd(path); in && ::lseek(*in, 0, SEEK_SET) != 0) {
+            s.error = "cannot rewind input descriptor: " + std::string(std::strerror(errno));
+            s.cause = kEnvironment;
+            return false;
+        }
         const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd >= 0) return ::close(fd), true;
         s.error = "cannot open input: " + std::string(std::strerror(errno));
@@ -910,7 +913,7 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
         return false;
     };
 
-    if (ext == "step" || ext == "stp") {
+    if (fmt == "step") {
         s.format = "step";
         s.stage = "read";
         if (!opened()) return false;
@@ -955,7 +958,7 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
             if (it.Value().IsNull() || it.Value()->GetLoadStatus() != IFSelect_RetDone)
                 ++s.external_missing;
         }
-    } else if (ext == "iges" || ext == "igs") {
+    } else if (fmt == "iges") {
         s.format = "iges";
         s.stage = "read";
         if (!opened()) return false;
@@ -977,7 +980,7 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
             s.cause = kInput;
             return false;
         }
-    } else if (ext == "brep") {
+    } else if (fmt == "brep") {
         s.format = "brep";
         s.stage = "read";
         if (!opened()) return false;
@@ -995,8 +998,10 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
     } else {
         s.format = "unknown";
         s.stage = "read";
-        s.error = "unsupported extension: ." + ext;
-        s.cause = kInput;
+        s.error = why;
+        // An extension is the file's own; --format, or its absence for a
+        // descriptor, is the caller's: that same file reads, asked right.
+        s.cause = format.empty() && !stepv::input_fd(path) ? kInput : kEnvironment;
         return false;
     }
     s.t_transfer_ms = ms_since(t0);
@@ -1004,21 +1009,24 @@ bool read_into(const std::string& path, const Handle(TDocStd_Document)& doc, Sum
     return true;
 }
 
-int run(const std::string& input_arg, const std::string& mesh_out,
+int run(const std::string& input_arg, const std::string& format, const std::string& mesh_out,
         const std::string& topology_out, bool edges, double linear_rel, double angular_deg,
         bool parallel, const Events& ev, Summary& s) {
     // STEPCAFControl_Reader resolves multi-file assemblies' external
     // references against the main file's directory ONLY when the path is
     // absolute; given a relative one it silently yields an empty document.
+    // A descriptor (input.h) stays as it is: it has no directory, so a
+    // multi-file assembly's part files are missing from it (#92).
+    const bool fd = stepv::input_fd(input_arg).has_value();
     char resolved[PATH_MAX];
-    if (!realpath(input_arg.c_str(), resolved)) {
+    if (!fd && !realpath(input_arg.c_str(), resolved)) {
         s.format = "unknown";
         s.stage = "read";
         s.error = "cannot resolve input path: " + std::string(std::strerror(errno));
         s.cause = kEnvironment;
         return kExitFailed;
     }
-    const std::string input = resolved;
+    const std::string input = fd ? input_arg : resolved;
     // Test hook (tests/cache.rs, #62): an OCCT exception mid-run, to check its
     // cause: "oom" throws Standard_OutOfMemory, anything else Standard_Failure.
     if (const char* t = std::getenv("STEPV_OCCT_TEST_THROW")) {
@@ -1034,7 +1042,7 @@ int run(const std::string& input_arg, const std::string& mesh_out,
     Handle(TDocStd_Document) doc;
     app->NewDocument("BinXCAF", doc);
 
-    if (!read_into(input, doc, s, ev)) return kExitFailed;
+    if (!read_into(input, format, doc, s, ev)) return kExitFailed;
 
     Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
@@ -1282,11 +1290,12 @@ extern "C" char* stepv_occt_run_topology(const char* input, const char* mesh_out
 extern "C" char* stepv_occt_run_ex(const char* input, const char* mesh_out,
                                    const char* topology_out, int edges, double linear_rel,
                                    double angular_deg, int* exit_code) {
-    return stepv_occt_run_stream(input, mesh_out, topology_out, edges, linear_rel, angular_deg,
-                                 nullptr, nullptr, exit_code);
+    return stepv_occt_run_stream(input, nullptr, mesh_out, topology_out, edges, linear_rel,
+                                 angular_deg, nullptr, nullptr, exit_code);
 }
 
-extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
+extern "C" char* stepv_occt_run_stream(const char* input, const char* format,
+                                       const char* mesh_out,
                                        const char* topology_out, int edges, double linear_rel,
                                        double angular_deg, stepv_occt_event_fn on_event,
                                        void* ctx, int* exit_code) {
@@ -1307,7 +1316,7 @@ extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
         s.cause = kEnvironment;
     } else {
         try {
-            code = run(input, mesh_out ? mesh_out : "", topology_out ? topology_out : "",
+            code = run(input, format ? format : "", mesh_out ? mesh_out : "", topology_out ? topology_out : "",
                        edges != 0, linear_rel, angular_deg, true, ev, s);
         } catch (const Standard_OutOfMemory&) {
             // A Standard_Failure too: caught first, as the memory it is.
@@ -1338,7 +1347,7 @@ extern "C" char* stepv_occt_run_stream(const char* input, const char* mesh_out,
 
 extern "C" void stepv_occt_free(char* p) { std::free(p); }
 
-extern "C" char* stepv_occt_outline(const char* input, int* exit_code) {
+extern "C" char* stepv_occt_outline(const char* input, const char* format, int* exit_code) {
     std::lock_guard<std::mutex> lock(serial());
     // Before its reader: OCCT keeps the FixShape registered first (heal.h).
     warn_unbudgeted();
@@ -1346,7 +1355,7 @@ extern "C" char* stepv_occt_outline(const char* input, int* exit_code) {
     int code = kExitFailed;
     try {
         if (!input) throw std::runtime_error("invalid arguments");
-        json = stepv::outline_json(input);
+        json = stepv::outline_json(input, format ? format : "");
         code = kExitOk;
     } catch (const Standard_Failure& e) {
         json = "{\"error\":\"" + json_escape(std::string("OCCT: ") + e.GetMessageString()) + "\"}";
@@ -1377,8 +1386,8 @@ bool write_line(int fd, std::string line) {
 
 }  // namespace
 
-extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int in_fd,
-                                int out_fd) {
+extern "C" int stepv_occt_serve(const char* input_arg, const char* format, const char* sandbox,
+                                int in_fd, int out_fd) {
     std::call_once(*new std::once_flag, [] {
         Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     });
@@ -1398,7 +1407,8 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
     std::vector<Placed> placed;
     try {
         char resolved[PATH_MAX];
-        if (!input_arg || !realpath(input_arg, resolved)) {
+        const bool fd = input_arg && stepv::input_fd(input_arg);
+        if (!input_arg || (!fd && !realpath(input_arg, resolved))) {
             s.error = "cannot resolve input path";
         } else {
             XCAFDoc_ShapeTool::SetAutoNaming(false);
@@ -1406,7 +1416,7 @@ extern "C" int stepv_occt_serve(const char* input_arg, const char* sandbox, int 
             Handle(TDocStd_Document) doc;
             app->NewDocument("BinXCAF", doc);
             stepv::begin_face_budget();
-            if (read_into(resolved, doc, s, Events{})) {
+            if (read_into(fd ? input_arg : resolved, format ? format : "", doc, s, Events{})) {
                 Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
                 Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
                 TDF_LabelSequence roots;
