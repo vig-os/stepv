@@ -77,8 +77,15 @@ final class Probe {
                   deadlineMs: deadlineMs, memoryMB: memoryMB)
     }
 
-    /// Waits until the service has logged this run's kernel as spawned.
-    func awaitSpawned() -> Bool { awaitLogged("spawned \(ordinal)") }
+    /// Waits until the service has logged this run's kernel as spawned. Not
+    /// seen: says what became of the run, for the log of a failure no one
+    /// can look at afterwards.
+    func awaitSpawned() -> Bool {
+        if awaitLogged("spawned \(ordinal)") { return true }
+        lock.lock(); let r = result; lock.unlock()
+        print("  run \(ordinal) not seen spawned; its reply so far: \(outcomeLine(r))")
+        return false
+    }
 
     var isDone: Bool { lock.lock(); defer { lock.unlock() }; return result != nil }
 

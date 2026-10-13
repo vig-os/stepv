@@ -117,6 +117,7 @@ drive() {
 }
 container_tmp="$HOME/Library/Containers/$service/Data/tmp"
 rc=0
+run_start=$(date '+%Y-%m-%d %H:%M:%S')
 
 # 1. The service dies under a running kernel (SIGKILL: no cleanup of its
 #    own runs): the kernel's lifeline closes and it exits within 1 s. Its
@@ -324,5 +325,13 @@ cat "$tmp/live.txt"
 left=$(find "$container_tmp" -maxdepth 1 -name 'stepv-*' 2>/dev/null)
 if [ -z "$left" ]; then echo "ok: no run directory left in $container_tmp"; else echo "FAIL: left in $container_tmp: $left"; rc=1; fi
 
+if [ $rc -ne 0 ]; then
+  # The evidence, for a failure on a machine no one can look at afterwards:
+  # every supervisor line of the whole run.
+  echo "  the supervisor log of this run:"
+  timeout 60 /usr/bin/log show --start "$run_start" --style compact --info \
+    --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' 2>/dev/null \
+    | tail -n 300 | sed 's/^/    /'
+fi
 [ $rc -eq 0 ] && echo "supervisor: all checks passed" || echo "supervisor: FAILURES"
 exit $rc
