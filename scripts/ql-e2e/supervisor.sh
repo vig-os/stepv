@@ -35,6 +35,10 @@ mkdir -p "$tmp/files"
 cp "$root"/tests/data/{assembly.step,box.igs,box.brep} "$tmp/files/"
 "$kernel_dir/stress-gen" "$root/tests/data/assembly.step" 1000 "$tmp/files/slow.step" >/dev/null 2>&1 \
   || fail "stress-gen"
+# A run that holds its slot until the probe cancels it: 4000 parts, ~30 s of
+# kernel, so no held run ends on its own while the order is checked (#111).
+"$kernel_dir/stress-gen" "$root/tests/data/assembly.step" 4000 "$tmp/files/huge.step" >/dev/null 2>&1 \
+  || fail "stress-gen"
 
 # The probe: sandboxed, reading nothing but the inputs. A sandboxed command
 # line tool traps (SIGTRAP) without an embedded Info.plist (#79).
@@ -83,6 +87,34 @@ await_log() {
   done
   return 1
 }
+# Runs a probe that asks, on stdout, to wait for its own runs in the log
+# ("await spawned N": run #N's kernel spawned; "await queued N": run #N
+# queued), and answers "seen" on its stdin once the service instance it
+# started has logged that (or "missing" after 30 s): the tests are ordered
+# on the logged event itself, never on time (#111). The instance: the one
+# that started since $start.
+drive() {
+  rm -f "$tmp/sync"; mkfifo "$tmp/sync"
+  exec 8<>"$tmp/sync"
+  "$@" <"$tmp/sync" | while IFS= read -r line; do
+    case $line in
+      "await spawned "* | "await queued "*)
+        read -r _ what n <<<"$line"
+        await_log 'service pid [0-9]+ started' 30
+        svc=$(grep -oE -m1 'service pid [0-9]+ started' "$tmp/log.txt" | awk '{print $3}')
+        if [ "$what" = spawned ]; then
+          want="run #$n \\(service pid ${svc:-none}, up [0-9]+ ms\\): kernel pid [0-9]+ spawned"
+        else
+          want="run #$n \\(service pid ${svc:-none}\\): queued"
+        fi
+        if await_log "$want" 30; then echo seen >&8; else echo missing >&8; fi ;;
+      *) echo "$line" ;;
+    esac
+  done
+  local status=${PIPESTATUS[0]}
+  exec 8>&-
+  return "$status"
+}
 container_tmp="$HOME/Library/Containers/$service/Data/tmp"
 rc=0
 
@@ -91,13 +123,13 @@ rc=0
 #    mesh stays behind until the next service sweeps it (step 2).
 start=$(date '+%Y-%m-%d %H:%M:%S')
 echo "== supervisor probe: $service"
-"$probe" "$service" hold "$tmp/files/slow.step" >"$tmp/hold.txt" 2>&1 &
+"$probe" "$service" hold "$tmp/files/huge.step" >"$tmp/hold.txt" 2>&1 &
 holder=$!
 if await_log 'kernel pid [0-9]+ spawned' 20; then
   line=$(grep -E -m1 'kernel pid [0-9]+ spawned' "$tmp/log.txt")
   spid=$(sed -E 's/.*service pid ([0-9]+).*/\1/' <<<"$line")
   kpid=$(sed -E 's/.*kernel pid ([0-9]+) spawned.*/\1/' <<<"$line")
-  sleep 1  # into the run: the kernel is reading
+  # The huge file runs ~30 s: its kernel is surely still running now.
   kill -9 "$spid"
   t0=$(python3 -c 'import time; print(time.time())')
   while ps -p "$kpid" >/dev/null 2>&1; do
@@ -134,7 +166,7 @@ start=$(date '+%Y-%m-%d %H:%M:%S')
 limit=$(grep -oE -m1 'admission limit [0-9]+' "$tmp/log.txt" | awk '{print $3}')
 [ -n "$limit" ] || { echo "FAIL: the service logged no admission limit"; rc=1; limit=1; }
 echo "service admission limit: $limit"
-timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step} "$limit" || rc=1
+drive timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step,huge.step} "$limit" || rc=1
 if await_log 'started: swept ([2-9]|[1-9][0-9]+) dead run' 20; then
   echo "ok: logged: $(grep -E -m1 'started: swept' "$tmp/log.txt")"
 else
@@ -159,7 +191,7 @@ for want in 'killed \(deadline\) at [0-9]+ ms, reaped in [0-9.]+ ms' \
 done
 pids=$(grep -oE 'kernel pid [0-9]+ spawned' "$tmp/log.txt" | awk '{print $3}')
 n=$(wc -w <<<"$pids" | tr -d ' ')
-[ "$n" -eq 9 ] || { echo "FAIL: the service logged $n kernel spawns, expected 9"; rc=1; }
+[ "$n" -eq 10 ] || { echo "FAIL: the service logged $n kernel spawns, expected 10"; rc=1; }
 alive=0
 for p in $pids; do ps -p "$p" >/dev/null 2>&1 && { echo "FAIL: kernel pid $p survived"; alive=1; }; done
 if [ $alive -eq 0 ]; then echo "ok: all $n kernels the service spawned are gone"; else rc=1; fi
@@ -206,17 +238,8 @@ echo 1 >"$lxpc/Contents/Resources/admission-limit"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$lxpc" 2>/dev/null \
   || fail "signing the test supervisor"
 start=$(date '+%Y-%m-%d %H:%M:%S')
-# The probe waits on stdin until the cancelled run is seen queued: an
-# ordering signal, not a sleep.
-mkfifo "$tmp/go"
-exec 9<>"$tmp/go"
-timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
-  "$service" admission "$tmp/files/slow.step" "$tmp/files/assembly.step" <"$tmp/go" &
-probe_pid=$!
-await_log 'run #2 \(service pid [0-9]+\): queued' 30 || { echo "FAIL: admission: run #2 was never queued"; rc=1; }
-echo go >&9
-wait "$probe_pid" || rc=1
-exec 9>&-
+drive timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+  "$service" admission "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 log_since >"$tmp/log.txt"
 order=$(python3 - "$tmp/log.txt" <<'PY'
 import re, sys
@@ -231,7 +254,7 @@ for i, l in enumerate(lines):
     r = runs.setdefault(int(m.group(1)), {})
     if re.search(r"kernel pid \d+ spawned", l): r["spawned"] = i
     if "queued" in l: r["queued"] = i
-    if re.search(r"exit \d+ in \d+ ms|killed \(", l): r["ended"] = i
+    if re.search(r"exit \d+ in \d+ ms|killed \(|cancelled, kernel pid", l): r["ended"] = i
     if "cancelled in the queue, never spawned" in l: r["cancelled"] = r.get("cancelled", 0) + 1
     if "past its deadline in the queue, never spawned" in l: r["expired"] = i
 first = min((n for n in runs if "spawned" in runs[n]), default=None)
@@ -256,16 +279,17 @@ else
   echo "FAIL: admission order: $order"; rc=1
 fi
 
-# The admission-time deadline check: a fourth copy, L = 1 and a 3 s hold on
-# each handover (STEPV_TEST_HOOKS), so a queued run's deadline passes after
-# its slot is handed over and before it starts.
+# The admission-time deadline check: a fourth copy, L = 1 and a 6 s hold on
+# each handover (STEPV_TEST_HOOKS), so a queued run's deadline (4 s) passes
+# after its slot is handed over and before it starts.
 ditto "$tmp/limit1.app" "$tmp/handover.app"
 hxpc="$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/XPCServices/StepvSupervisor.xpc"
-echo 3000 >"$hxpc/Contents/Resources/admission-handover-delay-ms"
+echo 6000 >"$hxpc/Contents/Resources/admission-handover-delay-ms"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$hxpc" 2>/dev/null \
   || fail "signing the handover test supervisor"
-timeout 60 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
-  "$service" handover "$tmp/files/slow.step" "$tmp/files/assembly.step" || rc=1
+start=$(date '+%Y-%m-%d %H:%M:%S')
+drive timeout 60 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+  "$service" handover "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 
 # 4b. A live run survives another instance's sweep. Two client processes
 #     each start their own instance of the service, in one container: B's
