@@ -17,10 +17,13 @@ final class ThumbnailProvider: QLThumbnailProvider {
         else {
             // No thumbnail: Quick Look falls back to the generic icon, which is
             // better than a wrong picture.
+            stepvLog.notice("thumbnail \(request.fileURL.path, privacy: .public): none: \(run.error ?? "no geometry", privacy: .public)")
             handler(nil, ThumbnailError.noGeometry(run.error))
             return
         }
         let size = request.maximumSize
+        // What scripts/ql-e2e reads back, as the preview's line.
+        stepvLog.notice("thumbnail \(request.fileURL.path, privacy: .public): drawn, \(Int(side)) px")
         handler(QLThumbnailReply(contextSize: size, currentContextDrawing: {
             // Aspect-fit the square render into the requested box.
             let s = min(size.width, size.height)

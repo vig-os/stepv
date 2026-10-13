@@ -94,6 +94,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 lines.append("No preview: \(run.error ?? "no geometry")")
             }
             if let note = StepvSceneBuilder.externalNote(run.summary) { lines.append(note) }
+            // What scripts/ql-e2e reads back: this file, and what was shown.
+            stepvLog.notice("preview \(url.path, privacy: .public): \(built != nil ? "shown" : "none", privacy: .public): \(lines.joined(separator: "; "), privacy: .public)")
             DispatchQueue.main.async {
                 self.sceneView.scene = built
                 if let camera, let built {

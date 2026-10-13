@@ -1552,6 +1552,102 @@ OCCT's path readers re-open it.
   - With a private `$TMPDIR`, the IGES copy is gone after a successful run and after a failed
     one.
 - **Path inputs:** unchanged code. The corpus diff against the previous kernel is in #102's PR.
+### #64 macOS kernel: an XPC supervisor and its child (2026-10-13): part 1, the service
+
+[#64](https://github.com/vig-os/stepv/issues/64) takes Quick Look's kernel out of the extension.
+In-process, a cancelled heavy load leaves the extension about 0.9 GB fatter, and jetsam kills
+extensions under memory pressure. The kernel must run in a process that can be killed, so its
+memory is freed at once. Two designs failed before this one:
+
+- **An XPC service with the kernel inside it:** `invalidate()` doesn't kill a busy service,
+  a sandboxed client can't `kill()` it, and launchd throttles restarts by about 10 s (#64's
+  pre-mortem).
+- **The extension spawns the kernel itself:** a Quick Look extension can't `posix_spawn`
+  (EPERM, 22 of 22, [#79](https://github.com/vig-os/stepv/issues/79) round 1).
+
+**The design** (owner, 2026-10-13), proven by #79 round 2's harness:
+
+- Each extension embeds `Contents/XPCServices/StepvSupervisor.xpc`: a small, long-lived
+  service (`ServiceType` Application).
+- The extension sends the file over as a `FileHandle`: a URL carries no permission across XPC,
+  and the service can't open the file by path.
+- The service `posix_spawn`s its own `Contents/Helpers/stepv-occt /dev/fd/3 --format … --stream
+  --mesh …` (#91). The kernel inherits the descriptor as fd 3 and nothing else
+  (`POSIX_SPAWN_CLOEXEC_DEFAULT`).
+- The service forwards TREE and PROGRESS as the kernel writes them. It replies with the summary
+  and the mesh, which it writes in its container and hands back as an open, unlinked file, so no
+  large XPC message carries it.
+- The protocol is in `macos/Shared/StepvSupervisor.swift`.
+
+- **One run per connection; the connection is the cancel.** When the extension invalidates the
+  connection, or the extension dies, the service SIGKILLs that run's kernel. Concurrent runs
+  are concurrent connections, each with its own kernel.
+- **Bounds, in the service:**
+  - a deadline (`deadlineMs`), killed and reaped;
+  - a memory cap (`memoryMB`, the CLI's 4096 by default), polled every 5 ms.
+  - The cap counts **resident size**, not the footprint the CLI caps (`src/occt.rs`). The
+    sandbox denies `proc_pid_rusage` even on the service's own child (EPERM) and allows
+    `proc_pidinfo(PROC_PIDTASKINFO)`.
+  - Resident size includes the shared dylibs and drops as the compressor takes pages, so under
+    memory pressure this cap acts later than the CLI's.
+- **The kernel's frames:** `macos/Shared/StepvFrames.swift` is the Swift twin of `read_events`,
+  with the same bounds (`STEPV_OCCT_MAX_FRAME`, kinds 1 to 3, nothing after DONE). It decodes
+  incrementally, as the pipe delivers. A broken stream is a crashed kernel: the service kills
+  it and reports it.
+- **Bundling:** each service carries its own copy of the OCCT closure, 31 dylibs and 51 MB, in
+  its own `Contents/Frameworks`, at `@rpath`.
+  - The first build pointed the service's kernel at the app's shared `Contents/Frameworks`;
+    dyld's open failed with "file system sandbox blocked open()". A service's sandbox reads its
+    own bundle and nothing of the app around it.
+  - The app grows from 57 to 174 MB. Part 2 drops the extensions' in-process copy of
+    libstepvocct.
+- **Signing:** the kernel is signed `app-sandbox` + `inherit`, so it runs in the service's
+  sandbox; without `inherit` a sandboxed child traps. The service is signed `app-sandbox` alone.
+  - The CLI's `Contents/MacOS/stepv-occt` stays a separate copy without these entitlements: an
+    `inherit` binary can't run from an unsandboxed parent.
+  - Ad-hoc signing leaves the hardened runtime off, because ad-hoc library validation refuses
+    the bundled dylibs ("different Team IDs"). Developer ID with the hardened runtime and
+    library validation on is [#97](https://github.com/vig-os/stepv/issues/97).
+- **A trap, now in the code:** XPC delivers the file's descriptor as the lowest free number,
+  often 3 itself.
+  - `posix_spawn_file_actions_adddup2(3, 3)` is no file action, so `CLOEXEC_DEFAULT` closed it.
+  - The kernel's own `dup(stdout)` then landed on fd 3, and the kernel failed with "cannot
+    rewind input descriptor: Illegal seek".
+  - The service first moves the descriptor to 10 or higher.
+- **Known limits:**
+  - **Multi-file assemblies:** their part files are unreachable from one descriptor
+    ([#92](https://github.com/vig-os/stepv/issues/92)).
+  - **Containment** is the service's sandbox. The kernel's own Seatbelt profile can't nest
+    inside it, so the summary reports `macos-outer`.
+- **Tests:**
+  - `scripts/ql-e2e/supervisor.sh` (run by `scripts/test-macos.sh`, so in CI) puts a sandboxed
+    probe into a copy of the built preview extension. The probe reaches that extension's real
+    service, kernel and Frameworks through the extensions' own client code, and checks:
+    - STEP (TREE first, PROGRESS, both before the reply, `macos-outer`), IGES and BREP;
+    - a deadline kill at 1.5 s with a second run finishing beside it (about 65 ms);
+    - the next run right after the kill (about 65 ms, so no throttle);
+    - the memory cap, cancel, and a refused format;
+    - and, from the service's log, the kills and that each of the 8 kernels it spawned is
+      gone.
+  - `macos/Tests/FramesTests`: a real kernel stream decodes the same in 1-, 7-, 9- and
+    4096-byte chunks, and each broken stream fails as `read_events` fails it. Dropping the
+    MAX_FRAME guard or the trailing-bytes check fails it.
+  - `scripts/test-macos.sh` holds each service and its kernel to exactly their entitlements and
+    each kernel's dylibs to its own service.
+- **`ql-e2e`** (`just ql-e2e`, `scripts/ql-e2e/`, from #79):
+  - It installs the build. Quick Look itself then runs the extensions, through
+    `QLThumbnailGenerator` and a `QLPreviewView` host app, on a fresh copy of each fixture.
+  - Each extension's own log line for that path is the verdict. It must come from
+    `/Applications/stepv.app`, not from a process left running from an older install, which
+    Quick Look keeps using until it exits.
+  - `qlmanage` is never used: it hangs when a script drives it.
+  - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
+    26.4). CI's macOS job runs it.
+- **Part 2:** both extensions switch to the service, with `handler(nil)` once the tree is shown
+  (or on the first mesh, or on failure, when there is no tree), and their own deadlines. The
+  in-process kernel goes, and `ql-e2e` gains the deadline kill, the next request and concurrent
+  requests through the real extensions. The deadline values and their reasoning will be added
+  here.
 
 ### Work queue (ordered, 2026-10-04)
 

@@ -18,11 +18,19 @@
 #                                 header reader) and loading the kernel
 #                                 IN-PROCESS: the extension sandbox forbids
 #                                 exec, but not loading a dylib
+#       Contents/XPCServices/StepvSupervisor.xpc (#64), in each extension:
+#                                 the service that runs the kernel as its
+#                                 child; Helpers/stepv-occt (app-sandbox +
+#                                 inherit) and Frameworks/, its own copy of
+#                                 the OCCT dylibs (51 MB): its sandbox reads
+#                                 its own bundle, not the app's Frameworks
 #
 # Signing: STEPV_SIGN_IDENTITY (default "-", ad-hoc: runs on this machine).
 # For distribution set it to a "Developer ID Application: …" identity; the
 # hardened runtime and a secure timestamp are then enabled, and the result is
-# ready for scripts/notarize-macos.sh. Output: target/macos/stepv.app.
+# ready for scripts/notarize-macos.sh. Ad-hoc, the hardened runtime stays off:
+# with it, library validation refuses the bundled dylibs ("different Team
+# IDs"). Developer ID with it on is #97. Output: target/macos/stepv.app.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src="$root/macos"
@@ -74,6 +82,26 @@ appex() { # name, frameworks...
 appex StepvThumbnail QuickLookThumbnailing SceneKit AppKit
 appex StepvPreview QuickLookUI SceneKit AppKit
 
+# ── #64: each extension's supervisor service, which runs the kernel as its
+#    child (macos/Shared/StepvSupervisor.swift). Its own copy of stepv-occt
+#    in Contents/Helpers, signed to inherit the service's sandbox, and its own
+#    copy of the OCCT dylibs in Contents/Frameworks (below): the service's
+#    sandbox reads its own bundle and nothing of the app around it ("file
+#    system sandbox blocked open()" on stepv.app/Contents/Frameworks). ──
+supervisor() { # the appex's name; its bundle id from its Info.plist
+  local appex="$app/Contents/PlugIns/$1.appex/Contents"
+  local id; id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$appex/Info.plist")
+  local x="$appex/XPCServices/StepvSupervisor.xpc/Contents"
+  mkdir -p "$x/MacOS" "$x/Helpers"
+  swiftc -module-name StepvSupervisor -application-extension \
+    "$src/Shared/StepvFrames.swift" "$src/Shared/StepvSupervisor.swift" "$src/Supervisor/main.swift" \
+    -o "$x/MacOS/StepvSupervisor"
+  sed -e "s/@ID@/$id.supervisor/" -e "s/@VERSION@/$version/g" "$src/Supervisor/Info.plist" > "$x/Info.plist"
+  install -m755 "$occt" "$x/Helpers/stepv-occt"
+}
+supervisor StepvThumbnail
+supervisor StepvPreview
+
 # ── CLI + kernel, and every /nix/store dylib they need, made relocatable,
 #    INSIDE each extension: a Quick Look extension's sandbox cannot see the
 #    containing app's files, so a shared copy in stepv.app/Contents/MacOS reads
@@ -107,7 +135,13 @@ for exe in stepv stepv-occt; do
   relocate "$app/Contents/MacOS/$exe" "$fw"
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/$exe" 2>/dev/null || true
 done
-for lib in "$fw"/*.dylib; do
+# The supervisors' kernels, each with the closure in its own service.
+for x in "$app"/Contents/PlugIns/*.appex/Contents/XPCServices/*.xpc; do
+  mkdir -p "$x/Contents/Frameworks"
+  relocate "$x/Contents/Helpers/stepv-occt" "$x/Contents/Frameworks"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$x/Contents/Helpers/stepv-occt"
+done
+for lib in "$fw"/*.dylib "$app"/Contents/PlugIns/*.appex/Contents/XPCServices/*.xpc/Contents/Frameworks/*.dylib; do
   install_name_tool -add_rpath "@loader_path" "$lib" 2>/dev/null || true
 done
 
@@ -119,6 +153,12 @@ leaks=$(find "$app" -type f \( -name '*.dylib' -o -perm -u+x \) -exec sh -c 'oto
 sign_opts=(--force --sign "$identity")
 [ "$identity" = "-" ] || sign_opts+=(--options runtime --timestamp)
 codesign "${sign_opts[@]}" "$app"/Contents/Frameworks/*.dylib
+for x in "$app"/Contents/PlugIns/*.appex/Contents/XPCServices/*.xpc; do
+  codesign "${sign_opts[@]}" "$x"/Contents/Frameworks/*.dylib
+  codesign "${sign_opts[@]}" --identifier ch.exoma.stepv.kernel \
+    --entitlements "$src/kernel.entitlements" "$x/Contents/Helpers/stepv-occt"
+  codesign "${sign_opts[@]}" --entitlements "$src/supervisor.entitlements" "$x"
+done
 for x in "$app"/Contents/PlugIns/*.appex; do
   codesign "${sign_opts[@]}" --entitlements "$src/extension.entitlements" "$x"
 done

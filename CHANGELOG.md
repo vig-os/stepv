@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **macOS: an XPC supervisor service runs the kernel in each Quick Look extension** ([#64](https://github.com/vig-os/stepv/issues/64), part 1):
+  - Each extension embeds `StepvSupervisor.xpc` with its own sandboxed `stepv-occt` and OCCT
+    `Frameworks`. The service runs the kernel as its child on the file's descriptor, forwards
+    the outline and progress, and returns the summary and mesh
+  - It kills the kernel on cancel, at a deadline, or past a memory cap (resident size: the
+    sandbox hides the footprint). The next run starts at once, and concurrent runs are
+    independent
+  - The Swift reader of the kernel's event frames has the same bounds as the Rust one
+  - `just ql-e2e` (`scripts/ql-e2e/`) runs both extensions through Quick Look itself, and probes
+    the service. `scripts/test-macos.sh` probes the service and checks its signing
+  - The app grows from 57 to 174 MB. The extensions still run the kernel in-process; part 2
+    moves them onto the service
 - **The kernel reads a file its caller opened** ([#91](https://github.com/vig-os/stepv/issues/91),
   for Quick Look's sandboxed service, [#64](https://github.com/vig-os/stepv/issues/64)):
   - `stepv-occt /dev/fd/N --format step|iges|brep` reads inherited descriptor N from its start.

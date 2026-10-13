@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- StepvSupervisor.xpc (#64): sandboxed, with nothing more. It reads
+	     the previewed file only through the descriptor the extension hands
+	     it, and writes only its own container (the kernel's mesh, then
+	     unlinked). scripts/test-macos.sh holds it to exactly this. -->
+	<key>com.apple.security.app-sandbox</key><true/>
+</dict>
+</plist>

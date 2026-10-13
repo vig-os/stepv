@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- One per extension: @ID@ is the extension's bundle id + ".supervisor",
+	     the name StepvSupervisorRun connects to. -->
+	<key>CFBundleIdentifier</key><string>@ID@</string>
+	<key>CFBundleName</key><string>StepvSupervisor</string>
+	<key>CFBundleExecutable</key><string>StepvSupervisor</string>
+	<key>CFBundlePackageType</key><string>XPC!</string>
+	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+	<key>CFBundleVersion</key><string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>XPCService</key>
+	<dict><key>ServiceType</key><string>Application</string></dict>
+</dict>
+</plist>

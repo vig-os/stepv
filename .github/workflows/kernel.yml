@@ -101,6 +101,14 @@ jobs:
         # register extensions; it runs locally via `just macos-test --quicklook`.
         run: nix develop --command just macos-test
 
+      - name: Quick Look end to end (ql-e2e)
+        if: runner.os == 'macOS'
+        # #64: installs the app, then Quick Look itself runs the extensions
+        # through QLThumbnailGenerator and a QLPreviewView host, and their
+        # own log lines are the verdict (scripts/ql-e2e). Needs the runner's
+        # window session.
+        run: nix develop --command just ql-e2e
+
       - name: capi tripwire (no viewer stack in the Quick Look library)
         # #28: libstepv_capi.a must never carry eframe, egui, winit, wgpu,
         # naga or minifb. Checks the dependency graph and the built archive's
