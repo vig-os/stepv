@@ -21,7 +21,11 @@ copy="$work/$(date +%H%M%S)-$$-$kind-$(basename "$file")"
 # it has seen is answered from the cache, and the extension never runs.
 # QL_E2E_REUSE=1 uses <file> as it is: run-all.sh's cache-hit control.
 if [ "${QL_E2E_REUSE:-}" = 1 ]; then copy=$file; else cat "$file" >"$copy"; fi
+# The log window opens at a whole second (log show), so the verdict counts
+# only events from this request's own start on (e2elog.py): never the lines
+# of a request before it.
 start=$(date '+%Y-%m-%d %H:%M:%S')
+since=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$root/scripts/ql-e2e")
 echo "== $kind $(basename "$file")"
 case $kind in
   thumb)
@@ -41,11 +45,11 @@ end=$((SECONDS + 30))
 while :; do
   timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
     --predicate 'subsystem == "ch.exoma.stepv"' >"$work/log.ndjson" 2>/dev/null
-  python3 "$root/scripts/ql-e2e/verdict.py" --logged "$kind" "$copy" <"$work/log.ndjson" && break
+  python3 "$root/scripts/ql-e2e/verdict.py" --logged "$kind" "$copy" "$since" <"$work/log.ndjson" && break
   [ $SECONDS -lt $end ] || break
   sleep 0.5
 done
-python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" <"$work/log.ndjson" && exit 0
+python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" "$since" <"$work/log.ndjson" && exit 0
 # The evidence, for a failure on a machine no one can look at afterwards.
 echo "  stepv's log since $start:"
 python3 -c '

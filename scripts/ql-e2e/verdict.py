@@ -1,36 +1,42 @@
 """ql-e2e's verdict (#64): the installed stepv extension's own log line for
-one run's file, from `log show --style ndjson` on stdin.
+one run's file, from `log show --style ndjson` on stdin, counting only the
+events from the request's own start (e2elog.py).
 
-  verdict.py <thumb|preview> <file>
+  verdict.py <thumb|preview> <file> <since>
 
 PASS needs at least one line, and every line for the file from the right
 extension, running out of /Applications/stepv.app, and saying it drew
 ("thumbnail <file>: drawn") or showed geometry ("preview <file>: shown"):
-one failing line fails the run, whatever else passed. Exit 0 on PASS.
+one failing line fails the run, whatever else passed. A preview must also
+have told Quick Look it was ready (#64, "preview <file>: ready (<why>)"):
+a STEP file on its tree, before the scene; IGES and BREP, which have no
+tree, on their mesh. Exit 0 on PASS.
 
-  verdict.py --logged <thumb|preview> <file>
+  verdict.py --logged <thumb|preview> <file> <since>
 
 Exit 0 if any line for the file is logged yet, silently: what ql-e2e.sh
 polls for before it judges."""
 
-import json
 import sys
 
+from e2elog import events
+
 polling = sys.argv[1] == "--logged"
-kind, path = sys.argv[1 + polling], sys.argv[2 + polling]
+kind, path, since = sys.argv[1 + polling], sys.argv[2 + polling], sys.argv[3 + polling]
 process = {"thumb": "StepvThumbnail", "preview": "StepvPreview"}[kind]
 prefix = {"thumb": "thumbnail", "preview": "preview"}[kind] + f" {path}: "
 lines = []
+readies = []  # (timestamp, why): the preview's handler(nil)
+shown_at = None
 requested = False  # the thumbnail extension's "thumbnail request: <file>"
-for raw in sys.stdin:
-    try:
-        e = json.loads(raw)
-    except ValueError:
-        continue
-    m = e.get("eventMessage", "")
+for e in events(sys.stdin, since):
+    m = e["message"]
     requested |= m == f"thumbnail request: {path}"
-    if m.startswith(prefix):
-        lines.append((e.get("processImagePath", ""), m[len(prefix) :]))
+    if m.startswith(prefix + "ready ("):
+        readies.append((e["time"], m[len(prefix) + 7 :].split(")")[0]))
+    elif m.startswith(prefix):
+        lines.append((e["process"], m[len(prefix) :]))
+        shown_at = shown_at or e["time"]
 
 if polling:
     sys.exit(0 if lines else 1)
@@ -56,6 +62,16 @@ for image, said in lines:
     print(
         f"  {'PASS' if good else 'FAIL'}: {image.rsplit('/', 1)[-1] or '?'}: {said}"
         + ("" if ours else f" (from {image}, not /Applications/stepv.app's {process})")
+    )
+if kind == "preview" and lines:
+    want = "tree" if path.lower().endswith((".step", ".stp")) else "mesh"
+    first = readies[0] if readies else ("", "never")
+    good = first[1] == want and (want != "tree" or first[0] < shown_at)
+    ok &= good and len(readies) == 1
+    order = ", before the scene" if want == "tree" else ""
+    print(
+        f"  {'PASS' if good and len(readies) == 1 else 'FAIL'}: ready ({first[1]}),"
+        f" {len(readies)} time(s); wanted once, on its {want}{order}"
     )
 print("  VERDICT:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
