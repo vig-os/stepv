@@ -63,16 +63,23 @@ fn fix_self_intersect_wire_matches_unpatched_occt() {
     )
     .expect("tests/occt-patch/wires.txt");
     let got = run(&["wires"]);
-    let differ: Vec<&str> = reference
+    let pairs: Vec<(&str, &str)> = reference
         .lines()
         .zip(got.lines())
         .filter(|(r, g)| r != g)
+        .collect();
+    let differ: Vec<&str> = pairs
+        .iter()
         .map(|(r, _)| r.split(' ').next().unwrap_or(""))
         .collect();
+    let first = pairs
+        .first()
+        .map(|(r, g)| format!("\nfirst difference:\n  reference {r}\n  got       {g}"))
+        .unwrap_or_default();
     assert!(
         differ.is_empty() && reference.lines().count() == got.lines().count(),
         "FixSelfIntersectWire differs from unpatched OCCT on seeds {differ:?} \
-         ({} lines, reference {})",
+         ({} lines, reference {}){first}",
         got.lines().count(),
         reference.lines().count()
     );
