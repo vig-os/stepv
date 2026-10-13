@@ -895,16 +895,21 @@ bool read_into(const std::string& path, const std::string& format,
     std::string why;
     const std::string fmt = stepv::reader_format(path, format, why);
     auto t0 = Clock::now();
+    const std::optional<int> in_fd = stepv::input_fd(path);
+    auto environment = [&](const std::string& what, int err) {
+        s.error = what + ": " + std::strerror(err);
+        s.cause = kEnvironment;
+        return false;
+    };
     // A file the host won't let us open is not the file's fault (#62): open
     // it first, so only a failure after it opened is the input's.
     auto opened = [&] {
-        // A descriptor is read from its start, wherever its caller left it:
-        // on macOS, opening /dev/fd/N shares N's offset. One that cannot
-        // seek (a pipe) or is not open is the caller's to fix.
-        if (const auto in = stepv::input_fd(path); in && ::lseek(*in, 0, SEEK_SET) != 0) {
-            s.error = "cannot rewind input descriptor: " + std::string(std::strerror(errno));
-            s.cause = kEnvironment;
-            return false;
+        // A descriptor is read, never re-opened by name (input.h, #102), and
+        // from its start: one that cannot seek (a pipe) or is not open is
+        // the caller's to fix.
+        if (in_fd) {
+            const int err = stepv::unreadable_fd(*in_fd);
+            return err == 0 || environment("cannot read input descriptor", err);
         }
         const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd >= 0) return ::close(fd), true;
@@ -921,7 +926,16 @@ bool read_into(const std::string& path, const std::string& format,
         reader.SetColorMode(true);
         reader.SetNameMode(true);
         reader.SetLayerMode(true);
-        if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
+        IFSelect_ReturnStatus read;
+        if (in_fd) {
+            stepv::FdStreamBuf buf(*in_fd);
+            std::istream in(&buf);
+            read = reader.ReadStream(path.c_str(), in);
+            if (buf.error()) return environment("cannot read input descriptor", buf.error());
+        } else {
+            read = reader.ReadFile(path.c_str());
+        }
+        if (read != IFSelect_RetDone) {
             s.error = "STEP read failed";
             s.cause = kInput;
             return false;
@@ -966,7 +980,16 @@ bool read_into(const std::string& path, const std::string& format,
         reader.SetColorMode(true);
         reader.SetNameMode(true);
         reader.SetLayerMode(true);
-        if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) {
+        // No stream reader for IGES (input.h): a private copy, read by its
+        // path and unlinked when the read is done.
+        std::optional<stepv::InputCopy> copy;
+        if (in_fd) {
+            copy.emplace(*in_fd, "igs");
+            if (!copy->ok()) return environment("cannot copy input descriptor", copy->error());
+        }
+        const IFSelect_ReturnStatus read = reader.ReadFile(copy ? copy->path().c_str() : path.c_str());
+        copy.reset();
+        if (read != IFSelect_RetDone) {
             s.error = "IGES read failed";
             s.cause = kInput;
             return false;
@@ -986,7 +1009,17 @@ bool read_into(const std::string& path, const std::string& format,
         if (!opened()) return false;
         TopoDS_Shape shape;
         BRep_Builder builder;
-        if (!BRepTools::Read(shape, path.c_str(), builder) || shape.IsNull()) {
+        bool read;
+        if (in_fd) {
+            stepv::FdStreamBuf buf(*in_fd);
+            std::istream in(&buf);
+            BRepTools::Read(shape, in, builder);
+            if (buf.error()) return environment("cannot read input descriptor", buf.error());
+            read = true;
+        } else {
+            read = BRepTools::Read(shape, path.c_str(), builder);
+        }
+        if (!read || shape.IsNull()) {
             s.error = "BREP read failed";
             s.cause = kInput;
             return false;

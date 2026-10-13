@@ -228,14 +228,17 @@ pub enum Input<'a> {
     /// An open file, inherited by the kernel as `/dev/fd/N` at its own
     /// number `N` and read from its start: for a caller that may hold the
     /// file but not open it by name, as #64's sandboxed Quick Look service.
-    /// The kernel's sandbox grants it this file and nothing by path.
+    /// The kernel reads the descriptor itself and never re-opens it by name
+    /// (#102: macOS 15's inherited sandbox denies that), so its sandbox
+    /// grants nothing by path. IGES, which OCCT reads only by path, is
+    /// copied into a private temporary file first, unlinked afterwards.
     ///
     /// `fd` must not be stdin, stdout or stderr (the spawn fails with
     /// [`std::io::ErrorKind::InvalidInput`]), and must seek: a pipe fails
     /// the run with [`Cause::Environment`], as a `format` the file does not
-    /// read as fails it with [`Cause::Input`]. The kernel rewinds it and
-    /// reads it through; where the offset is shared (macOS), the caller
-    /// finds it moved. A multi-file
+    /// read as fails it with [`Cause::Input`]. The kernel reads it from its
+    /// start with `pread`, so the descriptor's offset is left as it was. A
+    /// multi-file
     /// assembly's part files are unreachable from it: the run reports them
     /// missing (`external_missing`, #92).
     Fd { fd: BorrowedFd<'a>, format: Format },

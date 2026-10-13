@@ -223,11 +223,21 @@ std::string outline_json(const std::string& path, const std::string& format) {
     if (fmt != "step") {
         throw std::runtime_error("an outline needs a STEP file; IGES and BREP have no product structure");
     }
-    // Read from its start, as a run reads it (stepv-occt-core.cpp).
-    if (const auto fd = input_fd(path); fd && ::lseek(*fd, 0, SEEK_SET) != 0)
-        throw std::runtime_error("cannot rewind input descriptor: " + std::string(std::strerror(errno)));
+    // A descriptor is read from its start, never re-opened by name (input.h).
     STEPControl_Reader reader;
-    if (reader.ReadFile(path.c_str()) != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
+    IFSelect_ReturnStatus read;
+    if (const auto fd = input_fd(path)) {
+        if (const int err = unreadable_fd(*fd))
+            throw std::runtime_error("cannot read input descriptor: " + std::string(std::strerror(err)));
+        FdStreamBuf buf(*fd);
+        std::istream in(&buf);
+        read = reader.ReadStream(path.c_str(), in);
+        if (buf.error())
+            throw std::runtime_error("cannot read input descriptor: " + std::string(std::strerror(buf.error())));
+    } else {
+        read = reader.ReadFile(path.c_str());
+    }
+    if (read != IFSelect_RetDone) throw std::runtime_error("STEP read failed");
     return outline_json(reader);
 }
 

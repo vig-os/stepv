@@ -207,6 +207,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The kernel reads an input descriptor directly** ([#102](https://github.com/vig-os/stepv/issues/102)):
+  - `stepv-occt /dev/fd/N` never re-opens `/dev/fd/N` by name. macOS 15's sandbox, inherited
+    from Quick Look's service, denies that re-open
+  - STEP and BREP are read through a stream over the descriptor. IGES, which OCCT reads only by
+    path, goes through a private temporary copy that is removed even if the kernel is killed
+  - The descriptor's offset is left as it was, and the sandbox grants nothing by path for it
 - **A failed topology no longer fails the run** ([#38](https://github.com/vig-os/stepv/issues/38)):
   the kernel reports `topology_error` and keeps the mesh, so `--png --topology` still writes the
   PNG; `--topology` alone still fails

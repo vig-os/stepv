@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -182,6 +183,50 @@ void on_event(void* ctx, int kind, const char* payload, unsigned long length) {
 }
 }  // namespace
 
+// Removes `path` once this process is done with it, or gone (#102). The
+// sandbox lets this process read a file it cannot remove, so a child forked
+// BEFORE the sandbox, with nothing open but its end of a pipe, waits for
+// that pipe to close and unlinks the file: when this object is destroyed,
+// which then waits for it, or when this process dies, even by SIGKILL.
+class RemoveWhenGone {
+public:
+    explicit RemoveWhenGone(const std::string& path) {
+        int p[2];
+        if (pipe(p) != 0) return;
+        const char* name = path.c_str();  // valid in the child: its own copy
+        const int max = static_cast<int>(std::min<long>(sysconf(_SC_OPEN_MAX), 65536));
+        pid_ = fork();
+        if (pid_ == 0) {
+            for (int fd = 0; fd < max; ++fd)
+                if (fd != p[0]) close(fd);
+            char c;
+            while (read(p[0], &c, 1) < 0 && errno == EINTR) {
+            }
+            unlink(name);
+            _exit(0);
+        }
+        close(p[0]);
+        if (pid_ < 0) {
+            close(p[1]);
+            return;
+        }
+        write_ = p[1];
+        fcntl(write_, F_SETFD, FD_CLOEXEC);
+    }
+    ~RemoveWhenGone() {
+        if (write_ >= 0) close(write_);
+        if (pid_ > 0)
+            while (waitpid(pid_, nullptr, 0) < 0 && errno == EINTR) {
+            }
+    }
+    RemoveWhenGone(const RemoveWhenGone&) = delete;
+    RemoveWhenGone& operator=(const RemoveWhenGone&) = delete;
+
+private:
+    pid_t pid_ = -1;
+    int write_ = -1;
+};
+
 int main(int argc, char** argv) {
     std::string input, format, mesh_out, topology_out;
     bool edges = false, serve = false, outline = false, stream = false;
@@ -266,12 +311,24 @@ int main(int argc, char** argv) {
     std::string read_root = input_dir;
     const char* home_env = std::getenv("HOME");
     const std::string home = home_env ? canonical(home_env) : "";
-    // A descriptor grants itself and no path: its file's directory, and any
-    // file by name, stay closed (Landlock follows /dev/fd/N to the file;
-    // Seatbelt matches the name /dev/fd/N).
-    if (in_fd)
-        read_root = input;
-    else if (input_dir == "/" ||
+    // A descriptor is read, never re-opened by name (input.h, #102), so it
+    // needs no grant at all: its file's directory, and any file by name,
+    // stay closed. IGES, which OCCT reads only by path, is copied here,
+    // before the sandbox, into a private file that is granted alone and
+    // unlinked when main returns.
+    // The copy outlives neither this process nor a crash: RemoveWhenGone.
+    std::optional<stepv::InputCopy> iges_copy;
+    std::optional<RemoveWhenGone> remove_copy;
+    if (in_fd) {
+        read_root.clear();
+        if (format == "iges" && stepv::unreadable_fd(*in_fd) == 0) {
+            iges_copy.emplace(*in_fd, "igs");
+            if (iges_copy->ok()) {
+                read_root = iges_copy->path();
+                remove_copy.emplace(iges_copy->path());
+            }
+        }
+    } else if (input_dir == "/" ||
         (!home.empty() && !input_dir.empty() &&
          (home == input_dir || home.rfind(input_dir + "/", 0) == 0)))
         read_root = input_path;
@@ -294,6 +351,8 @@ int main(int argc, char** argv) {
     const std::string sandbox = stepv::enter_sandbox(read_root, writable);
     // Unresolvable: the core reports it, in its own words.
     if (!in_fd && !input_path.empty()) input = input_path;
+    // A copy that failed is left to the core, which says why.
+    if (iges_copy && iges_copy->ok()) input = iges_copy->path();
     const char* fmt = format.empty() ? nullptr : format.c_str();
 
     if (const char* e = std::getenv("STEPV_OCCT_TEST_ESCAPE")) escape_attempt(e);

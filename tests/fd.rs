@@ -114,6 +114,118 @@ fn an_fd_reads_as_the_path_does() {
     }
 }
 
+/// The kernel reads its descriptor and never re-opens `/dev/fd/N` by name
+/// (#102): on macOS 15 the sandbox it inherits from #64's Quick Look service
+/// denies that re-open (EPERM), where macOS 26 allows it. Here the file's
+/// mode is 000 once it is open, so a re-open fails on any platform (EACCES:
+/// macOS's fdesc and Linux's /proc/self/fd both check it), while reading
+/// the open descriptor still works. A run, an outline and `--serve`, each
+/// format: the same as by path.
+#[test]
+fn the_kernel_reads_its_descriptor_without_reopening_it() {
+    let Some(k) = kernel() else { return };
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPING: as root, mode 000 does not stop a re-open");
+        return;
+    }
+    let dir = Scratch::new("no-reopen");
+    for (name, format) in [
+        ("assembly.step", "step"),
+        ("box.igs", "iges"),
+        ("box.brep", "brep"),
+    ] {
+        let by_path = dir.0.join(format!("{name}.path.msh"));
+        let by_fd = dir.0.join(format!("{name}.fd.msh"));
+        let want = kernel_run(
+            k.as_path(),
+            data(name).to_str().unwrap(),
+            None,
+            &["--mesh", by_path.to_str().unwrap()],
+        );
+        let copy = dir.0.join(name);
+        std::fs::copy(data(name), &copy).unwrap();
+        let file = File::open(&copy).unwrap();
+        std::fs::set_permissions(&copy, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+        assert!(
+            File::open(format!("/dev/fd/{}", file.as_raw_fd())).is_err(),
+            "{name}: the test's premise: a re-open of the descriptor fails"
+        );
+        let got = kernel_run(
+            k.as_path(),
+            "/dev/fd/3",
+            Some(&file),
+            &["--format", format, "--mesh", by_fd.to_str().unwrap()],
+        );
+        assert_eq!(want.0, 0, "{name}: {}", want.1);
+        assert_eq!(got, want, "{name}");
+        assert_eq!(
+            std::fs::read(&by_fd).unwrap(),
+            std::fs::read(&by_path).unwrap(),
+            "{name}: mesh"
+        );
+        let (code, ready) = kernel_run(
+            k.as_path(),
+            "/dev/fd/3",
+            Some(&file),
+            &["--format", format, "--serve"],
+        );
+        assert_eq!(
+            (code, &ready["ready"]),
+            (0, &Value::Bool(true)),
+            "{name} --serve: {ready}"
+        );
+        if format == "step" {
+            let want = kernel_run(
+                k.as_path(),
+                data(name).to_str().unwrap(),
+                None,
+                &["--outline"],
+            );
+            let got = kernel_run(
+                k.as_path(),
+                "/dev/fd/3",
+                Some(&file),
+                &["--format", format, "--outline"],
+            );
+            assert_eq!(got, want, "{name} --outline");
+        }
+    }
+}
+
+/// IGES has no stream reader in OCCT, so the kernel reads a private copy
+/// of the descriptor, in `$TMPDIR` (#102): it is gone once the run is, on
+/// success and on failure alike.
+#[test]
+fn the_iges_copy_is_unlinked() {
+    let Some(k) = kernel() else { return };
+    let dir = Scratch::new("iges-copy");
+    let tmp = dir.0.join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    for (name, ok) in [("box.igs", true), ("box.brep", false)] {
+        let file = File::open(data(name)).unwrap();
+        let n = file.as_raw_fd();
+        let mut cmd = Command::new(&k);
+        cmd.args(["/dev/fd/3", "--format", "iges"])
+            .env("TMPDIR", &tmp)
+            .stdout(Stdio::piped());
+        // SAFETY: dup2 and fcntl are async-signal-safe, on the child's copy.
+        unsafe {
+            cmd.pre_exec(move || {
+                if (n != 3 && libc::dup2(n, 3) == -1) || libc::fcntl(3, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output().unwrap();
+        assert_eq!(out.status.code(), Some(if ok { 0 } else { 3 }), "{name}");
+        let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().collect();
+        assert!(left.is_empty(), "{name}: left in $TMPDIR: {left:?}");
+    }
+}
+
 /// A descriptor has no extension: without `--format`, or with one the
 /// kernel has no reader for, the run fails before reading, and the cause is
 /// the environment: the caller asked wrongly, and the same file reads when
