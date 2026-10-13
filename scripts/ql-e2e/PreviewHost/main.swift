@@ -6,6 +6,10 @@
 // harness (#64).
 import AppKit
 import Quartz
+import os
+// The close goes to the unified log, beside the extension's and the
+// service's lines: run-all.sh measures the kernel's cancel from it.
+let hostLog = Logger(subsystem: "ch.exoma.stepv", category: "ql-e2e")
 let a = CommandLine.arguments
 let file = a.count > 1 ? a[1] : ""
 let secs = a.count > 2 ? Double(a[2]) ?? 8 : 8
@@ -25,6 +29,7 @@ final class D: NSObject, NSApplicationDelegate {
         print("ql-preview-host: showing \(file) for \(secs) s")
         if let closeAfter {
             DispatchQueue.main.asyncAfter(deadline: .now() + closeAfter) {
+                hostLog.notice("preview host closed \(file, privacy: .public)")
                 v.close()
                 self.w.contentView = NSView(frame: r)
                 print("ql-preview-host: closed the preview at \(closeAfter) s")
