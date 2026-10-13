@@ -20,6 +20,17 @@
     flake-utils.follows = "vigos/flake-utils";
   };
 
+  # The project's binary cache (plan.md "Binary cache"): the patched OCCT
+  # (#74) is in no public cache, so without this every machine builds it
+  # (~35 min on sage, ~55 min on a GitHub Linux runner). A substituter named
+  # here is used only by users nix trusts, or with --accept-flake-config.
+  nixConfig = {
+    extra-substituters = [ "https://gerchowl.cachix.org" ];
+    extra-trusted-public-keys = [
+      "gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU="
+    ];
+  };
+
   outputs =
     {
       self,
