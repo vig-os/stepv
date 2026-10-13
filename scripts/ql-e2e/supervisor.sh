@@ -206,10 +206,18 @@ echo 1 >"$lxpc/Contents/Resources/admission-limit"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$lxpc" 2>/dev/null \
   || fail "signing the test supervisor"
 start=$(date '+%Y-%m-%d %H:%M:%S')
+# The probe waits on stdin until the cancelled run is seen queued: an
+# ordering signal, not a sleep.
+mkfifo "$tmp/go"
+exec 9<>"$tmp/go"
 timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
-  "$service" admission "$tmp/files/slow.step" "$tmp/files/assembly.step" || rc=1
+  "$service" admission "$tmp/files/slow.step" "$tmp/files/assembly.step" <"$tmp/go" &
+probe_pid=$!
+await_log 'run #2 \(service pid [0-9]+\): queued' 30 || { echo "FAIL: admission: run #2 was never queued"; rc=1; }
+echo go >&9
+wait "$probe_pid" || rc=1
+exec 9>&-
 log_since >"$tmp/log.txt"
-# In the log's order: the first run's result, then the second's spawn.
 order=$(python3 - "$tmp/log.txt" <<'PY'
 import re, sys
 lines = open(sys.argv[1]).read().splitlines()
@@ -224,20 +232,40 @@ for i, l in enumerate(lines):
     if re.search(r"kernel pid \d+ spawned", l): r["spawned"] = i
     if "queued" in l: r["queued"] = i
     if re.search(r"exit \d+ in \d+ ms|killed \(", l): r["ended"] = i
-    if "never spawned" in l: r["withdrawn"] = i
-ids = sorted(runs)
-ok = limit and len(ids) == 3
-a, b, c = (runs[i] for i in ids) if ok else ({}, {}, {})
-ok = ok and "queued" in b and b.get("spawned", -1) > a.get("ended", 10**9) \
-    and "withdrawn" in c and "spawned" not in c
-print("ok" if ok else f"FAIL {runs} limit={'1' if limit else '?'}")
+    if "cancelled in the queue, never spawned" in l: r["cancelled"] = r.get("cancelled", 0) + 1
+    if "past its deadline in the queue, never spawned" in l: r["expired"] = i
+first = min((n for n in runs if "spawned" in runs[n]), default=None)
+a = runs.get(first, {})
+cancelled = [n for n in runs if "cancelled" in runs[n]]
+expired = [n for n in runs if "expired" in runs[n]]
+behind = [n for n in runs if n not in (first, *cancelled, *expired)]
+fails = []
+if not limit or len(runs) != 4: fails.append(f"want 4 runs at L=1, got {sorted(runs)}")
+if len(cancelled) != 1 or runs[cancelled[0]]["cancelled"] != 1 or "spawned" in runs[cancelled[0]]:
+    fails.append(f"the cancelled run: {[runs[n] for n in cancelled]}")
+if len(expired) != 1 or "spawned" in runs[expired[0]] or runs[expired[0]]["expired"] > a.get("ended", -1):
+    fails.append(f"the expired run: {[runs[n] for n in expired]}, first ended at {a.get('ended')}")
+if len(behind) != 1 or not runs[behind[0]].get("spawned", -1) > a.get("ended", 10**9):
+    fails.append(f"the run behind: {[runs[n] for n in behind]}, first ended at {a.get('ended')}")
+print("ok" if not fails else "FAIL " + "; ".join(fails))
 PY
 )
 if [ "$order" = ok ]; then
-  echo "ok: admission limit 1: the second run spawned after the first ended; the third never spawned"
+  echo "ok: admission limit 1: a queued run cancelled once, never spawned; the run behind it admitted after the first; one withdrawn at its deadline while the first ran"
 else
   echo "FAIL: admission order: $order"; rc=1
 fi
+
+# The admission-time deadline check: a fourth copy, L = 1 and a 3 s hold on
+# each handover (STEPV_TEST_HOOKS), so a queued run's deadline passes after
+# its slot is handed over and before it starts.
+ditto "$tmp/limit1.app" "$tmp/handover.app"
+hxpc="$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/XPCServices/StepvSupervisor.xpc"
+echo 3000 >"$hxpc/Contents/Resources/admission-handover-delay-ms"
+codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$hxpc" 2>/dev/null \
+  || fail "signing the handover test supervisor"
+timeout 60 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+  "$service" handover "$tmp/files/slow.step" "$tmp/files/assembly.step" || rc=1
 
 # 4b. A live run survives another instance's sweep. Two client processes
 #     each start their own instance of the service, in one container: B's

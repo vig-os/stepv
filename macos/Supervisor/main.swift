@@ -39,6 +39,9 @@ func residentSize(_ pid: pid_t) -> UInt64? {
 /// counts from submission, and one that expires or is cancelled there is
 /// withdrawn without ever spawning a kernel.
 final class Admission {
+    /// One slot's memory budget: a run's cap may not be more (Supervisor
+    /// refuses it), so L slots stay within the share of RAM L is made for.
+    static let slotMemoryMB = 4096
     let limit: Int
     private let lock = NSLock()
     private var running = 0
@@ -47,18 +50,34 @@ final class Admission {
     init(limit: Int) { self.limit = limit }
 
     static var forThisMachine: Int {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
         #if STEPV_TEST_HOOKS
         // Test builds only (scripts/ql-e2e/supervisor.sh): the limit from
-        // Contents/Resources/admission-limit, to force queueing.
-        if let url = Bundle.main.url(forResource: "admission-limit", withExtension: nil),
-           let text = try? String(contentsOf: url), let n = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        // Contents/Resources/admission-limit, to force queueing. Out of
+        // 1...cores it is a mistake in the test, not something to clamp.
+        if let n = testResource("admission-limit") {
+            guard (1...cores).contains(n) else {
+                log.fault("admission-limit \(n) is not in 1...\(cores): the service will not start")
+                exit(78)  // EX_CONFIG
+            }
             return n
         }
         #endif
-        let perRun = UInt64(4096) << 20  // the extensions' memory cap
-        let byMemory = Int(ProcessInfo.processInfo.physicalMemory / (4 * perRun))
-        return min(max(byMemory, 1), ProcessInfo.processInfo.activeProcessorCount)
+        let byMemory = Int(ProcessInfo.processInfo.physicalMemory / (4 * (UInt64(slotMemoryMB) << 20)))
+        return min(max(byMemory, 1), cores)
     }
+
+    #if STEPV_TEST_HOOKS
+    /// A whole number from the test build's Contents/Resources, if present.
+    static func testResource(_ name: String) -> Int? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: nil),
+              let text = try? String(contentsOf: url) else { return nil }
+        return Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    /// Test builds only: how long a queued run's start is held after its
+    /// slot is handed over, so a deadline can pass in that gap on cue.
+    static let handoverDelayMs = testResource("admission-handover-delay-ms") ?? 0
+    #endif
 
     /// Starts `start` now if a slot is free and none waits, else queues it.
     /// True if it started.
@@ -94,6 +113,13 @@ final class Admission {
         }
         let next = waiting.removeFirst()
         lock.unlock()
+        #if STEPV_TEST_HOOKS
+        if Admission.handoverDelayMs > 0 {
+            return DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(Admission.handoverDelayMs)) {
+                next.start()
+            }
+        }
+        #endif
         next.start()
     }
 }
@@ -136,6 +162,16 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         }
         servedLock.lock(); served += 1; let n = served; servedLock.unlock()
         let submitted = DispatchTime.now().uptimeNanoseconds
+        // A queued run leaves the queue at its deadline or on a cancel, never
+        // spawned, with one reply: whichever takes it out (Admission's lock).
+        let withdraw = { (outcome: StepvRunOutcome, why: String) in
+            guard admission.withdraw(id: n) else { return }
+            log.notice("run #\(n) (service pid \(getpid())): \(why, privacy: .public) in the queue, never spawned")
+            reply(outcome, "run #\(n): \(why) in the queue, never spawned", nil, nil, 0)
+        }
+        // Installed before the run can be queued, so a cancel at any moment
+        // finds it.
+        lock.lock(); withdrawQueued = { withdraw(.crashed, "cancelled") }; lock.unlock()
         let admitted = admission.submit(id: n) {
             DispatchQueue.global(qos: .userInitiated).async {
                 self.lock.lock(); self.withdrawQueued = nil; self.lock.unlock()
@@ -152,14 +188,11 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             }
         }
         guard !admitted else { return }
-        // Queued: withdrawn at its deadline, or by a cancel, never spawned.
         log.notice("run #\(n) (service pid \(getpid())): queued, \(admission.limit) kernel(s) running")
-        let withdraw = { (outcome: StepvRunOutcome, why: String) in
-            guard admission.withdraw(id: n) else { return }
-            log.notice("run #\(n) (service pid \(getpid())): \(why, privacy: .public) in the queue, never spawned")
-            reply(outcome, "run #\(n): \(why) in the queue, never spawned", nil, nil, 0)
-        }
-        lock.lock(); withdrawQueued = { withdraw(.crashed, "cancelled") }; lock.unlock()
+        // A cancel that came before the run was in the queue found nothing to
+        // take out: take it out now.
+        lock.lock(); let wasCancelled = cancelled != nil; lock.unlock()
+        if wasCancelled { withdraw(.crashed, "cancelled") }
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(deadlineMs)) {
             withdraw(.deadline, "past its deadline")
         }
@@ -173,11 +206,12 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         if !(linearRel > 0 && linearRel <= 1) { return "linearRel \(linearRel) is not in (0, 1]" }
         if !(angularDeg > 0 && angularDeg <= 180) { return "angularDeg \(angularDeg) is not in (0, 180]" }
         if !(1...maxDeadlineMs).contains(deadlineMs) { return "deadlineMs \(deadlineMs) is not in 1...\(maxDeadlineMs)" }
-        if !(1...maxMemoryMB).contains(memoryMB) { return "memoryMB \(memoryMB) is not in 1...\(maxMemoryMB)" }
+        if !(1...Admission.slotMemoryMB).contains(memoryMB) {
+            return "memoryMB \(memoryMB) is not in 1...\(Admission.slotMemoryMB) (one admission slot's budget)"
+        }
         return nil
     }
     static let maxDeadlineMs = 600_000  // 10 min: far past Quick Look's own watchdogs
-    static let maxMemoryMB = 1 << 20  // 1 TB: any real machine's memory, below overflow
 
     private func supervise(_ file: FileHandle, n: Int, format: String, linearRel: Double,
                            angularDeg: Double, deadlineMs: Int, memoryMB: Int, submitted: UInt64)
@@ -249,6 +283,10 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         close(life[0])
         guard rc == 0 else {
             close(out[0])
+            if rc == ECANCELED {  // cancelled after admission, before the spawn
+                log.notice("\(tag, privacy: .public): cancelled, never spawned")
+                return (.crashed, "\(tag): cancelled, never spawned", nil, nil)
+            }
             log.error("\(tag, privacy: .public): spawn failed: \(String(cString: strerror(rc)), privacy: .public)")
             return (.refused, "\(tag): spawn failed: \(String(cString: strerror(rc)))", nil, nil)
         }
