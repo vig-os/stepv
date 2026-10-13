@@ -296,9 +296,10 @@ pub enum Load {
     Tree(Vec<crate::topology::Node>, usize),
     Progress(crate::occt::Progress),
     Done(Box<Loaded>),
-    /// The run did not produce a scene; the report says why. The window
-    /// closes.
-    Failed,
+    /// The run did not produce a scene, and why: the report's status and
+    /// error, as the CLI says them (#89). The window keeps the tree it has
+    /// and says so.
+    Failed(String),
 }
 
 /// A finished load: the scene and what came with it.
@@ -332,7 +333,7 @@ impl Options {
 fn wait(load: &std::sync::mpsc::Receiver<Load>) -> Option<Box<Loaded>> {
     load.iter().find_map(|l| match l {
         Load::Done(l) => Some(Some(l)),
-        Load::Failed => Some(None),
+        Load::Failed(_) => Some(None),
         _ => None,
     })?
 }

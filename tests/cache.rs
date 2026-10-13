@@ -634,8 +634,8 @@ const VIEW_DEADLINE: Duration = Duration::from_secs(120);
 
 impl Home {
     /// `stepv view <input>` with `args`, held to what a test may cost (#86):
-    /// the kernel under `--memory-mb 1024`, stepv's own `--timeout 30` unless
-    /// `args` gives another, the screenshot hook set so a window that opens
+    /// the kernel under `--memory-mb 1024` and stepv's own `--timeout 30`
+    /// unless `args` gives others, the screenshot hook set so a window that opens
     /// closes itself, and the viewer's own footprint polled.
     ///
     /// The watchdog is the backstop: past [`VIEW_FOOTPRINT_CAP`] or
@@ -658,11 +658,17 @@ impl Home {
         deadline: Duration,
     ) -> (i32, Value, String) {
         let shot = self.0.join("shot.png");
-        // A later `--timeout` in `args` wins.
+        // A later `--timeout` or `--memory-mb` in `args` wins.
         let all = [
-            &["view", input.to_str().unwrap(), "--timeout", "30"][..],
+            &[
+                "view",
+                input.to_str().unwrap(),
+                "--timeout",
+                "30",
+                "--memory-mb",
+                "1024",
+            ][..],
             args,
-            &["--memory-mb", "1024"],
         ]
         .concat();
         let env = [env, &[("STEPV_VIEW_SCREENSHOT", shot.to_str().unwrap())]].concat();
@@ -1061,5 +1067,130 @@ fn a_gpu_that_refuses_the_scene_falls_back_to_software() {
     assert!(
         h.0.join("shot.png").is_file(),
         "the software viewer drew nothing"
+    );
+}
+
+/// A copy of the assembly under `h`, with its outline artifact in the cache:
+/// the tree the window shows before the kernel says anything. The input and
+/// the tree's row count.
+fn seeded(h: &Home) -> (PathBuf, usize) {
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let outline = occt::outline(&kernel(), &input, occt::Limits::DEFAULT).unwrap();
+    let n = rows(&outline.tree);
+    let a = cache::OutlineArtifact::new(stepv::header::read(&input), outline);
+    let file = cache::FileId::of(&input).unwrap();
+    cache::store_outline(&cache::outline_path(&h.cache_dir(), &file), &a).unwrap();
+    (input, n)
+}
+
+/// The window kept the tree of `rows` rows and said what the report says
+/// (#89): its status and error, and the kernel's cause if it gave one, the
+/// CLI's own words.
+fn assert_failed_window(err: &str, j: &Value, rows: usize) {
+    let why = j["error"].as_str().expect("a failure has an error");
+    let cause = j["kernel"]["cause"]
+        .as_str()
+        .map_or(String::new(), |c| format!(" (cause: {c})"));
+    let want = format!(
+        "stepv: STEPV_VIEW_SCREENSHOT failed: tree {rows} rows, {}: {why}{cause}",
+        j["status"].as_str().unwrap()
+    );
+    assert!(err.lines().any(|l| l == want), "{want:?} not in {err}");
+    assert!(!err.contains("STEPV_VIEW_SCREENSHOT scene:"), "{err}");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_timed_out_view_keeps_the_tree_and_says_why() {
+    let k = kernel();
+    let h = Home::new("viewfailtimeout");
+    let input = data("assembly.step");
+    let n = rows(
+        &occt::outline(&k, &input, occt::Limits::DEFAULT)
+            .unwrap()
+            .tree,
+    );
+    // The tree comes from the run; then it stalls past the 5 s cap.
+    let (code, j, err) = h.view_within(
+        &input,
+        &["--timeout", "5"],
+        &[("STEPV_OCCT_TEST_STALL_MS", "30000")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (4, Some("timeout")), "{j}");
+    assert_failed_window(&err, &j, n);
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_memory_capped_view_keeps_the_tree_and_says_why() {
+    let h = Home::new("viewfailmemory");
+    let (input, n) = seeded(&h);
+    // The kernel's test hook holds 512 MiB, past a 64 MiB cap.
+    let (code, j, err) = h.view_within(
+        &input,
+        &["--memory-mb", "64"],
+        &[("STEPV_OCCT_TEST_BALLOON_MB", "512")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("memory-cap")), "{j}");
+    assert_failed_window(&err, &j, n);
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_crashed_view_keeps_the_tree_and_says_why() {
+    let h = Home::new("viewfailcrash");
+    let (input, n) = seeded(&h);
+    let crash = script(&h, "segv-kernel", "kill -SEGV $$");
+    let (code, j, err) = h.view_within(
+        &input,
+        &[],
+        &[("STEPV_OCCT", crash.to_str().unwrap())],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("crashed")), "{j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("signal Some(11)"),
+        "{j}"
+    );
+    assert_failed_window(&err, &j, n);
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_view_whose_input_fails_keeps_the_tree_and_says_why() {
+    let h = Home::new("viewfailinput");
+    let (input, n) = seeded(&h);
+    // An OCCT exception mid-run: a failure of the file itself.
+    let (code, j, err) = h.view_within(
+        &input,
+        &[],
+        &[("STEPV_OCCT_TEST_THROW", "failure")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("failed")), "{j}");
+    assert_eq!(j["kernel"]["cause"], "input", "{j}");
+    assert_failed_window(&err, &j, n);
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_view_without_a_summary_keeps_the_tree_and_says_why() {
+    let h = Home::new("viewfailnosummary");
+    let (input, n) = seeded(&h);
+    let quiet = script(&h, "quiet-kernel", "exit 0");
+    let (code, j, err) = h.view_within(
+        &input,
+        &[],
+        &[("STEPV_OCCT", quiet.to_str().unwrap())],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
+    assert_failed_window(&err, &j, n);
+    assert!(
+        err.contains("bad kernel output: the kernel exited without a summary"),
+        "{err}"
     );
 }

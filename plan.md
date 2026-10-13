@@ -1334,8 +1334,8 @@ as the outline should leave something a preview can show at once.
 
 ### Outline and progress first (#63, #54 step 5, 2026-10-12): the CLI, then the viewer
 
-Part 1 of #63 (#84) is the CLI. Part 2, #85 (2026-10-13), opens the viewer on the outline; #89
-keeps the tree on a failed run.
+#63 is done in three parts: #84, the CLI; #85 (2026-10-13), the viewer opens on the outline;
+#89 (2026-10-13), the viewer keeps the tree, with the reason, when a run fails.
 
 - **`view` writes the artifact:** its load is a cached run like `--png`'s. It is streamed, writes
   `cache::OutlineArtifact` on `Event::Tree` under the `cache::FileId` taken before the run, and
@@ -1378,8 +1378,22 @@ keeps the tree on a failed run.
     "Meshing: P%", and a bar. Before any progress it says "Reading the file…";
   - `Done`: the scene, its topology, the title with the part count, the kernel's sandbox and
     unhealed faces. The window builds the GPU scene, swaps the viewer in, and sets the title;
-  - `Failed`: the window closes, and the report says why, as before (#89 keeps the tree open
-    with the reason instead).
+  - `Failed(why)`: see the next point (#89).
+- **A failed run keeps the tree, and says why (#89):** the window stays open on the tree it has
+  (the cached artifact's or the run's; with neither, the tree panel says "No outline"), and the
+  centre says "The model could not be shown", the reason, and "The tree is the file's outline;
+  there is no geometry." The reason is the report's own `status`, its `error` and the kernel's
+  `cause` when it gave one (`failure` in `src/main.rs`), so the window and the CLI say the same
+  thing in the same words:
+  - a timeout: "timeout: wall-clock cap exceeded";
+  - the memory cap: "memory-cap: memory cap exceeded";
+  - a crash: "crashed: kernel crashed (signal Some(11), exit None)";
+  - a kernel failure: "failed: <the kernel's error> (cause: input)", or `environment`;
+  - no summary: "error: bad kernel output: the kernel exited without a summary".
+  A cancel closes the window itself, so there is nothing left to show. The window is idle, with
+  nothing more to come, until the user closes it; the process then exits with the run's code
+  and report, as before. The software viewer has no tree (#90): there a failed run still opens
+  no window, and only the report says why.
 - **Closing the window mid-load cancels the run (#85):** `occt::run_streaming` takes a `cancel`
   flag, which `supervise`'s tick checks every 2 ms and then kills the kernel: the outcome is
   `Outcome::Cancelled`, with no summary. `view` sets it once its window closes, so nothing runs
@@ -1399,7 +1413,6 @@ keeps the tree on a failed run.
 - **Known limits:**
   - `--software`, or a machine with no usable GPU adapter, has no tree panel: the software
     viewer still waits for the whole run before it opens (#90);
-  - a failed run closes the window instead of keeping the tree with its reason (#89);
   - streaming for the progress line costs the run its parse again inside the timeout, as for
     the artifact (#76);
   - a non-STEP file has no outline, so the line has no part count (#76).
@@ -1425,6 +1438,12 @@ keeps the tree on a failed run.
     - closed once it has drawn the tree (`STEPV_VIEW_CLOSE_LOADING=1`), with the kernel stalled
       30 s: exit 0, `cancelled` with its `message` and no `error`, in under 20 s, and the
       kernel's process is gone;
+    - #89: a timeout (the stall hook, the tree from the run), the memory cap (the balloon hook
+      under `--memory-mb 64`), a crash (a kernel that sends itself SIGSEGV), a kernel failure
+      of cause `input` (the throw hook) and a kernel exit without a summary each leave the
+      window's report "failed: tree N rows, <status>: <error>[ (cause: <cause>)]", the report's
+      own words, with the tree of N rows still there (from the cached artifact where the kernel
+      fails before its outline), and no scene. On `main` before #89, all five fail;
     - with the pipelines refused (`STEPV_VIEW_REJECT_PIPELINES`), or the scene's buffers once
       it comes (`STEPV_VIEW_REJECT_UPLOAD`), the software viewer draws the scene (status `ok`,
       backend `software`, the fallback said on stderr).
