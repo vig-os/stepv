@@ -14,11 +14,9 @@ final class ThumbnailProvider: QLThumbnailProvider {
         // the extension got from one Quick Look answered from its cache.
         stepvLog.notice("thumbnail request: \(path, privacy: .public)")
         // One reply, whichever comes first: the run's, or the backstop's.
-        let lock = NSLock()
-        var replied = false
+        let once = StepvOnce()
         func reply(_ r: QLThumbnailReply?, _ e: Error?) {
-            lock.lock(); let first = !replied; replied = true; lock.unlock()
-            if first { handler(r, e) }
+            if once.claim() { handler(r, e) }
         }
         guard let format = StepvKernel.format(of: request.fileURL) else {
             return reply(nil, ThumbnailError.noGeometry("not a STEP, IGES or BREP file"))

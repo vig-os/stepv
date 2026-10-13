@@ -108,6 +108,16 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -s
   "$root/macos/Shared/StepvFrames.swift" "$root/macos/Tests/FramesTests/main.swift" -o "$tmp/frames-tests"
 "$tmp/frames-tests" "$tmp/assembly.svev" || fail "the Swift SVEV reader"
 
+# The preview's session (#64) against a fake service that never replies:
+# the backstop cancels the run and shows the error once; a late reply is
+# dropped; a normal run is ready on its tree and prepared off the main thread.
+env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -swift-version 5 \
+  -target "$(uname -m)-apple-macos14.0" -import-objc-header "$root/macos/Shared/Bridge.h" \
+  "$root"/macos/Shared/{StepvFrames,StepvSupervisor,StepvKernel,StepvPreviewSession}.swift \
+  "$root/macos/Tests/PreviewSessionTests/main.swift" "$root/target/release/libstepv_capi.a" -liconv \
+  -o "$tmp/session-tests"
+"$tmp/session-tests" || fail "the preview session"
+
 app="$root/target/macos/stepv.app"
 for x in "$app"/Contents/PlugIns/*.appex; do
   ents=$(codesign -d --entitlements - --xml "$x" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \
@@ -136,9 +146,16 @@ for x in "$app"/Contents/PlugIns/*.appex; do
 done
 # Nothing in an extension runs the kernel in-process (#64): no libstepvocct,
 # no OCCT linked into its binary; its supervisor service runs the kernel.
+# Fails closed: a binary otool cannot read is a failure, not a pass.
+links_no_kernel() {
+  local deps
+  deps=$(otool -L "$1" 2>/dev/null) || return 1
+  [ -n "$deps" ] && ! grep -qE 'stepvocct|libTK' <<<"$deps"
+}
+! links_no_kernel /nonexistent || fail "the linkage check passes a binary that does not exist"
 for x in "$app"/Contents/PlugIns/*.appex; do
-  b="$x/Contents/MacOS/$(basename "$x" .appex)"
-  ! otool -L "$b" | grep -qE 'stepvocct|libTK' || fail "$(basename "$x") links the kernel in-process"
+  links_no_kernel "$x/Contents/MacOS/$(basename "$x" .appex)" \
+    || fail "$(basename "$x") links the kernel in-process, or otool cannot read it"
 done
 codesign --verify --deep --strict "$app" || fail "codesign --verify --deep --strict"
 echo "ok: each extension embeds its supervisor, kernel and Frameworks, signed and minimally entitled"
