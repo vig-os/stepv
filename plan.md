@@ -1910,6 +1910,26 @@ the real assembly's transfer time is #51.
   `tests/fixtures/corpus.sha256`; `flake.nix` with `pkgs.opencascade-occt` and the `native` module
   enabled.
 
+- **Binary cache (#74, 2026-10-13).** The patched OCCT (`flake.nix`, "#74 OCCT patch") is in no
+  public cache. Built from source it takes about 35 min on sage and about 55 min on a GitHub Linux
+  runner, longer than devkit's CI jobs allow. The public Cachix cache **`gerchowl`** holds it, for
+  aarch64-darwin and x86_64-linux.
+  - **What it caches:** whatever the CI jobs build that cache.nixos.org does not have. That is
+    mainly the patched OCCT, the kernel and the dev shell's own derivations.
+  - **Pulling:** anyone can pull, with the key
+    `gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU=`.
+    - `flake.nix`'s `nixConfig` names the cache and its key. Nix uses it for trusted users, or
+      with `--accept-flake-config`.
+    - The fleet hosts have it in nix.conf (g-fleet #505).
+  - **Pushing:** only CI on trusted events (pushes to `main`, PRs from this repo and releases),
+    with the repo secret `CACHIX_AUTH_TOKEN` and the variable `CACHIX_CACHE=gerchowl`, plus the
+    fleet hosts that hold g-fleet's sops token.
+    - devkit's `ci.yml` does this through `setup-devkit-toolchain`. `kernel.yml` and
+      `release-extension.yml` run `cachix/cachix-action` themselves.
+    - A fork PR has no token, so it only pulls, and `skipPush` stops it pushing even if it had one.
+  - **Rotating the token:** in g-fleet, run `just cachix-key gerchowl` (it checks the token and
+    re-encrypts `secrets/cachix.yaml`), then `just cachix-gh-secret vig-os/stepv`.
+
 ### Owed — only a human can do these
 
 Everything else is built and tested. Each item below needs a credential, an account or a click
