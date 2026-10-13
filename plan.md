@@ -1,8 +1,9 @@
 # stepv — implementation plan and handoff
 
 **Status:** S1–S5 built and tested; S6 (release) wired and **waiting on human credentials**
-(§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and
-in-process inside the macOS Quick Look extensions, whose sandbox forbids exec. With the per-face
+(§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and on
+macOS as the child of an XPC supervisor service inside each Quick Look extension, whose sandbox
+forbids exec (#64). With the per-face
 recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn with a
 flagged overlay, and nothing crashes or hangs. With seven CAD writers and a real 143 MB assembly
 added (#12, 2026-10-11) it is 99.2% of 400 (faithful or wireframe; 99.0% fully faithful). The one
@@ -887,8 +888,7 @@ and #34 (capping, fat lines).
   - The numbering is `stepv::topology_edges`, now the one function `--topology` uses too, so an
     edge id names its JSON curve by construction. A test checks every id against every
     `tests/data` file's topology.
-  - Only `stepv view` asks for v4. Thumbnails, `--glb`, `--mesh` and Quick Look's in-process path
-    stay v3, so the issue's "Quick Look keeps v3 behind a flag" holds.
+  - Only `stepv view` asks for v4. Thumbnails, `--glb`, `--mesh` and Quick Look stay v3, so the issue's "Quick Look keeps v3 behind a flag" holds.
   - The Swift reader also accepts v4 and skips the edges; `just macos-test` decodes a real v4
     file against v3.
   - `assembly.step` has 21 edges.
@@ -1673,7 +1673,7 @@ memory is freed at once. Two designs failed before this one:
     dyld's open failed with "file system sandbox blocked open()". A service's sandbox reads its
     own bundle and nothing of the app around it.
   - The app grows from 57 to 174 MB: three copies of the closure, +117 MB. The options and
-    their evaluation are in [#101](https://github.com/vig-os/stepv/issues/101). Part 2 drops
+    their evaluation are in [#101](https://github.com/vig-os/stepv/issues/101). Part 2 dropped
     the extensions' in-process copy of libstepvocct.
 - **Signing:** the kernel is signed `app-sandbox` + `inherit`, so it runs in the service's
   sandbox; without `inherit` a sandboxed child traps. The service is signed `app-sandbox` alone.
@@ -1782,6 +1782,15 @@ memory is freed at once. Two designs failed before this one:
     when the view goes, and is in any case bounded by that deadline and the 4096 MB cap.
   - Quick Look has no cancel callback.
 - **Memory cap:** 4096 MB in both extensions, the CLI's default.
+- **Closing a preview:**
+  - Quick Look has no cancel callback, and the remote view gets no disappear calls. Closing the
+    preview (`QLPreviewView.close()`, a closed panel) releases the extension's view controller,
+    whose `deinit` cancels its run, and the service kills that kernel.
+  - ql-e2e closes a preview of the 4000-part file at 8 s. Its kernel must be cancelled with
+    SIGKILL and reaped within 3 s, and gone.
+- **Preview backstop:** past 122 s (the run's 120 s cap plus the thumbnail's 2 s margin), the
+  preview gives up on a service that never replied: it cancels the run, shows why, and drops any
+  later reply. macos/Tests/PreviewSessionTests checks this against a fake service.
 - **ql-e2e on the real extensions:**
   - A thumbnail and a preview of STEP, IGES and BREP. Each preview must log `ready (tree)`
     before its scene for STEP, and `ready (mesh)` for IGES and BREP, exactly once.
@@ -1844,10 +1853,11 @@ the real assembly's transfer time is #51.
   external reference that points *above* it (`../parts/x.stp`) is refused and shows as missing.
   Widening that would mean trusting more of the disk to a hostile file. Quick Look is narrower
   still: it grants the one file, which is why multi-file assemblies are blank there (#19).
-- **macOS containment.** In-process, the extension cannot cap one file's time or memory itself.
-  It relies on the system killing a hung or ballooning extension. If that proves too coarse in
-  practice, the next step is an XPC service inside the `.appex`: launchd may start one where exec
-  is forbidden, and it brings back per-file kill.
+- **macOS containment.** ~~In-process, the extension cannot cap one file's time or memory.~~
+  Done in #64: each extension's XPC supervisor service runs the kernel as its child, with a
+  deadline and a memory cap, and kills it per file. What remains is the
+  nesting: the kernel's own Seatbelt profile cannot apply inside the service's sandbox
+  (`macos-outer`).
 - **Upstream report for `occt-wasm`** (#14). The STEP-import-needs-a-filesystem gap (§3) is known
   upstream (PR #371 "Known gap"), but no issue tracks it. Filing one is outward-facing, so it is
   left to a human.

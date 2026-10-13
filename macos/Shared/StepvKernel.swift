@@ -46,6 +46,9 @@ enum StepvKernel {
     /// a bound on what one preview may cost.
     static let previewHandlerAfter = 20.0
     static let previewDeadlineMs = 120_000
+    /// Preview backstop: past this the session gives up on the service and
+    /// shows why (the thumbnail's margin over its run, 2 s).
+    static let previewReplyAfter = 122.0
 
     /// The kernel's reader for a file Quick Look hands over: by extension,
     /// as `stepv-occt` picks it for a path. A descriptor has none, so it is

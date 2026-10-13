@@ -74,7 +74,10 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         view = root
     }
 
-    private var run: StepvSupervisorRun?
+    /// What the background decode hands the main thread: the scene and its
+    /// camera, or nil, with the panel's lines.
+    private typealias Prepared = (scene: SCNScene?, camera: SCNNode?, lines: [String])
+    private var session: StepvPreviewSession<Prepared>?
     // The panel's parts, on the main thread: the header, the tree, and the
     // run's status (progress, then the result).
     private var header: [String] = []
@@ -84,7 +87,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
     private var started = Date()
     private var path = ""
 
-    deinit { run?.cancel() }  // the preview closed: its kernel goes
+    // Closing the preview releases this controller: Quick Look has no
+    // cancel callback, and the remote view gets no disappear calls, but
+    // QLPreviewView.close() and a closed panel release it (ql-e2e proves the
+    // kernel is reaped then). Its kernel goes with it.
+    deinit { session?.cancel() }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
         self.handler = handler
@@ -98,21 +105,23 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         }
         status = ["Reading…"]
         showPanel()
-        let run = StepvSupervisorRun(onEvent: { [weak self] kind, payload in
-            DispatchQueue.main.async { self?.event(kind, payload) }
-        }, completion: { [weak self] result in
-            DispatchQueue.main.async { self?.finished(result) }
-        })
-        self.run = run
-        run.start(file: url, format: format, linearRel: StepvKernel.preview.linearRel,
-                  angularDeg: StepvKernel.preview.angularDeg,
-                  deadlineMs: StepvKernel.previewDeadlineMs, memoryMB: StepvKernel.memoryMB)
-        DispatchQueue.main.asyncAfter(deadline: .now() + StepvKernel.previewHandlerAfter) { [weak self] in
-            self?.ready("deadline")
+        let session = StepvPreviewSession<Prepared>(prepare: PreviewViewController.prepare)
+        session.onTree = { [weak self] lines in self?.tree = lines; self?.showPanel() }
+        session.onProgress = { [weak self] line in self?.status = [line]; self?.showPanel() }
+        session.onResult = { [weak self] p in self?.show(p) }
+        session.onReady = { [weak self] why in self?.ready(why) }
+        self.session = session
+        session.start(readyAfter: StepvKernel.previewHandlerAfter,
+                      replyAfter: StepvKernel.previewReplyAfter) { onEvent, completion in
+            let run = StepvSupervisorRun(onEvent: onEvent, completion: completion)
+            run.start(file: url, format: format, linearRel: StepvKernel.preview.linearRel,
+                      angularDeg: StepvKernel.preview.angularDeg,
+                      deadlineMs: StepvKernel.previewDeadlineMs, memoryMB: StepvKernel.memoryMB)
+            return run.cancel
         }
     }
 
-    /// Tells Quick Look the preview is up, once; `why` goes to the log.
+    /// Tells Quick Look the preview is up; the session calls it once.
     private func ready(_ why: String) {
         guard let handler else { return }
         self.handler = nil
@@ -121,38 +130,21 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         handler(nil)
     }
 
-    private func event(_ kind: UInt8, _ payload: Data) {
-        let json = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any]
-        if kind == StepvEvent.tree, let nodes = json?["tree"] as? [[String: Any]] {
-            tree = StepvPreviewText.outline(nodes, leaves: json?["leaves"] as? Int)
-            showPanel()
-            ready("tree")
-        } else if kind == StepvEvent.progress, let stage = json?["stage"] as? String,
-                  let done = json?["done"] as? Int, let total = json?["total"] as? Int, total > 0 {
-            status = ["\(stage == "mesh" ? "Meshing" : "Transferring") \(done * 100 / total) %"]
-            showPanel()
-        }
-    }
-
-    private func finished(_ result: StepvRunResult) {
-        run = nil
+    /// Off the main thread: the mesh decoded and its scene built.
+    private static func prepare(_ result: StepvRunResult) -> Prepared {
         var lines: [String] = []
-        var built: SCNScene?
-        if let data = result.mesh, let scene = try? decodeStepvMesh(data) {
-            let scn = StepvSceneBuilder.build(scene)
+        var scene: SCNScene?
+        var camera: SCNNode?
+        if let data = result.mesh, let decoded = try? decodeStepvMesh(data) {
+            let scn = StepvSceneBuilder.build(decoded)
             // The thumbnail's view, so a flat part opens face-on.
             let view = StepvSceneBuilder.viewAngles(data)
-            let camera = StepvSceneBuilder.camera(for: scn, azimuthDeg: view.azimuthDeg,
-                                                  elevationDeg: view.elevationDeg)
-            scn.rootNode.addChildNode(camera)
-            sceneView.scene = scn
-            sceneView.pointOfView = camera
-            let (lo, hi) = scn.rootNode.boundingBox
-            sceneView.defaultCameraController.target =
-                SCNVector3((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
-            built = scn
-            lines.append("\(scene.parts.count) part\(scene.parts.count == 1 ? "" : "s")")
-            switch scene.worstFace {
+            let cam = StepvSceneBuilder.camera(for: scn, azimuthDeg: view.azimuthDeg,
+                                               elevationDeg: view.elevationDeg)
+            scn.rootNode.addChildNode(cam)
+            (scene, camera) = (scn, cam)
+            lines.append("\(decoded.parts.count) part\(decoded.parts.count == 1 ? "" : "s")")
+            switch decoded.worstFace {
             case .approx?: lines.append("⚠ some faces approximated (amber)")
             case .missing?: lines.append("⚠ some faces missing (red outline)")
             default: break
@@ -162,51 +154,29 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
             lines.append("No preview: \(StepvPreviewText.why(result))")
         }
         if let note = StepvSceneBuilder.externalNote(result.summary) { lines.append(note) }
-        // The scene speaks for the tree once it is there.
-        if built != nil { tree = [] }
-        status = lines
+        return (scene, camera, lines)
+    }
+
+    /// On the main thread: the prepared result applied.
+    private func show(_ p: Prepared) {
+        if let scene = p.scene, let camera = p.camera {
+            sceneView.scene = scene
+            sceneView.pointOfView = camera
+            let (lo, hi) = scene.rootNode.boundingBox
+            sceneView.defaultCameraController.target =
+                SCNVector3((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
+            tree = []  // the scene speaks for the tree once it is there
+        }
+        status = p.lines
         showPanel()
         // What scripts/ql-e2e reads back: this file, and what was shown.
-        stepvLog.notice("preview \(self.path, privacy: .public): \(built != nil ? "shown" : "none", privacy: .public): \((self.header + lines).joined(separator: "; "), privacy: .public)")
-        ready(built != nil ? "mesh" : "failure")
+        stepvLog.notice("preview \(self.path, privacy: .public): \(p.scene != nil ? "shown" : "none", privacy: .public): \((self.header + p.lines).joined(separator: "; "), privacy: .public)")
+        session?.markReady(p.scene != nil ? "mesh" : "failure")
     }
 
     private func showPanel() {
         let lines = header + tree + status
         info.stringValue = lines.joined(separator: "\n")
         panel.isHidden = lines.isEmpty
-    }
-}
-
-/// The preview's text, apart from the view.
-enum StepvPreviewText {
-    /// The assembly tree as indented lines, at most `limit` of them.
-    static func outline(_ roots: [[String: Any]], leaves: Int?, limit: Int = 14) -> [String] {
-        var out: [String] = []
-        var more = 0
-        func walk(_ nodes: [[String: Any]], _ depth: Int) {
-            for n in nodes {
-                if out.count < limit {
-                    out.append(String(repeating: "   ", count: depth) + ((n["name"] as? String) ?? "?"))
-                } else {
-                    more += 1
-                }
-                walk((n["children"] as? [[String: Any]]) ?? [], depth + 1)
-            }
-        }
-        walk(roots, 0)
-        if more > 0 { out.append("… \(more) more") }
-        if let leaves { out.insert("\(leaves) part\(leaves == 1 ? "" : "s"), loading…", at: 0) }
-        return out
-    }
-
-    /// Why a run gave no geometry, in a person's words.
-    static func why(_ r: StepvRunResult) -> String {
-        switch r.outcome {
-        case .done: return (r.summary?["error"] as? String) ?? "no geometry"
-        case .deadline: return "it took longer than Quick Look allows"
-        case .memory: return "it needs more memory than Quick Look allows"
-        case .crashed, .refused: return r.detail
-        }
     }
 }
