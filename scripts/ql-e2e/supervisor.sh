@@ -129,7 +129,12 @@ mkdir -p "$container_tmp/stepv-run-planted"
 : >"$container_tmp/stepv-run-planted/mesh.msh"
 : >"$container_tmp/stepv-run-planted/stepv-input-planted.igs"
 start=$(date '+%Y-%m-%d %H:%M:%S')
-timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step} || rc=1
+# The admission limit this machine gives the service (Admission), from the
+# held run's service: the concurrency check depends on it.
+limit=$(grep -oE -m1 'admission limit [0-9]+' "$tmp/log.txt" | awk '{print $3}')
+[ -n "$limit" ] || { echo "FAIL: the service logged no admission limit"; rc=1; limit=1; }
+echo "service admission limit: $limit"
+timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step} "$limit" || rc=1
 if await_log 'started: swept ([2-9]|[1-9][0-9]+) dead run' 20; then
   echo "ok: logged: $(grep -E -m1 'started: swept' "$tmp/log.txt")"
 else
@@ -185,6 +190,54 @@ else
   echo "stand-in rounds: $rounds, failed: $failed_rounds"
 fi
 [ "$failed_rounds" -eq 0 ] || rc=1
+
+# 4a. Admission (#64): a test build of the supervisor (STEPV_TEST_HOOKS,
+#     never shipped) with its limit forced to 1, in a third copy: the second
+#     of two runs spawns only once the first is reaped, and a run whose
+#     deadline passes in the queue never spawns.
+ditto "$tmp/stepv.app" "$tmp/limit1.app"
+lxpc="$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/XPCServices/StepvSupervisor.xpc"
+env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -swift-version 5 \
+  -target "$(uname -m)-apple-macos14.0" -module-name StepvSupervisor -application-extension \
+  -D STEPV_TEST_HOOKS "$root"/macos/Shared/{StepvFrames,StepvSupervisor}.swift "$root/macos/Supervisor/main.swift" \
+  -o "$lxpc/Contents/MacOS/StepvSupervisor" || fail "building the test supervisor"
+mkdir -p "$lxpc/Contents/Resources"
+echo 1 >"$lxpc/Contents/Resources/admission-limit"
+codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$lxpc" 2>/dev/null \
+  || fail "signing the test supervisor"
+start=$(date '+%Y-%m-%d %H:%M:%S')
+timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+  "$service" admission "$tmp/files/slow.step" "$tmp/files/assembly.step" || rc=1
+log_since >"$tmp/log.txt"
+# In the log's order: the first run's result, then the second's spawn.
+order=$(python3 - "$tmp/log.txt" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+limit = next((l for l in lines if "admission limit 1" in l), None)
+pid = re.search(r"service pid (\d+)", limit).group(1) if limit else "?"
+lines = [l for l in lines if f"service pid {pid}" in l]
+runs = {}
+for i, l in enumerate(lines):
+    m = re.match(r"run #(\d+)[ :(]", l)
+    if not m: continue
+    r = runs.setdefault(int(m.group(1)), {})
+    if re.search(r"kernel pid \d+ spawned", l): r["spawned"] = i
+    if "queued" in l: r["queued"] = i
+    if re.search(r"exit \d+ in \d+ ms|killed \(", l): r["ended"] = i
+    if "never spawned" in l: r["withdrawn"] = i
+ids = sorted(runs)
+ok = limit and len(ids) == 3
+a, b, c = (runs[i] for i in ids) if ok else ({}, {}, {})
+ok = ok and "queued" in b and b.get("spawned", -1) > a.get("ended", 10**9) \
+    and "withdrawn" in c and "spawned" not in c
+print("ok" if ok else f"FAIL {runs} limit={'1' if limit else '?'}")
+PY
+)
+if [ "$order" = ok ]; then
+  echo "ok: admission limit 1: the second run spawned after the first ended; the third never spawned"
+else
+  echo "FAIL: admission order: $order"; rc=1
+fi
 
 # 4b. A live run survives another instance's sweep. Two client processes
 #     each start their own instance of the service, in one container: B's

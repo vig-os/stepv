@@ -4,9 +4,14 @@
 // main bundle is that extension's and it reaches that extension's real
 // StepvSupervisor.xpc, its real kernel and its real Frameworks.
 //
-//   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step>
+//   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> <L>
+//                    L: the service's admission limit, from its log
 //   supervisor-probe <service> hold <slow.step>    one run, then wait, for
 //                    the caller to kill the service under it
+//   supervisor-probe <service> admission <slow.step> <small.step>   against
+//                    a service whose admission limit is 1 (a test build):
+//                    the second run waits for the first, and a third whose
+//                    deadline passes in the queue never spawns
 //   supervisor-probe <service> live <slow.step>    one run that must finish
 //                    with its mesh, while the caller starts a second
 //                    instance of the service, whose sweep must spare it
@@ -19,7 +24,7 @@
 import Foundation
 
 let a = CommandLine.arguments
-let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> | hold <slow.step> | live <slow.step> | standin <frames> <late> <silent> <truncated> <noexit>"
+let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> <L> | hold <slow.step> | live <slow.step> | admission <slow.step> <small.step> | standin <frames> <late> <silent> <truncated> <noexit>"
 guard a.count >= 3 else { print(usage); exit(2) }
 let service = a[1]
 var failed = false
@@ -71,6 +76,20 @@ case ("hold", 4):
     let held = Probe(a[3], "step", deadlineMs: 60_000)
     print("hold: \(outcomeLine(held.wait(60)))")
     exit(0)
+case ("admission", 5):
+    let first = Probe(a[3], "step", deadlineMs: 30_000)
+    usleep(300_000)
+    let second = Probe(a[4], "step", deadlineMs: 30_000)
+    let third = Probe(a[4], "step", deadlineMs: 1000)
+    let r3 = third.wait(10)
+    check(r3?.outcome == .deadline && r3?.detail.contains("never spawned") == true,
+          "admission: a request past its deadline in the queue never spawns: \(outcomeLine(r3))")
+    let r1 = first.wait(40), r2 = second.wait(40)
+    // When each ended: the second, queued, ends after the first.
+    let end1 = first.t0 + first.ms, end2 = second.t0 + second.ms
+    check(r1?.outcome == .done && r2?.outcome == .done && end2 > end1,
+          "admission: the second run ended \(Int(end2 - end1)) ms after the first: \(outcomeLine(r2))")
+    exit(failed ? 1 : 0)
 case ("live", 4):
     let p = Probe(a[3], "step", deadlineMs: 60_000)
     let r = p.wait(60)
@@ -93,7 +112,7 @@ case ("standin", 8):
     let rn = Probe(a[7], "step", deadlineMs: 1000).wait()
     check(rn?.outcome == .deadline, "stand-in closes stdout, never exits: the deadline ends it — \(outcomeLine(rn))")
     exit(failed ? 1 : 0)
-case (_, 6):
+case (_, 7):
     break
 default:
     print(usage); exit(2)
@@ -131,8 +150,14 @@ usleep(200_000)
 let beside = Probe(a[2], "step")
 let rb = beside.wait()
 slow.lock.lock(); let slowStillRunning = slow.result == nil; slow.lock.unlock()
-check(rb?.outcome == .done && slowStillRunning,
-      "concurrent: \(String(format: "%.0f", beside.ms)) ms while the slow run went on — \(meshLine(rb))")
+if Int(a[6]) ?? 1 >= 2 {
+    check(rb?.outcome == .done && slowStillRunning,
+          "concurrent: \(String(format: "%.0f", beside.ms)) ms while the slow run went on — \(meshLine(rb))")
+} else {
+    // One kernel at a time (Admission): the second waits for the first.
+    check(rb?.outcome == .done && !slowStillRunning,
+          "admission limit 1: the second run was served after the first ended, in \(String(format: "%.0f", beside.ms)) ms — \(meshLine(rb))")
+}
 let rs = slow.wait()
 check(rs?.outcome == .deadline, "deadline: \(rs.map { "\($0.outcome.rawValue) \($0.detail)" } ?? "no reply") in \(String(format: "%.0f", slow.ms)) ms")
 let after = Probe(a[2], "step")
