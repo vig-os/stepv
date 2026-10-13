@@ -41,8 +41,9 @@ import Foundation
 
 @objc(StepvSupervisorProtocol) protocol StepvSupervisorProtocol {
     /// Runs the kernel on `file` read as `format` ("step", "iges" or
-    /// "brep"), at `linearRel` and `angularDeg`. `deadlineMs` and `memoryMB`
-    /// bound it; 0 is none. The reply carries the summary (the DONE frame's
+    /// "brep"), at `linearRel` (0 to 1] and `angularDeg` (0 to 180].
+    /// `deadlineMs` (1 to 600 000) and `memoryMB` (1 to 2^20) bound it, and
+    /// are required: a request out of range is refused, unrun. The reply carries the summary (the DONE frame's
     /// JSON) and, on success, the STEPVMSH v3 mesh as an unlinked file.
     func run(_ file: FileHandle, format: String, linearRel: Double, angularDeg: Double,
              deadlineMs: Int, memoryMB: Int,

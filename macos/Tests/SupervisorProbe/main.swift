@@ -5,6 +5,10 @@
 // StepvSupervisor.xpc, its real kernel and its real Frameworks.
 //
 //   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step>
+//   supervisor-probe <service> hold <slow.step>    one run, then wait, for
+//                    the caller to kill the service under it
+//   supervisor-probe <service> standin <frames> <late> <silent> <truncated> <noexit>
+//                    against KernelStandIn in place of the kernel
 //
 // One line per check, "ok: …" or "FAIL: …"; exit 1 if any failed. The kernel
 // pids the service used are in its log, for the caller to see they are gone.
@@ -12,10 +16,8 @@
 import Foundation
 
 let a = CommandLine.arguments
-guard a.count == 6 else {
-    print("usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step>")
-    exit(2)
-}
+let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> | hold <slow.step> | standin <frames> <late> <silent> <truncated> <noexit>"
+guard a.count >= 3 else { print(usage); exit(2) }
 let service = a[1]
 var failed = false
 func check(_ ok: Bool, _ what: String) {
@@ -33,7 +35,8 @@ final class Probe {
     var run: StepvSupervisorRun!
     var t0 = 0.0, ms = 0.0
 
-    init(_ path: String, _ format: String, deadlineMs: Int = 20_000, memoryMB: Int = 4096) {
+    init(_ path: String, _ format: String, deadlineMs: Int = 20_000, memoryMB: Int = 4096,
+         linearRel: Double = 0.001, angularDeg: Double = 20) {
         run = StepvSupervisorRun(serviceName: service, onEvent: { [unowned self] kind, _ in
             self.lock.lock(); self.kinds.append(kind)
             if self.result != nil { self.replyAfterEvents = false }
@@ -43,7 +46,7 @@ final class Probe {
             self.done.signal()
         })
         t0 = now()
-        run.start(file: URL(fileURLWithPath: path), format: format, linearRel: 0.001, angularDeg: 20,
+        run.start(file: URL(fileURLWithPath: path), format: format, linearRel: linearRel, angularDeg: angularDeg,
                   deadlineMs: deadlineMs, memoryMB: memoryMB)
     }
 
@@ -53,6 +56,38 @@ final class Probe {
         lock.lock(); defer { lock.unlock() }
         return result
     }
+}
+
+func outcomeLine(_ r: StepvRunResult?) -> String {
+    r.map { "\($0.outcome.rawValue) \($0.detail)" } ?? "no reply"
+}
+
+switch (a[2], a.count) {
+case ("hold", 4):
+    // The caller kills the service while this run's kernel works.
+    let held = Probe(a[3], "step", deadlineMs: 60_000)
+    print("hold: \(outcomeLine(held.wait(60)))")
+    exit(0)
+case ("standin", 8):
+    for (path, what) in [(a[3], "frames then exit"), (a[4], "exits before its frames arrive")] {
+        let p = Probe(path, "step")
+        let r = p.wait()
+        check(r?.outcome == .done && r?.summary?["sandbox"] as? String == "stand-in" && p.kinds == [1, 2],
+              "stand-in \(what): the stream drained (events \(p.kinds)) — \(outcomeLine(r))")
+    }
+    let rs = Probe(a[5], "step").wait()
+    check(rs?.outcome == .crashed && rs?.detail.contains("without its summary") == true,
+          "stand-in exits silent: no summary is a crash — \(outcomeLine(rs))")
+    let rt = Probe(a[6], "step").wait()
+    check(rt?.outcome == .crashed && rt?.detail.contains("partway") == true,
+          "stand-in half a frame: a crash — \(outcomeLine(rt))")
+    let rn = Probe(a[7], "step", deadlineMs: 1000).wait()
+    check(rn?.outcome == .deadline, "stand-in closes stdout, never exits: the deadline ends it — \(outcomeLine(rn))")
+    exit(failed ? 1 : 0)
+case (_, 6):
+    break
+default:
+    print(usage); exit(2)
 }
 
 func meshLine(_ r: StepvRunResult?) -> String {
@@ -101,6 +136,11 @@ let capped = Probe(a[2], "step", memoryMB: 1)
 let rc = capped.wait()
 check(rc?.outcome == .memory, "memory cap: \(rc.map { "\($0.outcome.rawValue) \($0.detail)" } ?? "no reply")")
 
+// A realistic cap: 256 MB against the slow file's ~500 MB peak.
+let capped256 = Probe(a[5], "step", memoryMB: 256)
+let rc256 = capped256.wait()
+check(rc256?.outcome == .memory, "memory cap 256 MB on a ~500 MB run: \(outcomeLine(rc256))")
+
 // 5. Cancel: the connection goes, the service kills the kernel, and no
 //    completion follows.
 let cancelled = Probe(a[5], "step")
@@ -108,9 +148,22 @@ usleep(500_000)
 cancelled.run.cancel()
 check(cancelled.wait(2) == nil, "cancel: no completion after cancel()")
 
-// 6. A refused request: a format the kernel does not read.
-let bad = Probe(a[2], "obj")
-let rr = bad.wait()
-check(rr?.outcome == .refused, "refused: \(rr.map { "\($0.outcome.rawValue) \($0.detail)" } ?? "no reply")")
+// 6. Refused before anything runs: every run is bounded and well formed.
+for (what, p) in [
+    ("format obj", { Probe(a[2], "obj") }),
+    ("deadlineMs 0", { Probe(a[2], "step", deadlineMs: 0) }),
+    ("deadlineMs -1", { Probe(a[2], "step", deadlineMs: -1) }),
+    ("deadlineMs Int.max", { Probe(a[2], "step", deadlineMs: Int.max) }),
+    ("memoryMB 0", { Probe(a[2], "step", memoryMB: 0) }),
+    ("memoryMB Int.max", { Probe(a[2], "step", memoryMB: Int.max) }),
+    ("linearRel NaN", { Probe(a[2], "step", linearRel: .nan) }),
+    ("linearRel -1", { Probe(a[2], "step", linearRel: -1) }),
+    ("linearRel 2", { Probe(a[2], "step", linearRel: 2) }),
+    ("angularDeg 0", { Probe(a[2], "step", angularDeg: 0) }),
+    ("angularDeg infinity", { Probe(a[2], "step", angularDeg: .infinity) }),
+] as [(String, () -> Probe)] {
+    let r = p().wait()
+    check(r?.outcome == .refused, "refused \(what): \(outcomeLine(r))")
+}
 
 exit(failed ? 1 : 0)

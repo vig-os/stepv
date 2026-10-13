@@ -14,12 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Frameworks`. The service runs the kernel as its child on the file's descriptor, forwards
     the outline and progress, and returns the summary and mesh
   - It kills the kernel on cancel, at a deadline, or past a memory cap (resident size: the
-    sandbox hides the footprint). The next run starts at once, and concurrent runs are
-    independent
+    sandbox hides the footprint). Both bounds are required, and malformed requests are refused
+    unrun. The next run starts at once, and concurrent runs are independent
+  - `stepv-occt --lifeline N`: the kernel exits as soon as its caller's end of pipe N closes, so
+    a killed service takes its kernel with it. Meshes a killed service left behind are swept
+    when the next one starts
   - The Swift reader of the kernel's event frames has the same bounds as the Rust one
   - `just ql-e2e` (`scripts/ql-e2e/`) runs both extensions through Quick Look itself, and probes
     the service. `scripts/test-macos.sh` probes the service and checks its signing
-  - The app grows from 57 to 174 MB. The extensions still run the kernel in-process; part 2
+  - The app grows from 57 to 174 MB
+    ([#101](https://github.com/vig-os/stepv/issues/101)). The extensions still run the kernel in-process; part 2
     moves them onto the service
 - **The kernel reads a file its caller opened** ([#91](https://github.com/vig-os/stepv/issues/91),
   for Quick Look's sandboxed service, [#64](https://github.com/vig-os/stepv/issues/64)):

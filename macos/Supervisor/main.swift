@@ -51,8 +51,9 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
              reply: @escaping (StepvRunOutcome, String, Data?, FileHandle?) -> Void) {
         lock.lock(); let first = !used; used = true; lock.unlock()
         guard first else { return reply(.refused, "one run per connection", nil, nil) }
-        guard ["step", "iges", "brep"].contains(format) else {
-            return reply(.refused, "unknown format \(format)", nil, nil)
+        if let why = Supervisor.invalid(format: format, linearRel: linearRel, angularDeg: angularDeg,
+                                        deadlineMs: deadlineMs, memoryMB: memoryMB) {
+            return reply(.refused, why, nil, nil)
         }
         servedLock.lock(); served += 1; let n = served; servedLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -63,6 +64,20 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             reply(outcome, detail, summary, mesh)
         }
     }
+
+    /// Why a request is refused before anything runs, or nil. Every run is
+    /// bounded: a deadline and a memory cap are required, and in range.
+    static func invalid(format: String, linearRel: Double, angularDeg: Double,
+                        deadlineMs: Int, memoryMB: Int) -> String? {
+        if !["step", "iges", "brep"].contains(format) { return "unknown format \(format)" }
+        if !(linearRel > 0 && linearRel <= 1) { return "linearRel \(linearRel) is not in (0, 1]" }
+        if !(angularDeg > 0 && angularDeg <= 180) { return "angularDeg \(angularDeg) is not in (0, 180]" }
+        if !(1...maxDeadlineMs).contains(deadlineMs) { return "deadlineMs \(deadlineMs) is not in 1...\(maxDeadlineMs)" }
+        if !(1...maxMemoryMB).contains(memoryMB) { return "memoryMB \(memoryMB) is not in 1...\(maxMemoryMB)" }
+        return nil
+    }
+    static let maxDeadlineMs = 600_000  // 10 min: far past Quick Look's own watchdogs
+    static let maxMemoryMB = 1 << 20  // 1 TB: any real machine's memory, below overflow
 
     private func supervise(_ file: FileHandle, n: Int, format: String, linearRel: Double,
                            angularDeg: Double, deadlineMs: Int, memoryMB: Int)
@@ -75,7 +90,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             .appendingPathComponent("stepv-\(UUID().uuidString).msh").path
         defer { unlink(meshPath) }
         let argv = [kernel, "/dev/fd/3", "--format", format, "--stream", "--mesh", meshPath,
-                    "--linear-rel", "\(linearRel)", "--angular-deg", "\(angularDeg)"]
+                    "--linear-rel", "\(linearRel)", "--angular-deg", "\(angularDeg)", "--lifeline", "4"]
         // The file's descriptor, moved clear of 0-3: XPC hands it over as
         // the lowest free number, often 3 itself, and dup2(3, 3) is no
         // file action, so under POSIX_SPAWN_CLOEXEC_DEFAULT it would close.
@@ -84,6 +99,17 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         defer { close(input) }
         var out: [Int32] = [0, 0]
         guard pipe(&out) == 0 else { return (.refused, "\(tag): pipe: \(String(cString: strerror(errno)))", nil, nil) }
+        // The kernel's lifeline (--lifeline 4): it exits when this write end
+        // closes, so a service that dies, even by SIGKILL, takes its kernel
+        // with it. The write end is this service's alone (close-on-exec,
+        // and POSIX_SPAWN_CLOEXEC_DEFAULT keeps it from other kernels).
+        var life: [Int32] = [0, 0]
+        guard pipe(&life) == 0 else {
+            close(out[0]); close(out[1])
+            return (.refused, "\(tag): pipe: \(String(cString: strerror(errno)))", nil, nil)
+        }
+        _ = fcntl(life[1], F_SETFD, FD_CLOEXEC)
+        defer { close(life[1]) }
         var fa: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&fa)
         posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0)
@@ -91,6 +117,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         // OCCT's chatter: the kernel's stdout carries the frames alone.
         posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0)
         posix_spawn_file_actions_adddup2(&fa, input, 3)
+        posix_spawn_file_actions_adddup2(&fa, life[0], 4)
         // Nothing else of this service reaches the kernel.
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
@@ -108,6 +135,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         posix_spawn_file_actions_destroy(&fa)
         posix_spawnattr_destroy(&attr)
         close(out[1])
+        close(life[0])
         guard rc == 0 else {
             close(out[0])
             log.error("\(tag, privacy: .public): spawn failed: \(String(cString: strerror(rc)), privacy: .public)")
@@ -116,19 +144,22 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         log.notice("\(tag, privacy: .public): kernel pid \(pid) spawned in \(elapsedMs(since: t0), format: .fixed(precision: 1)) ms")
 
         // Read the frames until the stream ends, the deadline passes or the
-        // resident size does the cap; the kernel is reaped on every way out.
+        // resident size passes the cap; the kernel is reaped on every way
+        // out. Its exit does not end the reading: what it wrote before it
+        // exited is drained to the end, and only a stream that ends with
+        // DONE is a finished run.
         var reader = StepvFrameReader()
         var summary: Data?
         var streamError: StepvStreamError?
         var killedFor: StepvRunOutcome?
-        let deadline = deadlineMs > 0 ? t0 + UInt64(deadlineMs) * 1_000_000 : UInt64.max
-        let cap = memoryMB > 0 ? UInt64(memoryMB) << 20 : UInt64.max
+        let deadline = t0 + UInt64(deadlineMs) * 1_000_000  // validated: no overflow
+        let cap = UInt64(memoryMB) << 20
         var lastProbe: UInt64 = 0
         var chunk = [UInt8](repeating: 0, count: 64 << 10)
         var eof = false
         var status: Int32 = 0
         var reaped = false
-        while !reaped {
+        while !(reaped && eof) {
             if !eof {
                 var p = pollfd(fd: out[0], events: Int16(POLLIN), revents: 0)
                 if poll(&p, 1, 5) > 0 {
@@ -145,7 +176,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
                             if let failed = reader.failed { throw failed }
                         } catch {
                             streamError = error as? StepvStreamError
-                            kill(pid, SIGKILL)
+                            if !reaped { kill(pid, SIGKILL) }
                             eof = true
                         }
                     } else if k == 0 || errno != EINTR {
@@ -158,6 +189,13 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             } else {
                 usleep(2000)
             }
+            let now = DispatchTime.now().uptimeNanoseconds
+            if reaped {
+                // Draining: an exited kernel's pipe ends at once, unless a
+                // process it left behind holds it; the deadline bounds that.
+                if now >= deadline && !eof { streamError = .truncated; eof = true }
+                continue
+            }
             // Exited? Seen without reaping it: the pid is no longer ours to
             // kill once it is reaped, so cancel() must stop aiming at it first.
             var info = siginfo_t()
@@ -165,24 +203,23 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
                 lock.lock(); child = 0; lock.unlock()
                 waitpid(pid, &status, 0)
                 reaped = true
-                break
+                continue
             }
-            let now = DispatchTime.now().uptimeNanoseconds
             if streamError != nil {
                 continue  // killed already: wait for the reap
             } else if now >= deadline {
                 killedFor = .deadline
-            } else if cap != .max && now - lastProbe >= 5_000_000 {
+            } else if now - lastProbe >= 5_000_000 {
                 lastProbe = now
                 if residentSize(pid).map({ $0 > cap }) == true { killedFor = .memory }
             }
-            if killedFor != nil {
+            if let killedFor {
                 let k0 = DispatchTime.now().uptimeNanoseconds
                 lock.lock(); kill(pid, SIGKILL); child = 0; lock.unlock()
                 waitpid(pid, &status, 0)
                 reaped = true
-                let gone = kill(pid, 0) == -1 && errno == ESRCH
-                log.notice("\(tag, privacy: .public): kernel pid \(pid) killed (\(killedFor == .deadline ? "deadline" : "memory", privacy: .public)) at \(elapsedMs(since: t0), format: .fixed(precision: 0)) ms, reaped in \(elapsedMs(since: k0), format: .fixed(precision: 1)) ms, gone=\(gone)")
+                eof = true  // a killed kernel's stream is not waited for
+                log.notice("\(tag, privacy: .public): kernel pid \(pid) killed (\(killedFor == .deadline ? "deadline" : "memory", privacy: .public)) at \(elapsedMs(since: t0), format: .fixed(precision: 0)) ms, reaped in \(elapsedMs(since: k0), format: .fixed(precision: 1)) ms")
             }
         }
         close(out[0])
@@ -221,6 +258,14 @@ final class Delegate: NSObject, NSXPCListenerDelegate {
         c.interruptionHandler = { s.cancel() }
         c.resume()
         return true
+    }
+}
+
+// Meshes a run left behind: a service that died mid-run never unlinked its
+// kernel's. None is in use yet: this service's runs start after this.
+if let tmp = try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()) {
+    for f in tmp where f.hasPrefix("stepv-") && f.hasSuffix(".msh") {
+        unlink(NSTemporaryDirectory() + "/" + f)
     }
 }
 

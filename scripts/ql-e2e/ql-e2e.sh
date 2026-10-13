@@ -31,7 +31,14 @@ case $kind in
     [ $rc -eq 124 ] && pkill -f "$bin/ql-preview-host.app/Contents/MacOS/ql-preview-host" ;;
   *) echo "kind: thumb|preview" >&2; exit 2 ;;
 esac
-sleep 1  # the log catches up
-timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
-  --predicate 'subsystem == "ch.exoma.stepv"' 2>/dev/null \
-  | python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy"
+# The log lags: poll until the extension's line for this file is in it, at
+# most 30 s, then judge everything logged for the file.
+end=$((SECONDS + 30))
+while :; do
+  timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
+    --predicate 'subsystem == "ch.exoma.stepv"' >"$work/log.ndjson" 2>/dev/null
+  python3 "$root/scripts/ql-e2e/verdict.py" --logged "$kind" "$copy" <"$work/log.ndjson" && break
+  [ $SECONDS -lt $end ] || break
+  sleep 0.5
+done
+python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" <"$work/log.ndjson"

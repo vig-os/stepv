@@ -19,7 +19,9 @@ done
 # own stat and date: the nix shell puts GNU coreutils first.
 installed=$(/usr/bin/stat -f %m "$app/Contents/PlugIns/StepvThumbnail.appex/Contents/MacOS/StepvThumbnail")
 for p in $(pgrep -f "$app/Contents/PlugIns/" || true); do
-  since=$(LC_ALL=C /bin/date -j -f '%a %b %d %T %Y' "$(LC_ALL=C ps -o lstart= -p "$p")" +%s 2>/dev/null) || continue
+  started=$(LC_ALL=C ps -o lstart= -p "$p") || continue  # exited meanwhile
+  since=$(LC_ALL=C /bin/date -j -f '%a %b %d %T %Y' "$started" +%s 2>/dev/null) \
+    || { echo "ql-e2e: cannot read when pid $p started ('$started'), so cannot tell its build" >&2; exit 2; }
   [ "$since" -ge "$installed" ] || {
     echo "ql-e2e: pid $p runs the build installed before this one: $(ps -o comm= -p "$p")" >&2
     echo "        quit it (just macos-install does), then rerun" >&2

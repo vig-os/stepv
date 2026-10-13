@@ -1583,14 +1583,41 @@ memory is freed at once. Two designs failed before this one:
 - **One run per connection; the connection is the cancel.** When the extension invalidates the
   connection, or the extension dies, the service SIGKILLs that run's kernel. Concurrent runs
   are concurrent connections, each with its own kernel.
+- **Every run is bounded, and well formed, or refused unrun:**
+  - a deadline (`deadlineMs`, 1 to 600 000 ms) and a memory cap (`memoryMB`, 1 MB to 1 TB)
+    are both required;
+  - `linearRel` must be in (0, 1] and `angularDeg` in (0, 180], with NaN and infinity refused;
+  - an earlier `Int.max` deadline overflowed and crashed the service after the spawn. A
+    deadline of 0 meant no deadline, so a kernel that closed stdout without exiting ran
+    forever.
 - **Bounds, in the service:**
-  - a deadline (`deadlineMs`), killed and reaped;
-  - a memory cap (`memoryMB`, the CLI's 4096 by default), polled every 5 ms.
+  - at the deadline, the kernel is killed and reaped;
+  - the memory cap is polled every 5 ms.
   - The cap counts **resident size**, not the footprint the CLI caps (`src/occt.rs`). The
     sandbox denies `proc_pid_rusage` even on the service's own child (EPERM) and allows
     `proc_pidinfo(PROC_PIDTASKINFO)`.
   - Resident size includes the shared dylibs and drops as the compressor takes pages, so under
     memory pressure this cap acts later than the CLI's.
+- **The kernel dies with its service: `stepv-occt --lifeline N`.**
+  - A service killed mid-run (`kill -9`, by jetsam or a crash) used to leave its kernel running
+    unsupervised: 45 s more in review, with no deadline or cap, and a 148 MB mesh left in the
+    container.
+  - Now each run gets a pipe. The kernel holds the read end as fd 4; the write end is the
+    service's alone (close-on-exec, and `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps it from other
+    kernels).
+  - A thread in the kernel blocks in `read(4)`. When the service dies, by any means, the
+    write end closes, the read returns, and the kernel `_exit`s.
+  - **Why a pipe and not kqueue `EVFILT_PROC NOTE_EXIT` on the parent pid:**
+    - it is the same on Linux;
+    - it needs no sandbox right to watch another process;
+    - it has no race: if the writer is already gone, the first read returns EOF;
+    - it costs one blocked thread and nothing per frame.
+  - **Meshes:** each service sweeps leftover `stepv-*.msh` files from its tmp at startup, so a
+    killed service's mesh goes on its next start. Every other way out unlinks the mesh.
+- **The read loop drains:** the kernel's exit doesn't end the reading. What it wrote before
+  exiting is read to the end of the pipe, under the deadline, and only a stream that ends with
+  DONE is a finished run. Before this, frames still in the pipe at the exit could be dropped,
+  giving a `done` with no summary.
 - **The kernel's frames:** `macos/Shared/StepvFrames.swift` is the Swift twin of `read_events`,
   with the same framing bounds (`STEPV_OCCT_MAX_FRAME`, kinds 1 to 3, nothing after DONE). It
   decodes incrementally, as the pipe delivers. The payloads stay JSON bytes: the extension that
@@ -1602,8 +1629,9 @@ memory is freed at once. Two designs failed before this one:
   - The first build pointed the service's kernel at the app's shared `Contents/Frameworks`;
     dyld's open failed with "file system sandbox blocked open()". A service's sandbox reads its
     own bundle and nothing of the app around it.
-  - The app grows from 57 to 174 MB. Part 2 drops the extensions' in-process copy of
-    libstepvocct.
+  - The app grows from 57 to 174 MB: three copies of the closure, +117 MB. The options and
+    their evaluation are in [#101](https://github.com/vig-os/stepv/issues/101). Part 2 drops
+    the extensions' in-process copy of libstepvocct.
 - **Signing:** the kernel is signed `app-sandbox` + `inherit`, so it runs in the service's
   sandbox; without `inherit` a sandboxed child traps. The service is signed `app-sandbox` alone.
   - The CLI's `Contents/MacOS/stepv-occt` stays a separate copy without these entitlements: an
@@ -1620,18 +1648,35 @@ memory is freed at once. Two designs failed before this one:
 - **Known limits:**
   - **Multi-file assemblies:** their part files are unreachable from one descriptor
     ([#92](https://github.com/vig-os/stepv/issues/92)).
+  - **Size:** three copies of the OCCT closure, +117 MB
+    ([#101](https://github.com/vig-os/stepv/issues/101)).
+  - **Developer ID and the hardened runtime** ([#97](https://github.com/vig-os/stepv/issues/97)).
   - **Containment** is the service's sandbox. The kernel's own Seatbelt profile can't nest
     inside it, so the summary reports `macos-outer`.
 - **Tests:**
-  - `scripts/ql-e2e/supervisor.sh` (run by `scripts/test-macos.sh`, so in CI) puts a sandboxed
-    probe into a copy of the built preview extension. The probe reaches that extension's real
-    service, kernel and Frameworks through the extensions' own client code, and checks:
+  - `scripts/ql-e2e/supervisor.sh` (run by `scripts/test-macos.sh`) puts a sandboxed probe into
+    a copy of the built preview extension. The probe reaches that extension's real service,
+    kernel and Frameworks through the extensions' own client code, and checks:
+    - the service killed with `kill -9` under a running kernel: the kernel is gone within 1 s
+      (16 ms on sage);
     - STEP (TREE first, PROGRESS, both before the reply, `macos-outer`), IGES and BREP;
     - a deadline kill at 1.5 s with a second run finishing beside it (about 65 ms);
     - the next run right after the kill (about 65 ms, so no throttle);
-    - the memory cap, cancel, and a refused format;
-    - and, from the service's log, the kills and that each of the 8 kernels it spawned is
-      gone.
+    - the memory cap at 1 MB, and at 256 MB on a run that peaks near 500 MB;
+    - cancel (signal 9);
+    - 11 malformed or unbounded requests, all refused;
+    - from the service's log, the kills, and that each of the 9 kernels it spawned is gone;
+    - no mesh left in the service's container.
+  - A second copy puts `macos/Tests/KernelStandIn` in place of the kernel, to hold the service
+    to streams the real kernel doesn't write on cue:
+    - frames then an immediate exit;
+    - an exit before its frames arrive. This one is deterministic: a grandchild writes them
+      200 ms later. A service that decides on the exit fails it, with a `done` that has no
+      summary;
+    - no output, and half a frame, both crashes;
+    - stdout closed with no exit, ended by the deadline.
+  - `tests/fd.rs`: the kernel exits within 1 s of its lifeline closing (the control, without
+    a lifeline, lives its 5 s).
   - `macos/Tests/FramesTests`: a real kernel stream decodes the same in 1-, 7-, 9- and
     4096-byte chunks, and each broken stream fails as `read_events` fails it. Dropping the
     MAX_FRAME guard or the trailing-bytes check fails it.
@@ -1644,8 +1689,11 @@ memory is freed at once. Two designs failed before this one:
     `/Applications/stepv.app`, not from a process left running from an older install, which
     Quick Look keeps using until it exits.
   - `qlmanage` is never used: it hangs when a script drives it.
+  - It fails if any of the extension's lines for a file fails. It polls the log for that line
+    under a timeout, rather than sleeping. It refuses to run when it can't tell which build a
+    running extension process is.
   - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
-    26.4). CI's macOS job runs it.
+    26.4). Whether CI's macOS runner can run it is not shown yet.
 - **Part 2:** both extensions switch to the service, with `handler(nil)` once the tree is shown
   (or on the first mesh, or on failure, when there is no tree), and their own deadlines. The
   in-process kernel goes, and `ql-e2e` gains the deadline kill, the next request and concurrent
