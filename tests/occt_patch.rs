@@ -53,15 +53,29 @@ fn fix_self_intersect_wire_is_quadratic() {
 
 /// 200 generated self-intersecting wires, 91 of them through the big-segment
 /// branch where the patch re-fetches `edge1`: the patched OCCT must fix each
-/// exactly as the unpatched one did (`tests/occt-patch/wires.txt`, recorded
-/// with nixpkgs' unpatched OCCT 7.9.3). A hoist without the re-fetch differs
-/// on 39 of them.
+/// exactly as the unpatched one did on the same platform
+/// (`tests/occt-patch/wires-<system>.txt`, each recorded with nixpkgs'
+/// unpatched OCCT 7.9.3 there). A hoist without the re-fetch differs on 39 of
+/// them. One reference per platform, because OCCT itself does not fix every
+/// wire alike everywhere: unpatched, x86_64-linux (gcc) splits seed 194 once
+/// more than aarch64-darwin (clang).
 #[test]
 fn fix_self_intersect_wire_matches_unpatched_occt() {
-    let reference = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/occt-patch/wires.txt"),
-    )
-    .expect("tests/occt-patch/wires.txt");
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        os => os,
+    };
+    let name = format!("wires-{}-{os}.txt", std::env::consts::ARCH);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/occt-patch")
+        .join(&name);
+    let reference = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e}. No reference for this platform: record one with an UNPATCHED \
+             OCCT 7.9.3 build of kernel/occt-patch-check (`occt-patch-check wires > {name}`)",
+            path.display()
+        )
+    });
     let got = run(&["wires"]);
     let pairs: Vec<(&str, &str)> = reference
         .lines()

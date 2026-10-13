@@ -21,8 +21,9 @@
 // builds the same wires. Its seeds include wires that reach the big-segment
 // branch (NbRemoved > 0), the one place the patch re-fetches edge1, and that a
 // hoist without the re-fetch gets wrong. The test compares the output with
-// tests/occt-patch/wires.txt, recorded with the UNPATCHED OCCT 7.9.3: the
-// patch must change nothing but the time.
+// tests/occt-patch/wires-<system>.txt, recorded on that platform with the
+// UNPATCHED OCCT 7.9.3 (OCCT's own results differ slightly between
+// platforms): the patch must change nothing but the time.
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepLib.hxx>
