@@ -74,9 +74,10 @@ final class Admission {
               let text = try? String(contentsOf: url) else { return nil }
         return Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
-    /// Test builds only: how long a queued run's start is held after its
-    /// slot is handed over, so a deadline can pass in that gap on cue.
-    static let handoverDelayMs = testResource("admission-handover-delay-ms") ?? 0
+    /// Test builds only (Contents/Resources/admission-hold present): each
+    /// admitted run is held before it starts until the test releases it,
+    /// so its deadline can pass between admission and start on cue.
+    static let holdsAdmitted = Bundle.main.url(forResource: "admission-hold", withExtension: nil) != nil
     #endif
 
     /// Starts `start` now if a slot is free and none waits, else queues it.
@@ -113,13 +114,6 @@ final class Admission {
         }
         let next = waiting.removeFirst()
         lock.unlock()
-        #if STEPV_TEST_HOOKS
-        if Admission.handoverDelayMs > 0 {
-            return DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(Admission.handoverDelayMs)) {
-                next.start()
-            }
-        }
-        #endif
         next.start()
     }
 }
@@ -161,6 +155,8 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             return reply(.refused, why, nil, nil, 0)
         }
         servedLock.lock(); served += 1; let n = served; servedLock.unlock()
+        // Who the run is in this log, for its client (StepvRunObserver).
+        (connection?.remoteObjectProxy as? StepvRunObserver)?.accepted(n)
         let submitted = DispatchTime.now().uptimeNanoseconds
         // A queued run leaves the queue at its deadline or on a cancel, never
         // spawned, with one reply: whichever takes it out (Admission's lock).
@@ -219,6 +215,37 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         let tag = "run #\(n) (service pid \(getpid()), up \(Int(elapsedMs(since: started))) ms)"
         // The deadline counts from submission: time in the queue is spent.
         let deadline = submitted + UInt64(deadlineMs) * 1_000_000  // validated: no overflow
+        #if STEPV_TEST_HOOKS
+        if Admission.holdsAdmitted {
+            // Held until the test creates release-<n> in this service's tmp;
+            // the deadline passing meanwhile is logged, for the test to see
+            // before it releases (scripts/ql-e2e/supervisor.sh). Never
+            // forever: a cancel ends the hold, and so does the deadline plus
+            // 10 s with no release, loudly (a test that lost its way).
+            log.notice("\(tag, privacy: .public): held for release")
+            let release = NSTemporaryDirectory() + "/release-\(n)"
+            let bound = deadline + 10_000_000_000
+            var told = false
+            while !FileManager.default.fileExists(atPath: release) {
+                lock.lock(); let gone = cancelled != nil; lock.unlock()
+                if gone {
+                    log.notice("\(tag, privacy: .public): cancelled while held, never spawned")
+                    return (.crashed, "\(tag): cancelled while held, never spawned", nil, nil)
+                }
+                let now = DispatchTime.now().uptimeNanoseconds
+                if !told && now >= deadline {
+                    log.notice("\(tag, privacy: .public): deadline passed while held")
+                    told = true
+                }
+                if now >= bound {
+                    log.fault("\(tag, privacy: .public): held 10 s past its deadline with no release: let go")
+                    break
+                }
+                usleep(10_000)
+            }
+            unlink(release)
+        }
+        #endif
         guard DispatchTime.now().uptimeNanoseconds < deadline else {
             log.notice("\(tag, privacy: .public): past its deadline before admission, never spawned")
             return (.deadline, "\(tag): past its deadline before admission, never spawned", nil, nil)
