@@ -68,14 +68,23 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -s
 codesign --force --sign - --entitlements "$tmp/probe.entitlements" "$probe" 2>/dev/null || fail "signing the probe"
 
 # The service's log since $start, one message per line.
+# Opens a log window at this instant, to the microsecond: $start (whole
+# seconds, for log show) and $start_iso (for e2elog.py). A window opened by
+# the second alone holds the lines of a step just before it (#111: the
+# previous service's start line, taken for this one's).
+set_start() {
+  start=$(date '+%Y-%m-%d %H:%M:%S')
+  start_iso=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$root/scripts/ql-e2e")
+}
 log_since() {
   timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
     --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' 2>/dev/null \
     | python3 -c '
-import json, sys
-for line in sys.stdin:
-    try: print(json.loads(line).get("eventMessage", ""))
-    except ValueError: pass'
+import sys
+sys.path.insert(0, sys.argv[1])
+import e2elog
+for e in e2elog.events(sys.stdin, sys.argv[2]):
+    print(e["message"])' "$root/scripts/ql-e2e" "$start_iso"
 }
 # Polls the log until it holds a line matching $1 (ERE), at most $2 s.
 await_log() {
@@ -122,7 +131,7 @@ run_start=$(date '+%Y-%m-%d %H:%M:%S')
 # 1. The service dies under a running kernel (SIGKILL: no cleanup of its
 #    own runs): the kernel's lifeline closes and it exits within 1 s. Its
 #    mesh stays behind until the next service sweeps it (step 2).
-start=$(date '+%Y-%m-%d %H:%M:%S')
+set_start
 echo "== supervisor probe: $service"
 "$probe" "$service" hold "$tmp/files/huge.step" >"$tmp/hold.txt" 2>&1 &
 holder=$!
@@ -161,7 +170,7 @@ mkdir -p "$container_tmp/stepv-run-planted"
 : >"$container_tmp/stepv-run-planted/lock"
 : >"$container_tmp/stepv-run-planted/mesh.msh"
 : >"$container_tmp/stepv-run-planted/stepv-input-planted.igs"
-start=$(date '+%Y-%m-%d %H:%M:%S')
+set_start
 # The admission limit this machine gives the service (Admission), from the
 # held run's service: the concurrency check depends on it.
 limit=$(grep -oE -m1 'admission limit [0-9]+' "$tmp/log.txt" | awk '{print $3}')
@@ -238,7 +247,7 @@ mkdir -p "$lxpc/Contents/Resources"
 echo 1 >"$lxpc/Contents/Resources/admission-limit"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$lxpc" 2>/dev/null \
   || fail "signing the test supervisor"
-start=$(date '+%Y-%m-%d %H:%M:%S')
+set_start
 drive timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" admission "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 log_since >"$tmp/log.txt"
@@ -280,22 +289,23 @@ else
   echo "FAIL: admission order: $order"; rc=1
 fi
 
-# The admission-time deadline check: a fourth copy, L = 1 and a 6 s hold on
-# each handover (STEPV_TEST_HOOKS), so a queued run's deadline (4 s) passes
-# after its slot is handed over and before it starts.
+# The admission-time deadline check: a fourth copy, L = 1 and a 30 s hold on
+# each handover (STEPV_TEST_HOOKS), so a queued run's deadline (20 s) passes
+# after its slot is handed over and before it starts, whatever the log's
+# latency.
 ditto "$tmp/limit1.app" "$tmp/handover.app"
 hxpc="$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/XPCServices/StepvSupervisor.xpc"
-echo 6000 >"$hxpc/Contents/Resources/admission-handover-delay-ms"
+echo 30000 >"$hxpc/Contents/Resources/admission-handover-delay-ms"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$hxpc" 2>/dev/null \
   || fail "signing the handover test supervisor"
-start=$(date '+%Y-%m-%d %H:%M:%S')
-drive timeout 60 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+set_start
+drive timeout 120 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" handover "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 
 # 4b. A live run survives another instance's sweep. Two client processes
 #     each start their own instance of the service, in one container: B's
 #     start-up sweep must keep A's running run, whose mesh then arrives.
-start=$(date '+%Y-%m-%d %H:%M:%S')
+set_start
 "$probe" "$service" live "$tmp/files/slow.step" >"$tmp/live.txt" 2>&1 &
 live=$!
 if await_log 'kernel pid [0-9]+ spawned' 20; then

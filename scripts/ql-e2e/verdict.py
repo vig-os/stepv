@@ -1,36 +1,34 @@
 """ql-e2e's verdict (#64): the installed stepv extension's own log line for
-one run's file, from `log show --style ndjson` on stdin.
+one run's file, from `log show --style ndjson` on stdin, counting only the
+events from the request's own start (e2elog.py).
 
-  verdict.py <thumb|preview> <file>
+  verdict.py <thumb|preview> <file> <since>
 
 PASS needs at least one line, and every line for the file from the right
 extension, running out of /Applications/stepv.app, and saying it drew
 ("thumbnail <file>: drawn") or showed geometry ("preview <file>: shown"):
 one failing line fails the run, whatever else passed. Exit 0 on PASS.
 
-  verdict.py --logged <thumb|preview> <file>
+  verdict.py --logged <thumb|preview> <file> <since>
 
 Exit 0 if any line for the file is logged yet, silently: what ql-e2e.sh
 polls for before it judges."""
 
-import json
 import sys
 
+from e2elog import events
+
 polling = sys.argv[1] == "--logged"
-kind, path = sys.argv[1 + polling], sys.argv[2 + polling]
+kind, path, since = sys.argv[1 + polling], sys.argv[2 + polling], sys.argv[3 + polling]
 process = {"thumb": "StepvThumbnail", "preview": "StepvPreview"}[kind]
 prefix = {"thumb": "thumbnail", "preview": "preview"}[kind] + f" {path}: "
 lines = []
 requested = False  # the thumbnail extension's "thumbnail request: <file>"
-for raw in sys.stdin:
-    try:
-        e = json.loads(raw)
-    except ValueError:
-        continue
-    m = e.get("eventMessage", "")
+for e in events(sys.stdin, since):
+    m = e["message"]
     requested |= m == f"thumbnail request: {path}"
     if m.startswith(prefix):
-        lines.append((e.get("processImagePath", ""), m[len(prefix) :]))
+        lines.append((e["process"], m[len(prefix) :]))
 
 if polling:
     sys.exit(0 if lines else 1)

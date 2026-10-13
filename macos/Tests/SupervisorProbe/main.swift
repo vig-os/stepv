@@ -132,16 +132,18 @@ case ("admission", 5):
     check(b.wait(1) == nil, "admission: no completion for the cancelled run")
     exit(failed ? 1 : 0)
 case ("handover", 5):
-    // L = 1 and a 6 s hold on each handover (a test build). A holds the
-    // slot; once B is logged queued (deadline 4 s), A is cancelled: B is
-    // handed the slot, and its deadline passes during the hold: the
-    // admission-time check refuses it, never spawned.
-    let a1 = Probe(a[3], "step", deadlineMs: 30_000)
+    // L = 1 and a 30 s hold on each handover (a test build). A holds the
+    // slot; once B is logged queued (deadline 20 s), A is cancelled: B is
+    // handed the slot, and its deadline passes during the hold, which is
+    // 10 s longer than that deadline: so it does, however long the log
+    // took to show B queued (under 20 s), and the admission-time check
+    // refuses it, never spawned.
+    let a1 = Probe(a[3], "step", deadlineMs: 120_000)
     check(a1.awaitSpawned(), "handover: the first run's kernel spawned")
-    let b = Probe(a[4], "step", deadlineMs: 4000)
+    let b = Probe(a[4], "step", deadlineMs: 20_000)
     check(awaitLogged("queued \(b.ordinal)"), "handover: the second run is queued")
     a1.run.cancel()
-    let rb = b.wait(20)
+    let rb = b.wait(60)
     check(rb?.outcome == .deadline && rb?.detail.contains("past its deadline before admission, never spawned") == true,
           "handover: a deadline that passes as the slot is handed over: \(outcomeLine(rb))")
     exit(failed ? 1 : 0)
