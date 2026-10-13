@@ -1694,7 +1694,8 @@ memory is freed at once. Two designs failed before this one:
     under a timeout, rather than sleeping. It refuses to run when it can't tell which build a
     running extension process is.
   - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
-    26.4). Whether CI's macOS runner can run it is not shown yet.
+    26.4) and on CI's `macos-15-arm64` runner, whose window session runs Quick Look's
+    extensions: ALL PASS in the Kernel workflow's "Quick Look end to end" step (run 38353253049).
 - **Part 2:** both extensions switch to the service, with `handler(nil)` once the tree is shown
   (or on the first mesh, or on failure, when there is no tree), and their own deadlines. The
   in-process kernel goes, and `ql-e2e` gains the deadline kill, the next request and concurrent
