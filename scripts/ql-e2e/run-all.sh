@@ -31,6 +31,7 @@ done
 # Canonical (/private/var, not /var): the extensions log the real path.
 QL_E2E_DIR=$(cd -P "$(mktemp -d)" && pwd); export QL_E2E_DIR
 e2e_start=$(date '+%Y-%m-%d %H:%M:%S')
+e2e_start_iso=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$e2e")
 now() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$e2e"; }
 # The run's log from this request's start on (e2elog.py), one line per
 # event: time, the service that logged it (thumbnail|preview), the message.
@@ -68,10 +69,39 @@ done
 # request on.
 huge_pid=$(grep -E -m1 $'\tthumbnail\t.*kernel pid [0-9]+ spawned' "$QL_E2E_DIR/held.log" \
   | sed -E 's/.*kernel pid ([0-9]+) spawned.*/\1/')
-"$e2e/ql-e2e.sh" thumb "$root/tests/data/box.brep" || rc=1
-if kill -0 "$held" 2>/dev/null; then echo "ok: concurrent: box.brep drew while huge.step still ran"; else
-  echo "FAIL: concurrent: huge.step was done before box.brep was"; rc=1; fi
-wait "$held"
+# The thumbnail service's admission limit (#108), from its own start line.
+limit=$(log_from "$e2e_start_iso" | awk -F'\t' '$2 == "thumbnail" && /admission limit/' \
+  | grep -oE -m1 'admission limit [0-9]+' | awk '{print $3}')
+echo "  thumbnail service admission limit: ${limit:-?}"
+if [ "${limit:-0}" -ge 2 ]; then
+  "$e2e/ql-e2e.sh" thumb "$root/tests/data/box.brep" || rc=1
+  if kill -0 "$held" 2>/dev/null; then echo "ok: concurrent: box.brep drew while huge.step still ran"; else
+    echo "FAIL: concurrent: huge.step was done before box.brep was"; rc=1; fi
+  wait "$held"
+elif [ "${limit:-0}" = 1 ]; then
+  # One kernel at a time (CI's 7 GB runner): box.brep waits in the queue
+  # until huge.step is killed at its deadline, then runs, or expires there,
+  # never spawned. Either way no second kernel spawns before the kill.
+  beside="$QL_E2E_DIR/beside-box.brep"
+  cat "$root/tests/data/box.brep" >"$beside"
+  timeout 60 "$bin/ql-thumb" "$beside" 256 40 >/dev/null 2>&1
+  wait "$held"
+  logged x || true
+  if awk -F'\t' '$2 == "thumbnail"' "$QL_E2E_DIR/held.log" | python3 -c '
+import re, sys
+huge, queued, kill, spawns = sys.argv[1], False, None, []
+for i, line in enumerate(sys.stdin):
+    if re.search(r"queued, 1 kernel", line): queued = True
+    if f"kernel pid {huge} killed" in line: kill = i
+    if re.search(r"kernel pid \d+ spawned", line): spawns.append(i)
+sys.exit(0 if queued and kill is not None and spawns[:1] and spawns[0] < kill
+         and all(i > kill for i in spawns[1:]) else 1)' "${huge_pid:-none}"
+  then echo "ok: admission limit 1: box.brep queued behind huge.step, spawned only after its kill"
+  else echo "FAIL: admission limit 1: box.brep was not queued behind huge.step"; rc=1; fi
+else
+  echo "FAIL: the thumbnail service logged no admission limit"; rc=1
+  wait "$held"
+fi
 held_s=$((SECONDS - t0))
 sed 's/^/  /' "$QL_E2E_DIR/huge.txt"
 until logged "thumbnail $huge: none:" || [ $((SECONDS - t0)) -gt 90 ]; do sleep 0.5; done
