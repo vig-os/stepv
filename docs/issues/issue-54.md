@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-11T23:51:59Z
-updated: 2026-10-12T00:49:41Z
+updated: 2026-10-12T14:31:42Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/54
-comments: 2
+comments: 5
 labels: feature, priority:medium
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-12T08:55:38.238Z
+synced: 2026-10-13T09:11:42.491Z
 ---
 
 # [Issue 54]: [Spike: progressive loading — progress, cancel, tree and boxes first, per-front-end fallbacks](https://github.com/vig-os/stepv/issues/54)
@@ -147,4 +147,36 @@ The two reviewers disagreed. This settles it with measurements, on sage (OCCT 7.
 4. The thumbnail fallback PNG.
 5. `extensionContext.open` for "Open in stepv view".
 
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 12:28 PM_
+
+**Step 1 done: #58** (merged). `stepv-occt --outline`, `stepv_occt_outline` and `occt::outline` read the product tree and names with no shape transfer: Ultimaker 3 in 4.6 s against 98.6 s. The contract is `topology::products` of the full run's tree. It agrees on 388/390 local corpus files; the two others are multi-file assemblies, a documented gap. CI's `harness --strict --outline` now gates it (37/37 on the NIST corpus and `tests/data`). **Next:** the `SceneEvent` contract and progress.
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 01:09 PM_
+
+**Step 2 done: #59** (merged as `662d7fd`). `stepv-occt --stream` sends a run's events as frames: the outline, then progress (transfer and mesh), then the summary. Rust consumes it through `occt::run_streaming`, and in-process callers through the C callback `stepv_occt_run_stream`. The contract is in `kernel/stepv_occt.h`, and plan.md has a section "Events and progress (#54, step 2)".
+
+On Ultimaker 3 the tree arrives at 4.3 s of 101 s. Transfer progress then sits at 15.6% for 80 s: OCCT's indicator doesn't advance inside solid 221's p-curve projection. That's step 3, the per-face healing budget from #51.
+
+Gaps the review left open, to cover as consumers arrive:
+- no test calls the C callback directly; the Quick Look XPC step will;
+- no memory-cap kill mid-stream;
+- the mesh comparison against a plain run is counts only.
+
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 02:31 PM_
+
+Step 3 (per-face healing budget, #51) is merged as #60: Ultimaker 3 now takes 42 s instead of 101 s, with transfer progress no longer stuck at 15.6%. Details are on #51. Next is step 4: complete-only atomic caching, plus a header/tree/boxes cache artifact.
 

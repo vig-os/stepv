@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-11T14:41:43Z
-updated: 2026-10-12T00:28:52Z
+updated: 2026-10-12T16:23:49Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/51
-comments: 3
+comments: 5
 labels: none
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-12T08:55:38.845Z
+synced: 2026-10-13T09:11:43.040Z
 ---
 
 # [Issue 51]: [Real 143 MB assembly: STEP transfer takes 92 s (Ultimaker 3, SolidWorks)](https://github.com/vig-os/stepv/issues/51)
@@ -143,4 +143,48 @@ Per-solid timing of p-curve building, on one thread, after a healing-free transf
 
 The other 330 solids together take about 11.6 s on one thread, which is about 1 s on 16 cores if they scale.
 
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 02:31 PM_
+
+## Per-face healing budget merged (#60, 2026-10-12)
+
+stepv now registers its own `FixShape` ahead of OCCT's and fixes faces one at a time, each with a time budget (`STEPV_OCCT_FACE_BUDGET_MS`, default 2000).
+- **A face past its budget** is taken out before the shell and solid fixes, then put back as a loose face and drawn as its outline. The summary counts it in `faces_over_budget`.
+- **Boxes:** an unhealed face is bounded by its edges.
+- **Colours and names** are kept.
+- **Measurement:** the measure server replays the run's `unhealed_faces` list, so both processes number faces the same way.
+
+| Ultimaker 3 | before | after |
+| --- | ---: | ---: |
+| wall | 100.7 s | 42.3 s |
+| transfer | 92.2 s | 34.2 s |
+| faces over budget | — | 4 (the ribbon faces) |
+
+- 523/523 parts named and coloured, with 62,011 faces.
+- The 401-file corpus gives identical summaries to the previous kernel.
+
+**Still open here:** 42 s is over the CLI's 20 s. What remains in the transfer:
+- OCCT's wire self-intersection check, which walks a linked sequence by index (`NCollection_BaseSequence::Find` under `ShapeExtend_WireData::Edge`, quadratic). It is about 40% of the samples now.
+- Ordinary projection (`Extrema_GenExtPS::BuildGrid`).
+- About 49 s of system time in allocation.
+
+Next candidates: per-solid parallel healing with `MMGT_OPT=0`, and a look at the self-intersection fix on this file. Until then the front-ends show the outline and progress (#54). I'm leaving this issue open for those.
+
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on October 12, 2026 at 04:23 PM_
+
+Spike #65 is done ([results](https://github.com/vig-os/stepv/issues/65#issuecomment-6128246433)). Ultimaker gets under 20 s with no loss of fidelity:
+- **#72:** parallel meshing, which takes mesh from 3.8 s to 1.2 s and sys time from 50 s to 2 s;
+- **#73:** healing per solid on 8 threads, which takes healing from 33.6 s to about 11 s;
+- **#74:** optionally, an OCCT patch for the cubic `FixSelfIntersectWire`, worth up to about 8 s.
+
+`MMGT_OPT` has no effect: nixpkgs' OCCT uses the native allocator. A 500 ms budget would lose faces in 8 of 401 files, so the 2 s budget stays.
 
