@@ -292,6 +292,7 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,
         Outcome::MemoryCap => Verdict::MemoryCap,
+        Outcome::Cancelled => unreachable!("occt::run is never cancelled"),
         Outcome::Crashed { signal, code } => {
             note = Some(format!("signal {signal:?}, exit {code:?}"));
             Verdict::Crash

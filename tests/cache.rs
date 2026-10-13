@@ -644,17 +644,19 @@ impl Home {
     /// by killing stepv would run on uncapped. However the run ends, nothing
     /// of its group may outlive it.
     fn view(&self, input: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
-        self.view_within(input, args, env, VIEW_DEADLINE)
+        let (code, j, _) = self.view_within(input, args, env, VIEW_DEADLINE);
+        (code, j)
     }
 
-    /// [`Home::view`] with the watchdog's `deadline`.
+    /// [`Home::view`] with the watchdog's `deadline`, and stepv's stderr:
+    /// what the window reports (`STEPV_VIEW_SCREENSHOT`'s lines).
     fn view_within(
         &self,
         input: &Path,
         args: &[&str],
         env: &[(&str, &str)],
         deadline: Duration,
-    ) -> (i32, Value) {
+    ) -> (i32, Value, String) {
         let shot = self.0.join("shot.png");
         // A later `--timeout` in `args` wins.
         let all = [
@@ -667,10 +669,18 @@ impl Home {
         let mut child = self
             .command(&all, &env)
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             // Its own group, the kernel included: one kill takes them all.
             .process_group(0)
             .spawn()
             .expect("spawn stepv view");
+        // Read as it comes, so a chatty viewer never blocks on a full pipe.
+        let mut err = child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = std::io::Read::read_to_string(&mut err, &mut s);
+            s
+        });
         let group = child.id() as libc::pid_t;
         let start = Instant::now();
         let fired = loop {
@@ -708,10 +718,13 @@ impl Home {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        let stderr = stderr.join().unwrap();
+        eprint!("{stderr}");
         if let Some(why) = fired {
             panic!("stepv view and its group killed: {why}");
         }
-        result(&out)
+        let (code, j) = result(&out);
+        (code, j, stderr)
     }
 }
 
@@ -766,7 +779,9 @@ fn a_viewer_without_a_window_session_fails_before_the_kernel() {
 fn the_view_watchdog_kills_the_kernel_too() {
     let h = Home::new("viewdog");
     // A kernel that never finishes, and says who it is: stepv waits on it
-    // for its 30 s timeout, past the watchdog's 2 s.
+    // for its 30 s timeout, past the watchdog's 10 s. The deadline must leave
+    // room for start-up: macOS assesses a freshly written script on its first
+    // launch, measured at up to 1.5 s, and the window opens meanwhile (#85).
     let pidfile = h.0.join("kernel.pid");
     let hang = script(
         &h,
@@ -778,7 +793,7 @@ fn the_view_watchdog_kills_the_kernel_too() {
             &data("assembly.step"),
             &[],
             &[("STEPV_OCCT", hang.to_str().unwrap())],
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         )
     });
     let why = run.expect_err("the watchdog did not fire");
@@ -786,7 +801,7 @@ fn the_view_watchdog_kills_the_kernel_too() {
         .downcast_ref::<String>()
         .map_or("", String::as_str)
         .to_owned();
-    assert!(why.contains("past the deadline of 2 s"), "{why}");
+    assert!(why.contains("past the deadline of 10 s"), "{why}");
     let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
         .expect("the kernel never started")
         .trim()
@@ -866,4 +881,121 @@ fn a_complete_view_adds_the_box() {
     let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
         .expect("the viewer's run left no outline artifact");
     assert_eq!(a.bbox, Some(bbox));
+}
+
+/// How many rows the viewer's tree has for `nodes`: one per node.
+fn rows(nodes: &[stepv::topology::Node]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match n {
+            stepv::topology::Node::Part { .. } => 1,
+            stepv::topology::Node::Assembly { children, .. } => 1 + rows(children),
+        })
+        .sum()
+}
+
+/// Where in `err` the window reported its loading frame with `rows` rows
+/// and no geometry; `None` if it did not.
+fn loading_frame(err: &str, rows: usize) -> Option<usize> {
+    let head = format!("stepv: STEPV_VIEW_SCREENSHOT loading: tree {rows} rows, ");
+    let at = err.find(&head)?;
+    let line = err[at..].lines().next()?;
+    line.ends_with(", no geometry").then_some(at)
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn the_viewer_shows_the_tree_before_the_geometry() {
+    let k = kernel();
+    let h = Home::new("viewtreefirst");
+    let input = data("assembly.step");
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    // The kernel holds the run 8 s once the outline is out: the window is
+    // open on the tree meanwhile, with nothing to draw yet.
+    let (code, j, err) = h.view_within(
+        &input,
+        &[],
+        &[("STEPV_OCCT_TEST_STALL_MS", "8000")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (0, Some("ok")), "{j}");
+    let tree = loading_frame(&err, rows(&outline.tree)).expect("no loading frame with the tree");
+    // Then the scene, swapped in on Done.
+    let scene = err
+        .find(&format!(
+            "stepv: STEPV_VIEW_SCREENSHOT scene: {} parts",
+            j["kernel"]["parts"]
+        ))
+        .expect("no scene");
+    assert!(tree < scene, "{err}");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_cached_outline_shows_the_tree_before_any_kernel_event() {
+    let k = kernel();
+    let h = Home::new("viewcached");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    let n = rows(&outline.tree);
+    let a = cache::OutlineArtifact::new(stepv::header::read(&input), outline);
+    let file = cache::FileId::of(&input).unwrap();
+    cache::store_outline(&cache::outline_path(&h.cache_dir(), &file), &a).unwrap();
+    // A kernel that never says a word: any tree came from the cache.
+    let mute = script(&h, "mute-kernel", "exec sleep 60");
+    let (code, j, err) = h.view_within(
+        &input,
+        &["--timeout", "5"],
+        &[("STEPV_OCCT", mute.to_str().unwrap())],
+        VIEW_DEADLINE,
+    );
+    assert!(loading_frame(&err, n).is_some(), "{err}");
+    assert!(!err.contains("STEPV_VIEW_SCREENSHOT scene:"), "{err}");
+    // The run timed out: reported as before (#89 keeps the window open).
+    assert_eq!((code, j["status"].as_str()), (4, Some("timeout")), "{j}");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn closing_the_viewer_mid_load_cancels_the_kernel() {
+    let k = kernel();
+    let h = Home::new("viewcancel");
+    // The real kernel, saying who it is, and stalled 30 s after the outline.
+    let pidfile = h.0.join("kernel.pid");
+    let stalled = script(
+        &h,
+        "stalled-kernel",
+        &format!(
+            "echo $$ > '{}'\nSTEPV_OCCT_TEST_STALL_MS=30000 exec '{}' \"$@\"",
+            pidfile.display(),
+            k.display()
+        ),
+    );
+    let start = Instant::now();
+    // The window closes itself once it has drawn the tree.
+    let (code, j, _) = h.view_within(
+        &data("assembly.step"),
+        &[],
+        &[
+            ("STEPV_OCCT", stalled.to_str().unwrap()),
+            ("STEPV_VIEW_CLOSE_LOADING", "1"),
+        ],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (0, Some("cancelled")), "{j}");
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "the stall was waited out"
+    );
+    let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only asks whether the process exists.
+    assert!(
+        unsafe { libc::kill(pid, 0) } != 0,
+        "the kernel {pid} outlived the viewer"
+    );
 }

@@ -119,6 +119,9 @@ pub struct Options {
     /// open with the model cut there and capped (#34's screenshots and
     /// window test).
     pub section: Option<(usize, f32, bool)>,
+    /// `STEPV_VIEW_CLOSE_LOADING=1`: close the window once it has drawn the
+    /// tree, before the scene arrives (#85's test of closing mid-load).
+    pub close_loading: bool,
     /// The file and the limits a measurement server (#33) reads it with.
     pub input: Option<PathBuf>,
     pub limits: Option<crate::occt::Limits>,
@@ -284,15 +287,66 @@ fn has_session() -> bool {
     true
 }
 
-/// Opens the viewer on `scene` and runs until the user closes it; returns the
-/// backend that drew it.
+/// What the loader (`stepv view`'s kernel run, on its own thread) tells the
+/// window as the run goes (#85).
+#[derive(Debug)]
+pub enum Load {
+    /// The assembly tree and its leaf count: a cached outline artifact's
+    /// before the kernel starts, then the run's `Event::Tree`.
+    Tree(Vec<crate::topology::Node>, usize),
+    Progress(crate::occt::Progress),
+    Done(Box<Loaded>),
+    /// The run did not produce a scene; the report says why. The window
+    /// closes.
+    Failed,
+}
+
+/// A finished load: the scene and what came with it.
+#[derive(Debug)]
+pub struct Loaded {
+    pub scene: crate::Scene,
+    pub topology: Option<crate::topology::Topology>,
+    /// The window's title once the parts are known.
+    pub title: String,
+    /// The kernel's `"sandbox"`, and the faces it left unhealed (#51).
+    pub sandbox: Option<String>,
+    pub unhealed: Option<Vec<u64>>,
+}
+
+impl Options {
+    /// These options with what the finished load says about its kernel.
+    #[must_use]
+    pub fn loaded(&self, l: &Loaded) -> Self {
+        Self {
+            sandboxed: l.sandbox.as_deref().is_some_and(crate::occt::full_sandbox),
+            sandbox: l.sandbox.clone(),
+            unhealed: l.unhealed.clone(),
+            ..self.clone()
+        }
+    }
+}
+
+/// The finished load from `load`, skipping the outline and progress; `None`
+/// when it failed.
+#[cfg(feature = "viewer")]
+fn wait(load: &std::sync::mpsc::Receiver<Load>) -> Option<Box<Loaded>> {
+    load.iter().find_map(|l| match l {
+        Load::Done(l) => Some(Some(l)),
+        Load::Failed => Some(None),
+        _ => None,
+    })?
+}
+
+/// Opens the viewer at once and runs until the user closes it; returns the
+/// backend that drew it. The GPU viewer shows the tree and the progress
+/// from `load` until the scene arrives, then the scene (#85). The software
+/// viewer has no tree: it waits for the scene before it opens (#90).
 ///
 /// # Errors
 /// When no window can be opened at all, or the scene is empty.
 #[cfg(feature = "viewer")]
 pub fn run(
-    scene: crate::Scene,
-    topology: Option<crate::topology::Topology>,
+    load: std::sync::mpsc::Receiver<Load>,
     title: &str,
     opts: &Options,
 ) -> Result<Ran, String> {
@@ -301,22 +355,27 @@ pub fn run(
     if let Some(note) = note {
         eprintln!("stepv: {note}");
     }
-    let software = |scene: &crate::Scene| {
-        software::run(scene, title, opts.screenshot.as_deref(), opts.frames).map(|frames| Ran {
-            backend: Backend::Software,
-            frames,
+    let software = |load: std::sync::mpsc::Receiver<Load>| {
+        let Some(l) = wait(&load) else {
+            return Err("the run produced no scene".to_owned());
+        };
+        software::run(&l.scene, &l.title, opts.screenshot.as_deref(), opts.frames).map(|frames| {
+            Ran {
+                backend: Backend::Software,
+                frames,
+            }
         })
     };
     if backend == Backend::Software {
-        return software(&scene);
+        return software(load);
     }
-    match app::run(scene, topology, title, opts) {
+    match app::run(load, title, opts) {
         Ok(ran) => Ok(ran),
         // The window never opened: the probe found an adapter the window
         // could not use (a surface it cannot present to, a device it refused).
-        Err((e, Some(scene))) => {
+        Err((e, Some(load))) => {
             eprintln!("stepv: the GPU viewer could not start ({e}); using the software viewer");
-            software(&scene)
+            software(load)
         }
         Err((e, None)) => Err(e),
     }
@@ -328,8 +387,7 @@ pub fn run(
 /// Always.
 #[cfg(not(feature = "viewer"))]
 pub fn run(
-    _scene: crate::Scene,
-    _topology: Option<crate::topology::Topology>,
+    _load: std::sync::mpsc::Receiver<Load>,
     _title: &str,
     _opts: &Options,
 ) -> Result<Ran, String> {

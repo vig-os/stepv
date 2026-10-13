@@ -12,6 +12,7 @@
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -263,86 +264,7 @@ fn run(args: &Args) -> (u8, Value) {
         if let Err(e) = view::session() {
             return fail(report, EXIT_FAILED, "error", &e);
         }
-        // The exact B-rep for the inspector (#29) comes with the mesh.
-        let topo_tmp = temp_path("json");
-        let result = tessellate(args, &mut report, None, Some(&topo_tmp), outline);
-        let topo_bytes = topology_bytes(&report, &topo_tmp);
-        let scene = match result {
-            Ok((s, _)) => s,
-            Err(code) => return (code, report),
-        };
-        // Without it the viewer still opens: it only cannot name surfaces.
-        let topology = match topo_bytes
-            .map_err(|e| e.to_string())
-            .and_then(|b| Topology::parse(&b).map_err(|e| e.to_string()))
-            .and_then(|t| {
-                t.check_against(&scene)
-                    .map(|()| t)
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                eprintln!("stepv: no exact topology for the inspector: {e}");
-                None
-            }
-        };
-        let name = args
-            .input
-            .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        let warn = match scene.worst_face() {
-            Some(stepv::FaceStatus::Approx) => " — some faces approximated",
-            Some(stepv::FaceStatus::Missing) => " — some faces missing",
-            _ => "",
-        };
-        let title = format!("stepv — {name} ({} parts){warn}", scene.parts.len());
-        let sandbox = report["kernel"]["sandbox"].as_str().map(str::to_owned);
-        let opts = view::Options {
-            software: args.software,
-            theme: args.theme,
-            sandboxed: sandbox.as_deref().is_some_and(occt::full_sandbox),
-            sandbox,
-            file: name,
-            // --frames closes the window itself: with a screenshot too,
-            // whichever came first would win, and the other go missing.
-            screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT")
-                .filter(|_| {
-                    let keep = args.frames.is_none();
-                    if !keep {
-                        eprintln!("stepv: --frames ignores STEPV_VIEW_SCREENSHOT");
-                    }
-                    keep
-                })
-                .map(PathBuf::from),
-            frames: args.frames,
-            input: Some(args.input.clone()),
-            limits: Some(args.limits),
-            // Absent (an older kernel, or no summary): no replay.
-            unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone()).ok(),
-            pick_at: std::env::var("STEPV_VIEW_PICK")
-                .map(|s| view::parse_pick_at(&s))
-                .unwrap_or_default(),
-            measure: std::env::var_os("STEPV_VIEW_MEASURE").is_some_and(|v| v == "1"),
-            section: std::env::var("STEPV_VIEW_SECTION").ok().and_then(|s| {
-                let mut f = s.split(',').map(str::trim);
-                let (a, o): (usize, f32) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
-                let flip = f.next() == Some("flip");
-                (a < 3 && (0.0..=1.0).contains(&o)).then_some((a, o, flip))
-            }),
-        };
-        return match view::run(scene, topology, &title, &opts) {
-            Ok(ran) => {
-                report["status"] = json!("ok");
-                report["backend"] = json!(ran.backend.name());
-                if let Some(f) = ran.frames {
-                    report["frames"] = json!({
-                        "count": f.count, "p50_ms": f.p50_ms, "p95_ms": f.p95_ms,
-                    });
-                }
-                (EXIT_OK, report)
-            }
-            Err(e) => fail(report, EXIT_FAILED, "error", &e),
-        };
+        return run_view(args, report, outline);
     }
     // ── Cache ── for an output alone: a topology needs the kernel anyway.
     let cache_path = args
@@ -364,6 +286,7 @@ fn run(args: &Args) -> (u8, Value) {
         cache_path.as_deref(),
         topology_tmp.as_deref(),
         outline,
+        None,
     );
     let topology = topology_tmp.as_ref().map(|t| topology_bytes(&report, t));
     let (scene, raw) = match result {
@@ -467,6 +390,153 @@ fn run(args: &Args) -> (u8, Value) {
     (EXIT_OK, report)
 }
 
+/// `stepv view`: the window opens at once, on the tree and the run's
+/// progress, while the kernel runs on a thread of its own, and the scene
+/// follows (#85). Closing the window first cancels the run: status
+/// `cancelled`, exit 0.
+fn run_view(
+    args: &Args,
+    mut report: Value,
+    outline: Option<(PathBuf, header::Info)>,
+) -> (u8, Value) {
+    let name = args
+        .input
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let opts = view::Options {
+        software: args.software,
+        theme: args.theme,
+        file: name.clone(),
+        // --frames closes the window itself: with a screenshot too,
+        // whichever came first would win, and the other go missing.
+        screenshot: std::env::var_os("STEPV_VIEW_SCREENSHOT")
+            .filter(|_| {
+                let keep = args.frames.is_none();
+                if !keep {
+                    eprintln!("stepv: --frames ignores STEPV_VIEW_SCREENSHOT");
+                }
+                keep
+            })
+            .map(PathBuf::from),
+        frames: args.frames,
+        input: Some(args.input.clone()),
+        limits: Some(args.limits),
+        pick_at: std::env::var("STEPV_VIEW_PICK")
+            .map(|s| view::parse_pick_at(&s))
+            .unwrap_or_default(),
+        measure: std::env::var_os("STEPV_VIEW_MEASURE").is_some_and(|v| v == "1"),
+        section: std::env::var("STEPV_VIEW_SECTION").ok().and_then(|s| {
+            let mut f = s.split(',').map(str::trim);
+            let (a, o): (usize, f32) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+            let flip = f.next() == Some("flip");
+            (a < 3 && (0.0..=1.0).contains(&o)).then_some((a, o, flip))
+        }),
+        close_loading: std::env::var_os("STEPV_VIEW_CLOSE_LOADING").is_some_and(|v| v == "1"),
+        // The kernel's sandbox and unhealed faces come with the scene.
+        ..view::Options::default()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A cached outline shows the tree before the kernel even starts.
+    if let Some(a) = outline
+        .as_ref()
+        .and_then(|(p, _)| cache::load_outline_at(p))
+    {
+        let _ = tx.send(view::Load::Tree(a.tree, a.leaves));
+    }
+    let cancel = AtomicBool::new(false);
+    let (ran, loaded) = std::thread::scope(|s| {
+        let (report, cancel) = (&mut report, &cancel);
+        let loader = s.spawn(move || load_view(args, report, outline, &tx, cancel));
+        let ran = view::run(rx, &format!("stepv — {name}"), &opts);
+        // The window is closed: a run still going is for nobody.
+        cancel.store(true, Ordering::Relaxed);
+        (ran, loader.join())
+    });
+    let loaded = loaded.unwrap_or_else(|p| std::panic::resume_unwind(p));
+    if let Ok(ran) = &ran {
+        report["backend"] = json!(ran.backend.name());
+        if let Some(f) = ran.frames {
+            report["frames"] = json!({ "count": f.count, "p50_ms": f.p50_ms, "p95_ms": f.p95_ms });
+        }
+    }
+    match (loaded, ran) {
+        // The run's own failure is the report's, the window aside; a window
+        // that never opened cancelled the run, and is the error.
+        (Err(code), _) if report["status"] != "cancelled" => (code, report),
+        (_, Err(e)) => fail(report, EXIT_FAILED, "error", &e),
+        (Err(code), Ok(_)) => (code, report),
+        (Ok(()), Ok(_)) => {
+            report["status"] = json!("ok");
+            (EXIT_OK, report)
+        }
+    }
+}
+
+/// The viewer's load, on the loader thread: the kernel's run, streamed to
+/// the window through `tx` as [`view::Load`]s and stopped by `cancel`, then
+/// the scene and its exact topology. On failure, fills `report`, tells the
+/// window, and returns the exit code.
+fn load_view(
+    args: &Args,
+    report: &mut Value,
+    outline: Option<(PathBuf, header::Info)>,
+    tx: &std::sync::mpsc::Sender<view::Load>,
+    cancel: &AtomicBool,
+) -> Result<(), u8> {
+    // The exact B-rep for the inspector (#29) comes with the mesh.
+    let topo_tmp = temp_path("json");
+    let result = tessellate(
+        args,
+        report,
+        None,
+        Some(&topo_tmp),
+        outline,
+        Some((tx, cancel)),
+    );
+    let topo_bytes = topology_bytes(report, &topo_tmp);
+    let scene = match result {
+        Ok((s, _)) => s,
+        Err(code) => {
+            let _ = tx.send(view::Load::Failed);
+            return Err(code);
+        }
+    };
+    // Without it the viewer still opens: it only cannot name surfaces.
+    let topology = match topo_bytes
+        .map_err(|e| e.to_string())
+        .and_then(|b| Topology::parse(&b).map_err(|e| e.to_string()))
+        .and_then(|t| {
+            t.check_against(&scene)
+                .map(|()| t)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("stepv: no exact topology for the inspector: {e}");
+            None
+        }
+    };
+    let name = args
+        .input
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let warn = match scene.worst_face() {
+        Some(stepv::FaceStatus::Approx) => " — some faces approximated",
+        Some(stepv::FaceStatus::Missing) => " — some faces missing",
+        _ => "",
+    };
+    let title = format!("stepv — {name} ({} parts){warn}", scene.parts.len());
+    let _ = tx.send(view::Load::Done(Box::new(view::Loaded {
+        scene,
+        topology,
+        title,
+        sandbox: report["kernel"]["sandbox"].as_str().map(str::to_owned),
+        // Absent (an older kernel, or no summary): no replay.
+        unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone()).ok(),
+    })));
+    Ok(())
+}
+
 fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
     report["status"] = json!(status);
     report["error"] = json!(msg);
@@ -494,12 +564,15 @@ fn topology_bytes(report: &Value, tmp: &Path) -> std::io::Result<Vec<u8>> {
 /// whether or not it then completes; a complete run adds the model's box.
 /// With stderr a terminal, the run is streamed too, and its progress shown
 /// there ([`Progress`]).
+/// With `viewer` (#85), the run is streamed to the viewer's window too, and
+/// stopped when its flag is set.
 fn tessellate(
     args: &Args,
     report: &mut Value,
     cache_path: Option<&Path>,
     topology_out: Option<&Path>,
     outline: Option<(PathBuf, header::Info)>,
+    viewer: Option<(&std::sync::mpsc::Sender<view::Load>, &AtomicBool)>,
 ) -> Result<(Scene, Vec<u8>), u8> {
     // ── Kernel ──
     let kernel = occt::kernel_path();
@@ -525,7 +598,7 @@ fn tessellate(
             .and_then(|(path, _)| cache::load_outline_at(path));
         Progress::start(cached.map(|a| a.leaves))
     });
-    let result = match (&outline, progress.is_some()) {
+    let result = match (&outline, progress.is_some() || viewer.is_some()) {
         (None, false) => occt::run(
             &kernel,
             &args.input,
@@ -543,9 +616,16 @@ fn tessellate(
             Some(&mesh),
             topology_out,
             edges,
+            viewer.map(|(_, cancel)| cancel),
             &mut |e| {
                 if let Some(p) = progress.as_mut() {
                     p.event(&e);
+                }
+                if let Some((tx, _)) = viewer {
+                    let _ = tx.send(match &e {
+                        occt::Event::Tree(t) => view::Load::Tree(t.tree.clone(), t.leaves),
+                        occt::Event::Progress(p) => view::Load::Progress(*p),
+                    });
                 }
                 if let (occt::Event::Tree(tree), Some((path, info))) = (e, &outline) {
                     let a = cache::OutlineArtifact::new(info.clone(), tree);
@@ -610,6 +690,12 @@ fn tessellate(
             "wall-clock cap exceeded".to_owned(),
         )),
         Outcome::MemoryCap => Some((EXIT_FAILED, "memory-cap", "memory cap exceeded".to_owned())),
+        // Not a failure: the viewer's window closed first, and nobody waits.
+        Outcome::Cancelled => Some((
+            EXIT_OK,
+            "cancelled",
+            "the viewer was closed before the run finished".to_owned(),
+        )),
         Outcome::Failed => Some((
             EXIT_FAILED,
             "failed",

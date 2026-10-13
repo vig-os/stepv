@@ -22,7 +22,7 @@ use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Sectio
 use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
-use super::{Backend, FrameStats, Options, Ran, ThemePref, theme};
+use super::{Backend, FrameStats, Load, Options, Ran, ThemePref, theme};
 use crate::render::Camera;
 use crate::topology::Topology;
 use crate::{FaceStatus, Scene};
@@ -179,27 +179,16 @@ struct Viewer {
 }
 
 impl Viewer {
+    /// The viewer of `scene`, in the window whose device `rs` is: built when
+    /// the load is done, in a window already open (#85).
     fn new(
-        cc: &eframe::CreationContext<'_>,
+        rs: &egui_wgpu::RenderState,
         scene: &Scene,
         topology: Option<Topology>,
         opts: &Options,
         error: Arc<Mutex<Option<String>>>,
         measured: Arc<Mutex<Option<FrameStats>>>,
     ) -> Result<Self, String> {
-        let rs = cc
-            .wgpu_render_state
-            .as_ref()
-            .ok_or("eframe started without wgpu")?;
-        // eframe's adapter went through gpu::select already; this guards the
-        // contract if a future eframe ignores the selector.
-        if !super::gpu::usable(&rs.adapter) {
-            return Err(format!(
-                "adapter {} cannot run the viewer",
-                rs.adapter.get_info().name
-            ));
-        }
-        theme::install(&cc.egui_ctx, opts.theme);
         let tree = match &topology {
             Some(t) => Tree::from_topology(t, scene.parts.len()),
             None => Tree::flat(
@@ -1197,15 +1186,164 @@ impl eframe::App for Viewer {
     }
 }
 
-/// Runs the GPU viewer. On failure before the window opened, hands the scene
-/// back so the caller can fall back to the software viewer.
+/// Where the window is: waiting for the load, with the tree and progress
+/// it has so far, or showing the scene.
+enum Stage {
+    Loading {
+        tree: Option<Box<Tree>>,
+        progress: Option<crate::occt::Progress>,
+        /// The STEPV_VIEW_SCREENSHOT report of the loading frame is out.
+        reported: bool,
+    },
+    Ready(Box<Viewer>),
+}
+
+/// The window (#85): open before the run finishes, the loading stage, then
+/// the [`Viewer`] once the scene arrives.
+struct Window {
+    load: std::sync::mpsc::Receiver<Load>,
+    stage: Stage,
+    opts: Options,
+    error: Arc<Mutex<Option<String>>>,
+    measured: Arc<Mutex<Option<FrameStats>>>,
+}
+
+impl Window {
+    /// Takes what the loader sent since the last frame.
+    fn take(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
+        while let Ok(l) = self.load.try_recv() {
+            let Stage::Loading { tree, progress, .. } = &mut self.stage else {
+                return;
+            };
+            match l {
+                Load::Tree(nodes, leaves) => {
+                    *tree = Some(Box::new(Tree::from_nodes(&nodes, leaves)));
+                }
+                Load::Progress(p) => *progress = Some(p),
+                Load::Failed => ctx.send_viewport_cmd(ViewportCommand::Close),
+                Load::Done(l) => {
+                    let opts = self.opts.loaded(&l);
+                    let (e, m) = (self.error.clone(), self.measured.clone());
+                    match Viewer::new(rs, &l.scene, l.topology, &opts, e, m) {
+                        Ok(v) => {
+                            ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
+                            if self.opts.screenshot.is_some() {
+                                let n = l.scene.parts.len();
+                                eprintln!("stepv: STEPV_VIEW_SCREENSHOT scene: {n} parts");
+                            }
+                            // The scene is on the GPU; its CPU copy goes (#28).
+                            self.stage = Stage::Ready(Box::new(v));
+                        }
+                        Err(e) => {
+                            *self.error.lock().unwrap() = Some(e);
+                            ctx.send_viewport_cmd(ViewportCommand::Close);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The loading stage: the tree, and the run's progress.
+    fn loading(&mut self, root: &mut egui::Ui) {
+        let Stage::Loading {
+            tree,
+            progress,
+            reported,
+        } = &mut self.stage
+        else {
+            return;
+        };
+        let t = theme::tokens(root.visuals().dark_mode);
+        let panel = egui::Frame::NONE
+            .fill(t.panel)
+            .inner_margin(egui::Margin::same(theme::space(3) as i8))
+            .stroke(egui::Stroke::new(1.0, t.border));
+        egui::Panel::left("tree")
+            .frame(panel)
+            .default_size(260.0)
+            .min_size(180.0)
+            .show(root, |ui| {
+                widgets::section_header(ui, "Model");
+                match tree.as_mut() {
+                    Some(tree) => {
+                        tree.panel(ui, None, false);
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("Reading the file…").color(t.muted_foreground),
+                        );
+                    }
+                }
+            });
+        let (what, fraction) = match progress {
+            Some(p) => {
+                let stage = match p.stage {
+                    crate::occt::Stage::Transfer => "Transferring the shapes",
+                    crate::occt::Stage::Mesh => "Meshing",
+                };
+                (
+                    format!("{stage}: {:.0}%", p.fraction() * 100.0),
+                    p.fraction() as f32,
+                )
+            }
+            None => ("Reading the file…".to_owned(), 0.0),
+        };
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(t.viewport))
+            .show(root, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() / 2.0 - theme::space(6));
+                    ui.label(egui::RichText::new(&self.opts.file).strong());
+                    ui.label(&what);
+                    ui.add(egui::ProgressBar::new(fraction).desired_width(320.0));
+                });
+            });
+        // The loader's messages arrive without input: look for them.
+        root.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(50));
+        if let Some(tree) = tree.as_ref().filter(|_| !*reported) {
+            if self.opts.screenshot.is_some() {
+                eprintln!(
+                    "stepv: STEPV_VIEW_SCREENSHOT loading: tree {} rows, {what}, no geometry",
+                    tree.rows().len()
+                );
+            }
+            *reported = true;
+            if self.opts.close_loading {
+                root.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
+    }
+}
+
+impl eframe::App for Window {
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if let Some(rs) = frame.wgpu_render_state().cloned() {
+            self.take(&root.ctx().clone(), &rs);
+        }
+        match &mut self.stage {
+            Stage::Ready(v) => eframe::App::ui(v.as_mut(), root, frame),
+            Stage::Loading { .. } => self.loading(root),
+        }
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        theme::tokens(visuals.dark_mode)
+            .panel
+            .to_normalized_gamma_f32()
+    }
+}
+
+/// Runs the GPU viewer, open at once on `load`. On failure before the window
+/// opened, hands `load` back so the caller can fall back to the software
+/// viewer.
 pub(super) fn run(
-    scene: Scene,
-    topology: Option<Topology>,
+    load: std::sync::mpsc::Receiver<Load>,
     title: &str,
     opts: &Options,
-) -> Result<Ran, (String, Option<Scene>)> {
-    let slot = Arc::new(Mutex::new(Some(scene)));
+) -> Result<Ran, (String, Option<std::sync::mpsc::Receiver<Load>>)> {
+    let slot = Arc::new(Mutex::new(Some(load)));
     let used = Arc::new(Mutex::new(None::<Backend>));
     let error = Arc::new(Mutex::new(None::<String>));
     let measured = Arc::new(Mutex::new(None::<FrameStats>));
@@ -1246,20 +1384,33 @@ pub(super) fn run(
         "stepv",
         native,
         Box::new(move |cc| {
-            let scene = slot2.lock().unwrap().take().ok_or("no scene")?;
-            match Viewer::new(cc, &scene, topology, &opts2, error2, measured2) {
-                // The GPU has it; the CPU copy goes now (#28: the prototype
-                // held both, 2.1 GB on the stress assembly).
-                Ok(v) => {
-                    *used2.lock().unwrap() = Some(v.backend);
-                    drop(scene);
-                    Ok(Box::new(v) as Box<dyn eframe::App>)
-                }
-                Err(e) => {
-                    *slot2.lock().unwrap() = Some(scene);
-                    Err(e.into())
-                }
+            let rs = cc
+                .wgpu_render_state
+                .as_ref()
+                .ok_or("eframe started without wgpu")?;
+            // eframe's adapter went through gpu::select already; this guards
+            // the contract if a future eframe ignores the selector.
+            if !super::gpu::usable(&rs.adapter) {
+                return Err(format!(
+                    "adapter {} cannot run the viewer",
+                    rs.adapter.get_info().name
+                )
+                .into());
             }
+            theme::install(&cc.egui_ctx, opts2.theme);
+            let load = slot2.lock().unwrap().take().ok_or("no load")?;
+            *used2.lock().unwrap() = Some(Backend::from_wgpu(rs.adapter.get_info().backend));
+            Ok(Box::new(Window {
+                load,
+                stage: Stage::Loading {
+                    tree: None,
+                    progress: None,
+                    reported: false,
+                },
+                opts: opts2,
+                error: error2,
+                measured: measured2,
+            }) as Box<dyn eframe::App>)
         }),
     );
     let backend = *used.lock().unwrap();

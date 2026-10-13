@@ -67,6 +67,13 @@ impl Tree {
     /// The tree `topo` describes over `parts` mesh parts.
     #[must_use]
     pub fn from_topology(topo: &Topology, parts: usize) -> Self {
+        Self::from_nodes(&topo.tree, parts)
+    }
+
+    /// The tree of `nodes` over `parts` parts: a topology's, or an outline's
+    /// before the geometry exists (#85).
+    #[must_use]
+    pub fn from_nodes(nodes: &[Node], parts: usize) -> Self {
         let mut rows = Vec::new();
         fn walk(n: &Node, depth: u16, parent: Option<u32>, rows: &mut Vec<Row>) {
             let i = rows.len() as u32;
@@ -93,7 +100,7 @@ impl Tree {
                 }
             }
         }
-        for n in &topo.tree {
+        for n in nodes {
             walk(n, 0, None, &mut rows);
         }
         Self::new(rows, parts)

@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     argument (NULL: by extension)
   - A multi-file assembly's part files cannot be reached from a descriptor: they are reported
     missing ([#92](https://github.com/vig-os/stepv/issues/92))
+- **The viewer opens on the outline** ([#85](https://github.com/vig-os/stepv/issues/85)):
+  `stepv view` opens its window at once, on the assembly tree (from a cached outline artifact
+  before the kernel starts, then from the run) and the run's progress, and swaps in the model
+  when the run is done. Closing the window before then stops the kernel: status `cancelled`,
+  exit 0. The software viewer (`--software`, or no usable GPU) still waits for the run (#90)
+- **API: `occt::run_streaming` takes a `cancel` flag** ([#85](https://github.com/vig-os/stepv/issues/85)):
+  a new parameter before `on_event`; setting the flag kills the kernel, and the run is the new
+  `Outcome::Cancelled`. Pass `None` for the old behaviour
 - **Progress on a terminal, and the viewer leaves the outline too** ([#63](https://github.com/vig-os/stepv/issues/63), part 1):
   - When stderr is a terminal, `stepv` shows one line of progress there, redrawn in place:
     the part count once the outline arrives (at once from a cached outline artifact), then
@@ -32,7 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `stepv view` without a window session (over ssh, in a build sandbox) fails at once, before
     the kernel, with `"no window session: …"` and the reason, instead of after the whole run, or
     with no report at all where macOS aborts a sessionless window
-  - The viewer's own outline-first window follows in [#85](https://github.com/vig-os/stepv/issues/85)
 - **Atomic, versioned cache entries** ([#62](https://github.com/vig-os/stepv/issues/62)):
   an entry is either whole and current or ignored
   - Entries carry a format version and a checksum; a truncated, corrupt or old-version entry is
