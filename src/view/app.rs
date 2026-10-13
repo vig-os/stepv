@@ -1202,6 +1202,10 @@ enum Stage {
         progress: Option<crate::occt::Progress>,
         /// The STEPV_VIEW_SCREENSHOT report of the loading frame is out.
         reported: bool,
+        /// The run failed, and why (#89): the tree stays, with this.
+        failed: Option<String>,
+        /// The STEPV_VIEW_SCREENSHOT report of the failure is out.
+        told: bool,
     },
     Ready(Box<Viewer>),
 }
@@ -1237,7 +1241,11 @@ impl Window {
                     *tree = Some(Box::new(Tree::from_nodes(&nodes, leaves)));
                 }
                 Load::Progress(p) => *progress = Some(p),
-                Load::Failed => ctx.send_viewport_cmd(ViewportCommand::Close),
+                Load::Failed(why) => {
+                    if let Stage::Loading { failed, .. } = &mut self.stage {
+                        *failed = Some(why);
+                    }
+                }
                 Load::Done(mut l) => {
                     let opts = self.opts.loaded(&l);
                     let (e, m) = (self.error.clone(), self.measured.clone());
@@ -1272,6 +1280,8 @@ impl Window {
             tree,
             progress,
             reported,
+            failed,
+            told,
         } = &mut self.stage
         else {
             return;
@@ -1292,9 +1302,12 @@ impl Window {
                         tree.panel(ui, None, false);
                     }
                     None => {
-                        ui.label(
-                            egui::RichText::new("Reading the file…").color(t.muted_foreground),
-                        );
+                        let what = if failed.is_some() {
+                            "No outline: the file has no assembly tree, or the run ended first"
+                        } else {
+                            "Reading the file…"
+                        };
+                        ui.label(egui::RichText::new(what).color(t.muted_foreground));
                     }
                 }
             });
@@ -1317,10 +1330,41 @@ impl Window {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() / 2.0 - theme::space(6));
                     ui.label(egui::RichText::new(&self.opts.file).strong());
-                    ui.label(&what);
-                    ui.add(egui::ProgressBar::new(fraction).desired_width(320.0));
+                    match failed {
+                        // What happened and why, and what is left of it.
+                        Some(why) => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} The model could not be shown",
+                                    icon::WARNING
+                                ))
+                                .color(t.destructive),
+                            );
+                            ui.label(egui::RichText::new(why.as_str()).color(t.destructive));
+                            ui.label(
+                                egui::RichText::new(
+                                    "The tree is the file's outline; there is no geometry.",
+                                )
+                                .color(t.muted_foreground),
+                            );
+                        }
+                        None => {
+                            ui.label(&what);
+                            ui.add(egui::ProgressBar::new(fraction).desired_width(320.0));
+                        }
+                    }
                 });
             });
+        if let Some(why) = failed {
+            // Nothing more is coming: an idle window, until the user closes
+            // it. The screenshot hook reports this frame and closes.
+            if self.opts.screenshot.is_some() && !std::mem::replace(told, true) {
+                let rows = tree.as_ref().map_or(0, |t| t.rows().len());
+                eprintln!("stepv: STEPV_VIEW_SCREENSHOT failed: tree {rows} rows, {why}");
+                root.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+            return;
+        }
         // The loader's messages arrive without input: look for them.
         root.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
@@ -1463,6 +1507,8 @@ pub(super) fn run(
                     tree: None,
                     progress: None,
                     reported: false,
+                    failed: None,
+                    told: false,
                 },
                 opts: opts2,
                 error: error2,

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     argument (NULL: by extension)
   - A multi-file assembly's part files cannot be reached from a descriptor: they are reported
     missing ([#92](https://github.com/vig-os/stepv/issues/92))
+- **A failed viewer run keeps the tree, and says why** ([#89](https://github.com/vig-os/stepv/issues/89), closing [#63](https://github.com/vig-os/stepv/issues/63)):
+  when `stepv view`'s run times out, passes the memory cap, crashes, fails, or ends without a
+  summary, the window stays open on the assembly tree with the reason, in the CLI's own words
+  ("timeout: wall-clock cap exceeded", "failed: … (cause: input)"), instead of closing. The
+  software viewer (#90) still opens no window then
 - **The viewer opens on the outline** ([#85](https://github.com/vig-os/stepv/issues/85)):
   `stepv view` opens its window at once, on the assembly tree (from a cached outline artifact
   before the kernel starts, then from the run) and the run's progress, and swaps in the model

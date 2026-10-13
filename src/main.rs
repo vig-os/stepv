@@ -499,7 +499,7 @@ fn load_view(
     let scene = match result {
         Ok((s, _)) => s,
         Err(code) => {
-            let _ = tx.send(view::Load::Failed);
+            let _ = tx.send(view::Load::Failed(failure(report)));
             return Err(code);
         }
     };
@@ -537,6 +537,21 @@ fn load_view(
         unhealed: serde_json::from_value(report["kernel"]["unhealed_faces"].clone()).ok(),
     })));
     Ok(())
+}
+
+/// What the viewer's window says of a failed load (#89): the report's own
+/// status and error (`fail_in`, `tessellate`'s outcome mapping), and the
+/// kernel's cause when it gave one. Not a mapping of its own.
+fn failure(report: &Value) -> String {
+    let status = report["status"].as_str().unwrap_or("error");
+    let why = report["error"]
+        .as_str()
+        .or_else(|| report["message"].as_str())
+        .unwrap_or("no reason given");
+    match report["kernel"]["cause"].as_str() {
+        Some(cause) => format!("{status}: {why} (cause: {cause})"),
+        None => format!("{status}: {why}"),
+    }
 }
 
 fn fail_in(report: &mut Value, code: u8, status: &str, msg: &str) -> u8 {
