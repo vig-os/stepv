@@ -219,14 +219,27 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         if Admission.holdsAdmitted {
             // Held until the test creates release-<n> in this service's tmp;
             // the deadline passing meanwhile is logged, for the test to see
-            // before it releases (scripts/ql-e2e/supervisor.sh).
+            // before it releases (scripts/ql-e2e/supervisor.sh). Never
+            // forever: a cancel ends the hold, and so does the deadline plus
+            // 10 s with no release, loudly (a test that lost its way).
             log.notice("\(tag, privacy: .public): held for release")
             let release = NSTemporaryDirectory() + "/release-\(n)"
+            let bound = deadline + 10_000_000_000
             var told = false
             while !FileManager.default.fileExists(atPath: release) {
-                if !told && DispatchTime.now().uptimeNanoseconds >= deadline {
+                lock.lock(); let gone = cancelled != nil; lock.unlock()
+                if gone {
+                    log.notice("\(tag, privacy: .public): cancelled while held, never spawned")
+                    return (.crashed, "\(tag): cancelled while held, never spawned", nil, nil)
+                }
+                let now = DispatchTime.now().uptimeNanoseconds
+                if !told && now >= deadline {
                     log.notice("\(tag, privacy: .public): deadline passed while held")
                     told = true
+                }
+                if now >= bound {
+                    log.fault("\(tag, privacy: .public): held 10 s past its deadline with no release: let go")
+                    break
                 }
                 usleep(10_000)
             }

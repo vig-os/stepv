@@ -121,22 +121,34 @@ drive() {
   return "$status"
 }
 # The log line (ERE) for <what> of run #<n> of service pid <pid>: that run
-# of that service alone.
+# of that service alone. Every pid is anchored on both sides ("pid " before,
+# ", " or ")" or " " after), so 4521 is never 45210's prefix.
 log_pattern() {
   case $1 in
     spawned) echo "run #$2 \\(service pid $3, up [0-9]+ ms\\): kernel pid [0-9]+ spawned" ;;
     queued) echo "run #$2 \\(service pid $3\\): queued" ;;
     held-deadline) echo "run #$2 \\(service pid $3, up [0-9]+ ms\\): deadline passed while held" ;;
+    started) echo "service pid $3 started: " ;;
+    cancelled) echo "run #[0-9]+ \\(service pid $3, up [0-9]+ ms\\): cancelled, kernel pid" ;;
   esac
 }
-# Its own check, on a log whose one matching line is a decoy's: run #6 of
-# another service, started in the same window (#111's failure: such a line
-# was taken for this probe's).
-printf '%s\n' 'service pid 111 started: swept 0 dead run(s), kept 0 live, admission limit 1, x' \
-  'run #6 (service pid 111, up 5 ms): kernel pid 900 spawned in 0.4 ms' \
-  'service pid 222 started: swept 0 dead run(s), kept 0 live, admission limit 1, x' >"$tmp/decoy.log"
-grep -qE "$(log_pattern spawned 6 222)" "$tmp/decoy.log" && fail "drive takes another service's run #6 for its own"
-grep -qE "$(log_pattern spawned 6 111)" "$tmp/decoy.log" || fail "drive misses a spawned run"
+# The lines of service pid <pid> in file <f>, its alone (anchored as above).
+owned_by() { grep -E "service pid $1[,):[:space:]]" "$2"; }
+# Their own check, on a log whose only lines are a decoy's: another service,
+# whose pid has this one's as a prefix (45210, 4521), with a line of every
+# kind (#111's failure: another service's line taken for this one's).
+printf '%s\n' 'service pid 45210 started: swept 0 dead run(s), kept 1 live, admission limit 1, x' \
+  'run #6 (service pid 45210, up 5 ms): kernel pid 900 spawned in 0.4 ms' \
+  'run #6 (service pid 45210): queued, 1 kernel(s) running' \
+  'run #6 (service pid 45210, up 5 ms): deadline passed while held' \
+  'run #6 (service pid 45210, up 5 ms): cancelled, kernel pid 900 signal 9, reaped 1.0 ms after the cancel' \
+  'run #6 (service pid 45210): past its deadline in the queue, never spawned' >"$tmp/decoy.log"
+for what in spawned queued held-deadline started cancelled; do
+  grep -qE "$(log_pattern "$what" 6 4521)" "$tmp/decoy.log" && fail "log_pattern $what takes service pid 45210's line for 4521's"
+  grep -qE "$(log_pattern "$what" 6 45210)" "$tmp/decoy.log" || fail "log_pattern $what misses service pid 45210's own line"
+done
+[ -z "$(owned_by 4521 "$tmp/decoy.log")" ] || fail "owned_by takes service pid 45210's lines for 4521's"
+[ "$(owned_by 45210 "$tmp/decoy.log" | wc -l | tr -d ' ')" = 6 ] || fail "owned_by misses service pid 45210's own lines"
 # The service pid the last driven probe reported ("service pid P").
 driven_pid() { grep -oE -m1 'service pid [0-9]+' "$tmp/drive.out" 2>/dev/null | awk '{print $3}'; }
 # Waits for a line matching $2 (ERE) in file $1, at most $3 s: what a probe
@@ -159,9 +171,9 @@ holder=$!
 if await_file "$tmp/hold.txt" '^held run [0-9]+ service pid [0-9]+' 40; then
   read -r _ _ hrun _ _ spid < <(grep -E -m1 '^held run' "$tmp/hold.txt")
   log_since >"$tmp/log.txt"
-  kpid=$(grep -oE -m1 "run #$hrun \\(service pid $spid, up [0-9]+ ms\\): kernel pid [0-9]+ spawned" "$tmp/log.txt" \
+  kpid=$(grep -oE -m1 "$(log_pattern spawned "$hrun" "$spid")" "$tmp/log.txt" \
     | sed -E 's/.*kernel pid ([0-9]+) spawned/\1/')
-  limit=$(grep -oE -m1 "service pid $spid started:.*admission limit [0-9]+" "$tmp/log.txt" | grep -oE '[0-9]+$')
+  limit=$(grep -E "$(log_pattern started 0 "$spid")" "$tmp/log.txt" | grep -oE -m1 'admission limit [0-9]+' | grep -oE '[0-9]+$')
   [ -n "$kpid" ] || { echo "FAIL: no spawn logged for run #$hrun of service pid $spid"; kpid=0; rc=1; }
   # The huge file runs ~30 s: its kernel is surely still running now.
   kill -9 "$spid"
@@ -201,8 +213,8 @@ set_start
 echo "service admission limit: $limit"
 drive timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step,huge.step} "$limit" || rc=1
 mpid=$(driven_pid)
-if await_log "service pid ${mpid:-none} started: swept ([2-9]|[1-9][0-9]+) dead run" 20; then
-  echo "ok: logged: $(grep -E -m1 "service pid ${mpid:-none} started: swept" "$tmp/log.txt")"
+if await_log "$(log_pattern started 0 "${mpid:-none}")swept ([2-9]|[1-9][0-9]+) dead run" 20; then
+  echo "ok: logged: $(grep -E -m1 "$(log_pattern started 0 "${mpid:-none}")" "$tmp/log.txt")"
 else
   echo "FAIL: the fresh service did not sweep step 1's and the planted dead runs"
   rc=1
@@ -213,8 +225,8 @@ fi
 #    cancelled one died of its SIGKILL (signal 9, not its own exit: the huge
 #    file takes ~30 s); and every kernel it spawned is gone, killed or
 #    finished. 10 spawns, 11 at L >= 2 (the deadline kill beside a run).
-await_log "service pid ${mpid:-none}, up [0-9]+ ms\\): cancelled, kernel pid" 20
-grep -F "service pid ${mpid:-none}" "$tmp/log.txt" >"$tmp/mine.txt"
+await_log "$(log_pattern cancelled 0 "${mpid:-none}")" 20
+owned_by "${mpid:-none}" "$tmp/log.txt" >"$tmp/mine.txt"
 for want in 'killed \(deadline\) at [0-9]+ ms, reaped in [0-9.]+ ms' \
             'killed \(memory\) at [0-9]+ ms, reaped in [0-9.]+ ms' \
             'cancelled, kernel pid [0-9]+ signal 9, reaped [0-9.]+ ms after the cancel'; do
@@ -278,12 +290,12 @@ set_start
 drive timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" admission "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 log_since >"$tmp/log.txt"
-order=$(python3 - "$tmp/log.txt" "$(driven_pid)" <<'PY'
+# This probe's service's lines alone (owned_by: anchored), in log order.
+owned_by "$(driven_pid)" "$tmp/log.txt" >"$tmp/mine.txt"
+order=$(python3 - "$tmp/mine.txt" <<'PY'
 import re, sys
 lines = open(sys.argv[1]).read().splitlines()
-pid = sys.argv[2] or "?"
-limit = next((l for l in lines if f"service pid {pid} started" in l and "admission limit 1" in l), None)
-lines = [l for l in lines if f"service pid {pid}" in l]
+limit = next((l for l in lines if " started: " in l and "admission limit 1" in l), None)
 runs = {}
 for i, l in enumerate(lines):
     m = re.match(r"run #(\d+)[ :(]", l)
@@ -340,12 +352,12 @@ live=$!
 # A's service, from A itself; its run is spawned once logged so.
 if await_file "$tmp/live.txt" '^service pid [0-9]+' 20 \
    && apid=$(grep -oE -m1 'service pid [0-9]+' "$tmp/live.txt" | awk '{print $3}') \
-   && await_log "run #1 \\(service pid $apid, up [0-9]+ ms\\): kernel pid [0-9]+ spawned" 20; then
+   && await_log "$(log_pattern spawned 1 "$apid")" 20; then
   timeout 60 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
     "$service" live "$tmp/files/frames.step" >"$tmp/live-b.txt" 2>&1
   bpid=$(grep -oE -m1 'service pid [0-9]+' "$tmp/live-b.txt" | awk '{print $3}')
   log_since >"$tmp/log.txt"
-  bline=$(grep -E -m1 "service pid ${bpid:-none} started: swept" "$tmp/log.txt")
+  bline=$(grep -E -m1 "$(log_pattern started 0 "${bpid:-none}")" "$tmp/log.txt")
   if [ -z "$bpid" ] || [ "$bpid" = "$apid" ] || [ -z "$bline" ]; then
     echo "FAIL: no second instance of the service started beside pid $apid (got ${bpid:-none})"
     rc=1
