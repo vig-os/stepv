@@ -1811,13 +1811,22 @@ pair. The function was O(n³) in a wire's edges.
 - **Tests:** `tests/occt_patch.rs` runs `kernel/occt-patch-check`, which is built beside the
   kernel against the same OCCT.
   - **Scaling.** The fix time of a convex 800-gon and of a 3,200-gon gives a growth exponent:
-    3.00 to 3.06 unpatched, 2.00 to 2.01 patched. The test requires < 2.5. It is a ratio of two CPU times in one
-    process, not a wall-clock threshold. A deterministic count is not possible from outside the
+    3.00 to 3.06 unpatched and 2.00 to 2.01 patched on sage; 2.96 and 1.98 on anvil
+    (x86_64-linux). The test requires < 2.5. It is a ratio of two CPU times in one process, not
+    a wall-clock threshold. A deterministic count is not possible from outside the
     library: the cost is the sequence walk inside `Find`, and OCCT's public API cannot see it.
   - **Equality.** 200 generated self-intersecting wires (splitmix64, the same on every platform)
-    must fix exactly as `tests/occt-patch/wires.txt` records. That file was recorded with the
-    unpatched OCCT. 91 of the wires reach the big-segment branch. The gate's hoist without the
-    re-fetch changes 39 of them.
+    must fix exactly as `tests/occt-patch/wires-<system>.txt` records. Each file was recorded
+    with nixpkgs' unpatched OCCT on its platform: `aarch64-darwin` on sage, `x86_64-linux` on
+    anvil. 91 of the wires reach the big-segment branch. The gate's hoist without the re-fetch
+    changes 39 of them.
+    - **Why one file per platform:** OCCT itself does not fix every wire alike everywhere.
+      Unpatched, x86_64-linux (gcc) splits seed 194 once more than aarch64-darwin (clang). On
+      anvil, the patched and unpatched OCCT agree on all 200 wires.
+    - A platform without a file fails the test and says how to record one; it never skips.
+    - The first Linux run differed on every seed. The generator drew a point's x and y as two
+      arguments of one call, and GCC evaluates arguments in the other order; the draws are now
+      sequenced.
 - **Not patched:** `scripts/test-linux-sandbox.sh` and `scripts/test-linux-viewer.sh` build the
   kernel in Debian containers against Debian's packaged OCCT, as before. They test the sandbox
   and the viewer, never ship, and do not run `tests/occt_patch.rs`. The patch changes only
