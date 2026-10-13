@@ -1595,6 +1595,34 @@ memory is freed at once. Two designs failed before this one:
   - an earlier `Int.max` deadline overflowed and crashed the service after the spawn. A
     deadline of 0 meant no deadline, so a kernel that closed stdout without exiting ran
     forever.
+- **Admission limit:** each service runs at most L = clamp(physical memory / (4 × 4096 MB), 1,
+  cores) kernels at once (`Admission` in `macos/Supervisor/main.swift`).
+  - The in-process kernel ran one file at a time. Unbounded, N concurrent files at the
+    extensions' 4096 MB cap could take the machine. L keeps each service within about ¼ of
+    RAM, so about ½ across the thumbnail and preview services: 1 on an 8–16 GB Mac (and on CI's
+    7 GB runner), 16 on sage (256 GB, 32 cores).
+  - **One slot's budget is 4096 MB** (`Admission.slotMemoryMB`, the one constant behind both
+    L and validation). A request asking for a bigger memory cap is refused before anything
+    runs, so L slots can't exceed the share of RAM L was made for. The extensions send 4096.
+  - Requests over L wait in a FIFO queue. Their deadline counts from **submission**, not
+    admission: time in the queue is spent. One that expires or is cancelled there is withdrawn
+    without spawning a kernel, and gets its normal deadline or cancelled reply, exactly once.
+    - The withdraw is installed before the run can be queued, and `cancelled` is re-checked
+      once it is, so a cancel at any moment finds the run.
+    - A deadline that passes in the instant the slot is handed over is caught when the run
+      starts: refused, never spawned.
+    - The test build can hold each handover (`admission-handover-delay-ms`) to put that case
+      on cue.
+  - A test build's `admission-limit` outside 1…cores is a startup error, not a clamp.
+  - The supervisor logs queueing, admission and withdrawal, and each service names itself and
+    its L in its start line. The thumbnail's and the preview's supervisors are the same binary,
+    so the log can't tell them apart by image path.
+  - A test build (`STEPV_TEST_HOOKS`, never shipped) reads L from its own
+    `Contents/Resources/admission-limit`. `scripts/ql-e2e/supervisor.sh` builds one with L = 1
+    and checks two things: the second of two runs spawns only after the first has ended, and a
+    run whose deadline passes in the queue never spawns.
+  - The probe's concurrency check reads L from the service's log. At L ≥ 2 the second run
+    finishes beside the first; at L = 1 it is served after it.
 - **Bounds, in the service:**
   - at the deadline, the kernel is killed and reaped;
   - the memory cap is polled every 5 ms.

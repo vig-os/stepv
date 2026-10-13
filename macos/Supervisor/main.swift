@@ -31,6 +31,101 @@ func residentSize(_ pid: pid_t) -> UInt64? {
     return proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, size) == size ? info.pti_resident_size : nil
 }
 
+/// How many kernels this service runs at once (#64): the in-process kernel
+/// ran one file at a time, and N concurrent runs at a 4096 MB cap each
+/// could take the machine. L = clamp(physical memory / (4 × 4096 MB), 1,
+/// cores): at most ~¼ of RAM per service, ~½ across the thumbnail and
+/// preview services. Over L, requests wait in a FIFO queue; their deadline
+/// counts from submission, and one that expires or is cancelled there is
+/// withdrawn without ever spawning a kernel.
+final class Admission {
+    /// One slot's memory budget: a run's cap may not be more (Supervisor
+    /// refuses it), so L slots stay within the share of RAM L is made for.
+    static let slotMemoryMB = 4096
+    let limit: Int
+    private let lock = NSLock()
+    private var running = 0
+    private var waiting: [(id: Int, start: () -> Void)] = []
+
+    init(limit: Int) { self.limit = limit }
+
+    static var forThisMachine: Int {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        #if STEPV_TEST_HOOKS
+        // Test builds only (scripts/ql-e2e/supervisor.sh): the limit from
+        // Contents/Resources/admission-limit, to force queueing. Out of
+        // 1...cores it is a mistake in the test, not something to clamp.
+        if let n = testResource("admission-limit") {
+            guard (1...cores).contains(n) else {
+                log.fault("admission-limit \(n) is not in 1...\(cores): the service will not start")
+                exit(78)  // EX_CONFIG
+            }
+            return n
+        }
+        #endif
+        let byMemory = Int(ProcessInfo.processInfo.physicalMemory / (4 * (UInt64(slotMemoryMB) << 20)))
+        return min(max(byMemory, 1), cores)
+    }
+
+    #if STEPV_TEST_HOOKS
+    /// A whole number from the test build's Contents/Resources, if present.
+    static func testResource(_ name: String) -> Int? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: nil),
+              let text = try? String(contentsOf: url) else { return nil }
+        return Int(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    /// Test builds only: how long a queued run's start is held after its
+    /// slot is handed over, so a deadline can pass in that gap on cue.
+    static let handoverDelayMs = testResource("admission-handover-delay-ms") ?? 0
+    #endif
+
+    /// Starts `start` now if a slot is free and none waits, else queues it.
+    /// True if it started.
+    func submit(id: Int, _ start: @escaping () -> Void) -> Bool {
+        lock.lock()
+        guard running < limit && waiting.isEmpty else {
+            waiting.append((id, start))
+            lock.unlock()
+            return false
+        }
+        running += 1
+        lock.unlock()
+        start()
+        return true
+    }
+
+    /// Takes a queued request out. True if it was still waiting: it never
+    /// starts.
+    func withdraw(id: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let i = waiting.firstIndex(where: { $0.id == id }) else { return false }
+        waiting.remove(at: i)
+        return true
+    }
+
+    /// A run ended: its slot goes to the first in the queue.
+    func leave() {
+        lock.lock()
+        guard !waiting.isEmpty else {
+            running -= 1
+            lock.unlock()
+            return
+        }
+        let next = waiting.removeFirst()
+        lock.unlock()
+        #if STEPV_TEST_HOOKS
+        if Admission.handoverDelayMs > 0 {
+            return DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(Admission.handoverDelayMs)) {
+                next.start()
+            }
+        }
+        #endif
+        next.start()
+    }
+}
+
+let admission = Admission(limit: Admission.forThisMachine)
+
 /// One connection: at most one run.
 final class Supervisor: NSObject, StepvSupervisorProtocol {
     weak var connection: NSXPCConnection?
@@ -42,12 +137,18 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
     /// against the reply). Written on the run's thread alone.
     private var eventsSent = 0
     private var cancelled: UInt64?
+    /// While the run waits for admission: takes it out of the queue.
+    private var withdrawQueued: (() -> Void)?
 
-    /// The connection went: kill the kernel, if one runs.
+    /// The connection went: kill the kernel, if one runs, or withdraw the
+    /// run from the queue, if it waits.
     func cancel() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         if cancelled == nil { cancelled = DispatchTime.now().uptimeNanoseconds }
         if child > 0 { kill(child, SIGKILL) }
+        let withdraw = withdrawQueued
+        lock.unlock()
+        withdraw?()
     }
 
     func run(_ file: FileHandle, format: String, linearRel: Double, angularDeg: Double,
@@ -60,12 +161,40 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
             return reply(.refused, why, nil, nil, 0)
         }
         servedLock.lock(); served += 1; let n = served; servedLock.unlock()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let (outcome, detail, summary, mesh) = self.supervise(
-                file, n: n, format: format, linearRel: linearRel, angularDeg: angularDeg,
-                deadlineMs: deadlineMs, memoryMB: memoryMB)
-            withExtendedLifetime(file) {}
-            reply(outcome, detail, summary, mesh, self.eventsSent)
+        let submitted = DispatchTime.now().uptimeNanoseconds
+        // A queued run leaves the queue at its deadline or on a cancel, never
+        // spawned, with one reply: whichever takes it out (Admission's lock).
+        let withdraw = { (outcome: StepvRunOutcome, why: String) in
+            guard admission.withdraw(id: n) else { return }
+            log.notice("run #\(n) (service pid \(getpid())): \(why, privacy: .public) in the queue, never spawned")
+            reply(outcome, "run #\(n): \(why) in the queue, never spawned", nil, nil, 0)
+        }
+        // Installed before the run can be queued, so a cancel at any moment
+        // finds it.
+        lock.lock(); withdrawQueued = { withdraw(.crashed, "cancelled") }; lock.unlock()
+        let admitted = admission.submit(id: n) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.lock.lock(); self.withdrawQueued = nil; self.lock.unlock()
+                let waited = elapsedMs(since: submitted)
+                if waited >= 1 {
+                    log.notice("run #\(n) (service pid \(getpid())): admitted after \(waited, format: .fixed(precision: 0)) ms in the queue")
+                }
+                let (outcome, detail, summary, mesh) = self.supervise(
+                    file, n: n, format: format, linearRel: linearRel, angularDeg: angularDeg,
+                    deadlineMs: deadlineMs, memoryMB: memoryMB, submitted: submitted)
+                admission.leave()
+                withExtendedLifetime(file) {}
+                reply(outcome, detail, summary, mesh, self.eventsSent)
+            }
+        }
+        guard !admitted else { return }
+        log.notice("run #\(n) (service pid \(getpid())): queued, \(admission.limit) kernel(s) running")
+        // A cancel that came before the run was in the queue found nothing to
+        // take out: take it out now.
+        lock.lock(); let wasCancelled = cancelled != nil; lock.unlock()
+        if wasCancelled { withdraw(.crashed, "cancelled") }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(deadlineMs)) {
+            withdraw(.deadline, "past its deadline")
         }
     }
 
@@ -77,16 +206,23 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         if !(linearRel > 0 && linearRel <= 1) { return "linearRel \(linearRel) is not in (0, 1]" }
         if !(angularDeg > 0 && angularDeg <= 180) { return "angularDeg \(angularDeg) is not in (0, 180]" }
         if !(1...maxDeadlineMs).contains(deadlineMs) { return "deadlineMs \(deadlineMs) is not in 1...\(maxDeadlineMs)" }
-        if !(1...maxMemoryMB).contains(memoryMB) { return "memoryMB \(memoryMB) is not in 1...\(maxMemoryMB)" }
+        if !(1...Admission.slotMemoryMB).contains(memoryMB) {
+            return "memoryMB \(memoryMB) is not in 1...\(Admission.slotMemoryMB) (one admission slot's budget)"
+        }
         return nil
     }
     static let maxDeadlineMs = 600_000  // 10 min: far past Quick Look's own watchdogs
-    static let maxMemoryMB = 1 << 20  // 1 TB: any real machine's memory, below overflow
 
     private func supervise(_ file: FileHandle, n: Int, format: String, linearRel: Double,
-                           angularDeg: Double, deadlineMs: Int, memoryMB: Int)
+                           angularDeg: Double, deadlineMs: Int, memoryMB: Int, submitted: UInt64)
         -> (StepvRunOutcome, String, Data?, FileHandle?) {
         let tag = "run #\(n) (service pid \(getpid()), up \(Int(elapsedMs(since: started))) ms)"
+        // The deadline counts from submission: time in the queue is spent.
+        let deadline = submitted + UInt64(deadlineMs) * 1_000_000  // validated: no overflow
+        guard DispatchTime.now().uptimeNanoseconds < deadline else {
+            log.notice("\(tag, privacy: .public): past its deadline before admission, never spawned")
+            return (.deadline, "\(tag): past its deadline before admission, never spawned", nil, nil)
+        }
         let kernel = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/stepv-occt").path
         // The run's files live in a directory of its own in this service's
         // container: the mesh, which goes back as an open, unlinked file (no
@@ -147,6 +283,10 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         close(life[0])
         guard rc == 0 else {
             close(out[0])
+            if rc == ECANCELED {  // cancelled after admission, before the spawn
+                log.notice("\(tag, privacy: .public): cancelled, never spawned")
+                return (.crashed, "\(tag): cancelled, never spawned", nil, nil)
+            }
             log.error("\(tag, privacy: .public): spawn failed: \(String(cString: strerror(rc)), privacy: .public)")
             return (.refused, "\(tag): spawn failed: \(String(cString: strerror(rc)))", nil, nil)
         }
@@ -161,7 +301,6 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         var summary: Data?
         var streamError: StepvStreamError?
         var killedFor: StepvRunOutcome?
-        let deadline = t0 + UInt64(deadlineMs) * 1_000_000  // validated: no overflow
         let cap = UInt64(memoryMB) << 20
         var lastProbe: UInt64 = 0
         var chunk = [UInt8](repeating: 0, count: 64 << 10)
@@ -330,7 +469,9 @@ func sweepStaleRuns() -> (Int, Int) {
 }
 
 let (swept, kept) = sweepStaleRuns()
-log.notice("service pid \(getpid()) started: swept \(swept) dead run(s), kept \(kept) live")
+// The bundle id names the service: the thumbnail's and the preview's are the
+// same binary, so the log cannot tell them apart by image path.
+log.notice("service pid \(getpid()) started: swept \(swept) dead run(s), kept \(kept) live, admission limit \(admission.limit), \(Bundle.main.bundleIdentifier ?? "?", privacy: .public)")
 
 let delegate = Delegate()
 let listener = NSXPCListener.service()

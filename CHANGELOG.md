@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **macOS: the supervisor service bounds how many kernels run at once** ([#64](https://github.com/vig-os/stepv/issues/64), PR 2a):
+  - At most clamp(RAM / (4 × 4096 MB), 1, cores) kernels per service, so about a quarter of
+    the memory each. Further requests wait in order. Their deadline counts from when they were
+    asked, and one that expires while waiting never starts a kernel
 - **macOS: an XPC supervisor service runs the kernel in each Quick Look extension** ([#64](https://github.com/vig-os/stepv/issues/64), part 1):
   - Each extension embeds `StepvSupervisor.xpc` with its own sandboxed `stepv-occt` and OCCT
     `Frameworks`. The service runs the kernel as its child on the file's descriptor, forwards

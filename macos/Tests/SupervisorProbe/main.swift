@@ -4,9 +4,16 @@
 // main bundle is that extension's and it reaches that extension's real
 // StepvSupervisor.xpc, its real kernel and its real Frameworks.
 //
-//   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step>
+//   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> <L>
+//                    L: the service's admission limit, from its log
 //   supervisor-probe <service> hold <slow.step>    one run, then wait, for
 //                    the caller to kill the service under it
+//   supervisor-probe <service> admission <slow.step> <small.step>   against
+//                    a service whose admission limit is 1 (a test build):
+//                    a queued run cancelled, the next admitted after the
+//                    first, and one withdrawn at its deadline from the queue
+//   supervisor-probe <service> handover <slow.step> <small.step>   against a
+//                    test build with L = 1 and a held handover
 //   supervisor-probe <service> live <slow.step>    one run that must finish
 //                    with its mesh, while the caller starts a second
 //                    instance of the service, whose sweep must spare it
@@ -19,7 +26,7 @@
 import Foundation
 
 let a = CommandLine.arguments
-let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> | hold <slow.step> | live <slow.step> | standin <frames> <late> <silent> <truncated> <noexit>"
+let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> <L> | hold <slow.step> | live <slow.step> | admission|handover <slow.step> <small.step> | standin <frames> <late> <silent> <truncated> <noexit>"
 guard a.count >= 3 else { print(usage); exit(2) }
 let service = a[1]
 var failed = false
@@ -35,6 +42,8 @@ final class Probe {
     var result: StepvRunResult?
     var replyAfterEvents = true
     let done = DispatchSemaphore(value: 0)
+    /// Signalled by the first event: the kernel runs (no sleep orders a test).
+    let started = DispatchSemaphore(value: 0)
     var run: StepvSupervisorRun!
     var t0 = 0.0, ms = 0.0
 
@@ -43,7 +52,9 @@ final class Probe {
         run = StepvSupervisorRun(serviceName: service, onEvent: { [unowned self] kind, _ in
             self.lock.lock(); self.kinds.append(kind)
             if self.result != nil { self.replyAfterEvents = false }
+            let first = self.kinds.count == 1
             self.lock.unlock()
+            if first { self.started.signal() }
         }, completion: { [unowned self] r in
             self.lock.lock(); self.result = r; self.ms = now() - self.t0; self.lock.unlock()
             self.done.signal()
@@ -52,6 +63,13 @@ final class Probe {
         run.start(file: URL(fileURLWithPath: path), format: format, linearRel: linearRel, angularDeg: angularDeg,
                   deadlineMs: deadlineMs, memoryMB: memoryMB)
     }
+
+    /// Waits for the first event: the kernel is running. False past `seconds`.
+    func waitRunning(_ seconds: Double = 20) -> Bool {
+        started.wait(timeout: .now() + seconds) == .success
+    }
+
+    var isDone: Bool { lock.lock(); defer { lock.unlock() }; return result != nil }
 
     /// Waits for the reply; nil past `seconds`.
     func wait(_ seconds: Double = 30) -> StepvRunResult? {
@@ -71,6 +89,39 @@ case ("hold", 4):
     let held = Probe(a[3], "step", deadlineMs: 60_000)
     print("hold: \(outcomeLine(held.wait(60)))")
     exit(0)
+case ("admission", 5):
+    // L = 1 (a test build). A holds the slot; B queues and is cancelled
+    // there once supervisor.sh has seen it queued ("go" on stdin); C queues
+    // behind it and must be admitted next; D queues with a 1 s deadline and
+    // must be withdrawn by its deadline while A still runs.
+    let a1 = Probe(a[3], "step", deadlineMs: 30_000)
+    check(a1.waitRunning(), "admission: the first run's kernel is running")
+    let b = Probe(a[4], "step", deadlineMs: 30_000)
+    print("queued-b"); fflush(stdout)
+    _ = readLine()
+    b.run.cancel()
+    let c = Probe(a[4], "step", deadlineMs: 30_000)
+    let d = Probe(a[4], "step", deadlineMs: 1000)
+    let rd = d.wait(10)
+    check(rd?.outcome == .deadline && rd?.detail.contains("in the queue, never spawned") == true && !a1.isDone,
+          "admission: withdrawn at its deadline from the queue while the first still runs: \(outcomeLine(rd))")
+    let r1 = a1.wait(40), rc = c.wait(40)
+    let end1 = a1.t0 + a1.ms, endC = c.t0 + c.ms
+    check(r1?.outcome == .done && rc?.outcome == .done && endC > end1,
+          "admission: the run behind the cancelled one ended \(Int(endC - end1)) ms after the first: \(outcomeLine(rc))")
+    check(b.wait(1) == nil, "admission: no completion for the cancelled run")
+    exit(failed ? 1 : 0)
+case ("handover", 5):
+    // L = 1 and a 3 s handover (a test build): A's deadline (2 s) frees the
+    // slot, B is handed it, and B's own deadline passes during the
+    // handover: the admission-time check refuses it, never spawned.
+    let a1 = Probe(a[3], "step", deadlineMs: 2000)
+    check(a1.waitRunning(), "handover: the first run's kernel is running")
+    let b = Probe(a[4], "step", deadlineMs: 2000)
+    let rb = b.wait(15)
+    check(rb?.outcome == .deadline && rb?.detail.contains("past its deadline before admission, never spawned") == true,
+          "handover: a deadline that passes as the slot is handed over: \(outcomeLine(rb))")
+    exit(failed ? 1 : 0)
 case ("live", 4):
     let p = Probe(a[3], "step", deadlineMs: 60_000)
     let r = p.wait(60)
@@ -93,7 +144,7 @@ case ("standin", 8):
     let rn = Probe(a[7], "step", deadlineMs: 1000).wait()
     check(rn?.outcome == .deadline, "stand-in closes stdout, never exits: the deadline ends it — \(outcomeLine(rn))")
     exit(failed ? 1 : 0)
-case (_, 6):
+case (_, 7):
     break
 default:
     print(usage); exit(2)
@@ -127,12 +178,18 @@ for (path, format) in [(a[3], "iges"), (a[4], "brep")] {
 // 3. A deadline kill while a second run goes on beside it, then a third
 //    right after the kill: no throttle, and the runs are independent.
 let slow = Probe(a[5], "step", deadlineMs: 1500)
-usleep(200_000)
+check(slow.waitRunning(), "the slow run's kernel is running")
 let beside = Probe(a[2], "step")
 let rb = beside.wait()
 slow.lock.lock(); let slowStillRunning = slow.result == nil; slow.lock.unlock()
-check(rb?.outcome == .done && slowStillRunning,
-      "concurrent: \(String(format: "%.0f", beside.ms)) ms while the slow run went on — \(meshLine(rb))")
+if Int(a[6]) ?? 1 >= 2 {
+    check(rb?.outcome == .done && slowStillRunning,
+          "concurrent: \(String(format: "%.0f", beside.ms)) ms while the slow run went on — \(meshLine(rb))")
+} else {
+    // One kernel at a time (Admission): the second waits for the first.
+    check(rb?.outcome == .done && !slowStillRunning,
+          "admission limit 1: the second run was served after the first ended, in \(String(format: "%.0f", beside.ms)) ms — \(meshLine(rb))")
+}
 let rs = slow.wait()
 check(rs?.outcome == .deadline, "deadline: \(rs.map { "\($0.outcome.rawValue) \($0.detail)" } ?? "no reply") in \(String(format: "%.0f", slow.ms)) ms")
 let after = Probe(a[2], "step")
@@ -153,7 +210,7 @@ check(rc256?.outcome == .memory, "memory cap 256 MB on a ~500 MB run: \(outcomeL
 // 5. Cancel: the connection goes, the service kills the kernel, and no
 //    completion follows.
 let cancelled = Probe(a[5], "step")
-usleep(500_000)
+check(cancelled.waitRunning(), "the run to cancel is running")
 cancelled.run.cancel()
 check(cancelled.wait(2) == nil, "cancel: no completion after cancel()")
 
@@ -164,6 +221,7 @@ for (what, p) in [
     ("deadlineMs -1", { Probe(a[2], "step", deadlineMs: -1) }),
     ("deadlineMs Int.max", { Probe(a[2], "step", deadlineMs: Int.max) }),
     ("memoryMB 0", { Probe(a[2], "step", memoryMB: 0) }),
+    ("memoryMB 4097, over a slot's 4096", { Probe(a[2], "step", memoryMB: 4097) }),
     ("memoryMB Int.max", { Probe(a[2], "step", memoryMB: Int.max) }),
     ("linearRel NaN", { Probe(a[2], "step", linearRel: .nan) }),
     ("linearRel -1", { Probe(a[2], "step", linearRel: -1) }),
