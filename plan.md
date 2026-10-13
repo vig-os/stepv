@@ -1276,8 +1276,8 @@ as the outline should leave something a preview can show at once.
 - **The outline artifact (`cache::OutlineArtifact`):** JSON `{format: "stepv-outline-artifact",
   version: 1, header, tree, leaves, bbox, boxes}` at `<key>.outline.json`, keyed on the snapshot
   alone in its own hash domain. Cached CLI runs (`--png`/`--glb`/`--mesh`/`--topology`, without
-  `--no-cache`) are streamed (`occt::run_streaming`) and write it on `Event::Tree`, before the
-  transfer. A run killed after the outline keeps it. Once the mesh has decoded, the run rewrites
+  `--no-cache`) and `view` (#63) are streamed (`occt::run_streaming`) and write it on
+  `Event::Tree`, before the transfer. A run killed after the outline keeps it. Once the mesh has decoded, the run rewrites
   it with the model's `bbox` (the B-rep's box, so the same at any deflection). Read back with
   `cache::load_outline` (#63, the thumbnail fallback), which rejects another format or version.
   `boxes` is always absent until the kernel streams per-part boxes (#66).
@@ -1299,7 +1299,6 @@ as the outline should leave something a preview can show at once.
   - streaming costs the run its parse again inside the timeout (about 5% on a large assembly,
     see #54 step 2; #76);
   - a non-STEP file has no outline, so no artifact (#76);
-  - `view` does not write the artifact yet (#63);
   - a box can still be lost (#80): run A checks for an artifact at the key (a read and a JSON
     parse) and finds none; run B, completing, renames its artifact with the box into place; then
     A's outline write (create, write, `sync_all`, rename) replaces it. The box is missing until
@@ -1332,6 +1331,76 @@ as the outline should leave something a preview can show at once.
       reads in each of 5 runs;
     - only a complete current-version entry loads;
     - the sweep takes stale `.part` files only.
+
+### Outline and progress first (#63, #54 step 5, 2026-10-12): part 1, the CLI
+
+Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
+
+- **`view` writes the artifact:** its load is a cached run like `--png`'s. It is streamed, writes
+  `cache::OutlineArtifact` on `Event::Tree` under the `cache::FileId` taken before the run, and
+  adds the box once the mesh has decoded. A viewer whose kernel is killed after the outline (the
+  timeout, the memory cap, the user's Ctrl-C) leaves the tree for the next preview. With
+  `--no-cache` it writes nothing.
+- **`view` needs a window session, and checks before the kernel (`view::session`, #84):** on
+  macOS a window-server (Aqua) session (`CGSessionCopyCurrentDictionary` is not NULL), elsewhere
+  on Unix `DISPLAY` or `WAYLAND_DISPLAY`. Without one, `view` fails at once, before the kernel
+  starts: exit 3, status `error`, `"no window session: …"` with the reason, and the header
+  metadata as ever. A user over ssh or in a sandbox is told at once instead of after the whole
+  run, and macOS's window layer, which aborts a sessionless process outright, is never reached:
+  that abort lost the stdout report (#84's CI, where nix's builder runs as `_nixbld` with no
+  session). `STEPV_VIEW_TEST_NO_SESSION=1` forces the answer for the tests.
+- **Progress on a terminal (`Progress` in `src/main.rs`):** when stderr is a terminal
+  (`IsTerminal`), the run is streamed even with `--no-cache`, and one line on stderr is redrawn
+  in place (`\r`, then erase to the end of the line):
+  - `stepv: reading` while the file parses, as soon as the kernel starts;
+  - `stepv: N parts · reading` once the outline arrives, or at once when a cached artifact
+    already names them, before the kernel says anything;
+  - `stepv: N parts · transferring P%`, then `· meshing P%`, redrawn on each whole percent;
+  - the line is erased when stepv finishes the run, whatever its outcome (timeout, memory cap,
+    crash and failure included), so stderr's warnings and the viewer's notes start on a clean
+    line. The outcome is the stdout JSON's to say. stepv itself interrupted (Ctrl-C) or killed
+    erases nothing: it installs no signal handler, so the last state stays on the line and the
+    shell's prompt follows it.
+  - A file without an outline (IGES, BREP, a STEP file without product structure) shows no part
+    count. A cache hit runs nothing and shows nothing.
+- **Stdout is unchanged:** one JSON line, the same keys whether stderr is a terminal or not.
+  When stderr is not a terminal (a pipe, a file, Quick Look, the thumbnailer), nothing is
+  written to it, and an uncached `--no-cache` run is not streamed.
+- **Known limits:**
+  - the viewer still waits for the whole run before opening its window, and shows nothing of
+    the outline or the progress in it: #85 (#63 part 2);
+  - streaming for the progress line costs the run its parse again inside the timeout, as for
+    the artifact (#76);
+  - a non-STEP file has no outline, so the line has no part count (#76).
+- **Tests:**
+  - `tests/progress.rs`, through a real pseudo-terminal (`openpty`): the line names the parts and
+    reaches `transferring 100%` and `meshing 100%`, never starts a new line, and is erased at
+    the end. The same run into a pipe writes no progress, and its JSON has the same keys and
+    values. A cached artifact names the parts with a kernel that never writes a byte; without
+    one, no part count shows. The terminal's master and slave are close-on-exec from the
+    moment they exist (`posix_openpt(O_CLOEXEC)`, the slave opened by std), and asserted to be:
+    the tests run in parallel, and an inheritable slave passed to another test's stepv and
+    kernel would hold this terminal open until that process tree exits.
+  - `tests/cache.rs`: `view` with no window session (`STEPV_VIEW_TEST_NO_SESSION`, and no
+    `DISPLAY`) fails with `no window session:` and the header, and never starts the kernel.
+    Without the check, it fails.
+  - `tests/cache.rs`, needing a window session and so `#[ignore]`d in nix's build sandbox, which
+    has none. `scripts/test-window-tests.sh` runs them (`--ignored`), and fails unless every one
+    of them ran and passed: in `just view-test` on the macOS runner (kernel.yml's "GPU viewer on
+    Metal") and under Xvfb in the Linux viewer job. Each `view` through `Home::view` (#86): the kernel under `--memory-mb 1024`,
+    stepv's own `--timeout 30` unless the test gives another, `STEPV_VIEW_SCREENSHOT` set so a
+    window that opens closes itself, and the viewer's own footprint polled. stepv runs in its own
+    process group: past 2 GiB or 120 s the watchdog kills the whole group, never stepv alone
+    (the kernel's caps are stepv's sampler, so a kernel orphaned by killing stepv would run on
+    uncapped), and fails naming the limit. However a run ends, no member of its group may
+    outlive it.
+    - the watchdog, at a 2 s deadline over a kernel that never finishes, kills that kernel too;
+    - a `view` whose kernel is killed after its outline leaves the artifact under the pre-run
+      `FileId`, equal to `occt::outline`, without a box;
+    - `view --no-cache` leaves no artifact, where the same run cached leaves one (a kernel that
+      crashes after a full run, so no window opens). Making `view` ignore `--no-cache` fails it;
+    - a complete `view` stores the box, equal to the summary's, whether or not a window can
+      then open.
 
 ### Work queue (ordered, 2026-10-04)
 

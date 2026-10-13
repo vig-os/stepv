@@ -4,6 +4,7 @@
 //! kernel against `tests/data/`.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -622,4 +623,247 @@ fn a_later_run_killed_after_its_outline_keeps_the_box() {
         cache::load_outline_in(&h.cache_dir(), &input).unwrap().bbox,
         bbox
     );
+}
+
+/// The most a `view` test lets the viewer process hold (#86): its kernel
+/// has `--memory-mb`, the viewer itself has no cap of its own.
+const VIEW_FOOTPRINT_CAP: u64 = 2 << 30;
+/// How long a `view` test may run before the watchdog kills it: well past
+/// the `--timeout` `Home::view` gives stepv, which fires first.
+const VIEW_DEADLINE: Duration = Duration::from_secs(120);
+
+impl Home {
+    /// `stepv view <input>` with `args`, held to what a test may cost (#86):
+    /// the kernel under `--memory-mb 1024`, stepv's own `--timeout 30` unless
+    /// `args` gives another, the screenshot hook set so a window that opens
+    /// closes itself, and the viewer's own footprint polled.
+    ///
+    /// The watchdog is the backstop: past [`VIEW_FOOTPRINT_CAP`] or
+    /// [`VIEW_DEADLINE`] it kills the run's whole process group, not stepv
+    /// alone. The kernel's caps are stepv's own sampler, so a kernel orphaned
+    /// by killing stepv would run on uncapped. However the run ends, nothing
+    /// of its group may outlive it.
+    fn view(&self, input: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value) {
+        self.view_within(input, args, env, VIEW_DEADLINE)
+    }
+
+    /// [`Home::view`] with the watchdog's `deadline`.
+    fn view_within(
+        &self,
+        input: &Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+        deadline: Duration,
+    ) -> (i32, Value) {
+        let shot = self.0.join("shot.png");
+        // A later `--timeout` in `args` wins.
+        let all = [
+            &["view", input.to_str().unwrap(), "--timeout", "30"][..],
+            args,
+            &["--memory-mb", "1024"],
+        ]
+        .concat();
+        let env = [env, &[("STEPV_VIEW_SCREENSHOT", shot.to_str().unwrap())]].concat();
+        let mut child = self
+            .command(&all, &env)
+            .stdout(std::process::Stdio::piped())
+            // Its own group, the kernel included: one kill takes them all.
+            .process_group(0)
+            .spawn()
+            .expect("spawn stepv view");
+        let group = child.id() as libc::pid_t;
+        let start = Instant::now();
+        let fired = loop {
+            if child.try_wait().unwrap().is_some() {
+                break None;
+            }
+            let fp = occt::footprint(child.id()).unwrap_or(0);
+            if fp > VIEW_FOOTPRINT_CAP {
+                break Some(format!(
+                    "footprint {fp} bytes over the cap of {VIEW_FOOTPRINT_CAP}"
+                ));
+            }
+            if start.elapsed() > deadline {
+                break Some(format!(
+                    "{:.1} s elapsed, past the deadline of {} s",
+                    start.elapsed().as_secs_f64(),
+                    deadline.as_secs()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        if fired.is_some() {
+            // SAFETY: a signal to the group this test spawned.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
+        let out = child.wait_with_output().unwrap();
+        // Every member gone, the kernel included (stepv reaps it; one it
+        // left would be reparented and reaped once dead).
+        let gone = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the group has members.
+        while unsafe { libc::killpg(group, 0) } == 0 {
+            if Instant::now() > gone {
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+                panic!("a process of stepv view's group outlived it");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(why) = fired {
+            panic!("stepv view and its group killed: {why}");
+        }
+        result(&out)
+    }
+}
+
+// The tests that start `view` past its session check need a window session
+// (#84): nix's build sandbox has none, so they are ignored there, and
+// `just view-test` runs them (`--ignored`) on the macOS runner and under
+// Xvfb in the Linux viewer job.
+
+#[test]
+fn a_viewer_without_a_window_session_fails_before_the_kernel() {
+    let h = Home::new("viewnosession");
+    // A kernel that leaves a mark if it is ever started.
+    let mark = h.0.join("kernel-ran");
+    let k = script(
+        &h,
+        "marking-kernel",
+        &format!("touch '{}'\nexit 3", mark.display()),
+    );
+    let mut cmd = h.command(
+        &[
+            "view",
+            data("assembly.step").to_str().unwrap(),
+            "--memory-mb",
+            "1024",
+        ],
+        &[
+            ("STEPV_OCCT", k.to_str().unwrap()),
+            ("STEPV_VIEW_TEST_NO_SESSION", "1"),
+            // A window that opens anyway closes itself.
+            (
+                "STEPV_VIEW_SCREENSHOT",
+                h.0.join("shot.png").to_str().unwrap(),
+            ),
+        ],
+    );
+    // Linux's real check, too: no display at all.
+    cmd.env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY");
+    let (code, j) = result(&cmd.output().expect("spawn stepv view"));
+    assert_eq!((code, j["status"].as_str()), (3, Some("error")), "{j}");
+    let e = j["error"].as_str().unwrap();
+    assert!(e.starts_with("no window session: "), "{j}");
+    assert!(!mark.exists(), "the kernel ran before the session check");
+    // The report is the whole one, header metadata included.
+    assert_eq!(
+        j["info"],
+        serde_json::to_value(stepv::header::read(&data("assembly.step"))).unwrap()
+    );
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn the_view_watchdog_kills_the_kernel_too() {
+    let h = Home::new("viewdog");
+    // A kernel that never finishes, and says who it is: stepv waits on it
+    // for its 30 s timeout, past the watchdog's 2 s.
+    let pidfile = h.0.join("kernel.pid");
+    let hang = script(
+        &h,
+        "hang-kernel",
+        &format!("echo $$ > '{}'\nexec sleep 60", pidfile.display()),
+    );
+    let run = std::panic::catch_unwind(|| {
+        h.view_within(
+            &data("assembly.step"),
+            &[],
+            &[("STEPV_OCCT", hang.to_str().unwrap())],
+            Duration::from_secs(2),
+        )
+    });
+    let why = run.expect_err("the watchdog did not fire");
+    let why = why
+        .downcast_ref::<String>()
+        .map_or("", String::as_str)
+        .to_owned();
+    assert!(why.contains("past the deadline of 2 s"), "{why}");
+    let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+        .expect("the kernel never started")
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only asks whether the process exists.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    assert!(!alive, "the kernel {pid} outlived the watchdog");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_viewer_killed_after_its_outline_leaves_the_artifact() {
+    let k = kernel();
+    let h = Home::new("view");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    // The snapshot the run must key on, taken before it starts.
+    let before = cache::FileId::of(&input).unwrap();
+    // The kernel stalls 30 s once the outline is out; the 10 s cap kills it
+    // there, before the viewer would open a window. A viewer whose run was
+    // not streamed opens one, and `Home::view` closes it again.
+    let (code, j) = h.view(
+        &input,
+        &["--timeout", "10"],
+        &[("STEPV_OCCT_TEST_STALL_MS", "30000")],
+    );
+    assert_eq!((code, j["status"].as_str()), (4, Some("timeout")), "{j}");
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("the viewer's run left no outline artifact");
+    let outline = occt::outline(&k, &input, occt::Limits::DEFAULT).unwrap();
+    assert_eq!((&a.tree, a.leaves), (&outline.tree, outline.leaves));
+    assert_eq!(a.header, stepv::header::read(&input));
+    assert_eq!(a.bbox, None, "a box from a run that did not complete");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_viewer_with_no_cache_leaves_no_artifact() {
+    let k = kernel();
+    let h = Home::new("viewnocache");
+    let input = data("assembly.step");
+    // The real kernel, then a crash: a streamed run would have its outline,
+    // and no run gets as far as a window.
+    let crash = script(
+        &h,
+        "crash-kernel",
+        &format!("'{}' \"$@\"\nexit 1", k.display()),
+    );
+    let env = [("STEPV_OCCT", crash.to_str().unwrap())];
+    let (code, j) = h.view(&input, &["--no-cache"], &env);
+    assert_eq!((code, j["status"].as_str()), (3, Some("crashed")), "{j}");
+    assert!(h.entries("json").is_empty(), "--no-cache wrote an artifact");
+    // The same run, cached: the outline is left. Without this, the first
+    // half could pass with a crash that comes before the outline.
+    let (code, j) = h.view(&input, &[], &env);
+    assert_eq!(code, 3, "{j}");
+    assert_eq!(h.entries("json").len(), 1, "a cached view left no artifact");
+}
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_complete_view_adds_the_box() {
+    kernel();
+    let h = Home::new("viewbox");
+    let input = h.0.join("m.step");
+    std::fs::copy(data("assembly.step"), &input).unwrap();
+    let before = cache::FileId::of(&input).unwrap();
+    let (code, j) = h.view(&input, &[], &[]);
+    // The box is stored once the mesh has decoded, before the window opens:
+    // whether a window can open here (a headless runner) does not matter.
+    assert!(
+        j["status"] == "ok" || (code == 3 && j["status"] == "error"),
+        "{j}"
+    );
+    let bbox: [f64; 6] = serde_json::from_value(j["kernel"]["bbox"].clone()).expect("a box");
+    let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
+        .expect("the viewer's run left no outline artifact");
+    assert_eq!(a.bbox, Some(bbox));
 }

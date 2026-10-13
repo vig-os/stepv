@@ -203,11 +203,13 @@ capi-tripwire:
     scripts/check-capi-deps.sh target/release/libstepv_capi.a
 
 # #28: needs a display; set STEPV_REQUIRE_GPU=1 where a GPU must be found.
-# The GPU viewer's renderer tests on the real kernel, then real windows
+# The GPU viewer's renderer tests on the real kernel, tests/cache.rs's tests
+# that need a window session (#84), then real windows
 [group('viewer')]
 view-test *shots: kernel
     cargo test --lib view::
     cargo test --test view
+    scripts/test-window-tests.sh
     cargo build --release --bin stepv
     scripts/test-viewer.sh target/release/stepv {{ shots }}
 

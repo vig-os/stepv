@@ -3,6 +3,8 @@
 # the kernel and stepv in a Debian container, then on Mesa's lavapipe (a
 # Vulkan driver on the CPU) and Xvfb:
 #   - the GPU renderer's tests, required to find an adapter (STEPV_REQUIRE_GPU);
+#   - scripts/test-window-tests.sh: tests/cache.rs's tests that need a window
+#     session (#84), ignored in nix's build sandbox, on Xvfb;
 #   - scripts/test-viewer.sh: real windows, light and dark, --software, the
 #     fallbacks, a click, and --frames on every fixture; Xvfb presents, so the
 #     full window is required (STEPV_VIEW_REQUIRE_WINDOW);
@@ -48,6 +50,8 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
     cargo test -q --release --test view
     # The measurement server (#33) under Landlock + seccomp.
     cargo test -q --release --test measure
+    # The tests that need a window session (#84), on Xvfb.
+    xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-window-tests.sh -q --release
     xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-viewer.sh /build/target/release/stepv \
       "$([ -d /shots ] && echo /shots/linux)"
     scripts/check-size.sh /build/target/release/stepv 24
