@@ -37,6 +37,10 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
     private let lock = NSLock()
     private var child: pid_t = 0
     private var used = false
+    /// The events this run forwarded: its reply says how many, so the
+    /// client can wait for any still in flight (XPC does not order them
+    /// against the reply). Written on the run's thread alone.
+    private var eventsSent = 0
     private var cancelled: UInt64?
 
     /// The connection went: kill the kernel, if one runs.
@@ -48,12 +52,12 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
 
     func run(_ file: FileHandle, format: String, linearRel: Double, angularDeg: Double,
              deadlineMs: Int, memoryMB: Int,
-             reply: @escaping (StepvRunOutcome, String, Data?, FileHandle?) -> Void) {
+             reply: @escaping (StepvRunOutcome, String, Data?, FileHandle?, Int) -> Void) {
         lock.lock(); let first = !used; used = true; lock.unlock()
-        guard first else { return reply(.refused, "one run per connection", nil, nil) }
+        guard first else { return reply(.refused, "one run per connection", nil, nil, 0) }
         if let why = Supervisor.invalid(format: format, linearRel: linearRel, angularDeg: angularDeg,
                                         deadlineMs: deadlineMs, memoryMB: memoryMB) {
-            return reply(.refused, why, nil, nil)
+            return reply(.refused, why, nil, nil, 0)
         }
         servedLock.lock(); served += 1; let n = served; servedLock.unlock()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -61,7 +65,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
                 file, n: n, format: format, linearRel: linearRel, angularDeg: angularDeg,
                 deadlineMs: deadlineMs, memoryMB: memoryMB)
             withExtendedLifetime(file) {}
-            reply(outcome, detail, summary, mesh)
+            reply(outcome, detail, summary, mesh, self.eventsSent)
         }
     }
 
@@ -84,11 +88,16 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         -> (StepvRunOutcome, String, Data?, FileHandle?) {
         let tag = "run #\(n) (service pid \(getpid()), up \(Int(elapsedMs(since: started))) ms)"
         let kernel = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/stepv-occt").path
-        // The mesh lands in this service's container; it goes back as an
-        // open, unlinked file, so no large XPC message carries it.
-        let meshPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("stepv-\(UUID().uuidString).msh").path
-        defer { unlink(meshPath) }
+        // The run's files live in a directory of its own in this service's
+        // container: the mesh, which goes back as an open, unlinked file (no
+        // large XPC message carries it), and the kernel's $TMPDIR (#102's
+        // IGES copy). Its lock is held for the whole run, so another
+        // instance's start-up sweep (sweepStaleRuns) leaves it alone.
+        guard let run = RunDirectory() else {
+            return (.refused, "\(tag): cannot create the run's directory: \(String(cString: strerror(errno)))", nil, nil)
+        }
+        defer { run.remove() }
+        let meshPath = run.path + "/mesh.msh"
         let argv = [kernel, "/dev/fd/3", "--format", format, "--stream", "--mesh", meshPath,
                     "--linear-rel", "\(linearRel)", "--angular-deg", "\(angularDeg)", "--lifeline", "4"]
         // The file's descriptor, moved clear of 0-3: XPC hands it over as
@@ -122,7 +131,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
-        let env = ["PATH=/usr/bin:/bin", "TMPDIR=\(NSTemporaryDirectory())"]
+        let env = ["PATH=/usr/bin:/bin", "TMPDIR=\(run.path)"]
         let cargv: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) } + [nil]
         let cenv: [UnsafeMutablePointer<CChar>?] = env.map { strdup($0) } + [nil]
         defer { (cargv + cenv).forEach { free($0) } }
@@ -170,6 +179,7 @@ final class Supervisor: NSObject, StepvSupervisorProtocol {
                                 if frame.kind == StepvEvent.done { summary = frame.payload; continue }
                                 (connection?.remoteObjectProxy as? StepvRunObserver)?
                                     .event(Int(frame.kind), payload: frame.payload)
+                                eventsSent += 1
                             }
                             // A break after good frames in one chunk: now,
                             // not at the next read.
@@ -261,15 +271,66 @@ final class Delegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
-// What runs left behind: a service that died mid-run never unlinked its
-// kernel's mesh, and a teardown that kills the kernel's whole job (launchd)
-// also kills the child that would have removed its IGES copy (#102,
-// stepv-input-*). None is in use yet: this service's runs start after this.
-if let tmp = try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()) {
-    for f in tmp where (f.hasPrefix("stepv-") && f.hasSuffix(".msh")) || f.hasPrefix("stepv-input-") {
-        unlink(NSTemporaryDirectory() + "/" + f)
+/// One run's directory, stepv-run-<uuid> in this service's tmp, and its
+/// lock (flock, LOCK_EX), held from creation until remove(). Another
+/// instance of this service can share the container, as two client
+/// processes each start one: the lock is what tells it the run is live.
+/// A process that dies releases its locks, so a dead run's is free.
+final class RunDirectory {
+    let path: String
+    private let lock: Int32
+
+    init?() {
+        path = NSTemporaryDirectory() + "/stepv-run-" + UUID().uuidString
+        guard mkdir(path, 0o700) == 0 else { return nil }
+        // Created already locked (O_EXLOCK): no moment where a sweep could
+        // take a new run's lock.
+        lock = open(path + "/lock", O_RDWR | O_CREAT | O_EXCL | O_EXLOCK | O_CLOEXEC, 0o600)
+        guard lock >= 0 else {
+            rmdir(path)
+            return nil
+        }
+    }
+
+    /// Everything in it, then it; the lock goes last.
+    func remove() {
+        RunDirectory.empty(path)
+        close(lock)
+    }
+
+    static func empty(_ path: String) {
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? [] where f != "lock" {
+            unlink(path + "/" + f)
+        }
+        unlink(path + "/lock")
+        rmdir(path)
     }
 }
+
+/// Removes what dead runs left behind: a service killed mid-run never
+/// removed its run's directory, and a teardown that kills the kernel's
+/// whole job (launchd) also kills the child that would have removed its
+/// IGES copy (#102). Only a directory whose lock is free is a dead run's;
+/// one whose lock is held belongs to a live run of another instance. A
+/// directory without its lock yet is being created: left alone. Returns
+/// (swept, kept).
+func sweepStaleRuns() -> (Int, Int) {
+    var swept = 0, kept = 0
+    let tmp = NSTemporaryDirectory()
+    for f in (try? FileManager.default.contentsOfDirectory(atPath: tmp)) ?? [] where f.hasPrefix("stepv-run-") {
+        let dir = tmp + "/" + f
+        let fd = open(dir + "/lock", O_RDWR | O_CLOEXEC)
+        guard fd >= 0 else { kept += 1; continue }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { kept += 1; continue }
+        RunDirectory.empty(dir)
+        swept += 1
+    }
+    return (swept, kept)
+}
+
+let (swept, kept) = sweepStaleRuns()
+log.notice("service pid \(getpid()) started: swept \(swept) dead run(s), kept \(kept) live")
 
 let delegate = Delegate()
 let listener = NSXPCListener.service()

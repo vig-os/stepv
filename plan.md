@@ -1579,6 +1579,10 @@ memory is freed at once. Two designs failed before this one:
 - The service forwards TREE and PROGRESS as the kernel writes them. It replies with the summary
   and the mesh, which it writes in its container and hands back as an open, unlinked file, so no
   large XPC message carries it.
+- **Events and the reply:** XPC doesn't order the events (messages to the extension's exported
+  object) against the reply block, which can arrive first. Review measured this at 4 of 200
+  stand-in runs, with the last PROGRESS dropped. So the reply carries how many events were
+  sent, and the client completes only once it has received that many.
 - The protocol is in `macos/Shared/StepvSupervisor.swift`.
 
 - **One run per connection; the connection is the cancel.** When the extension invalidates the
@@ -1607,14 +1611,22 @@ memory is freed at once. Two designs failed before this one:
     service's alone (close-on-exec, and `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps it from other
     kernels).
   - A thread in the kernel blocks in `read(4)`. When the service dies, by any means, the
-    write end closes, the read returns, and the kernel `_exit`s.
+    write end closes, the read returns, and the kernel `_exit`s with status 4. That status is
+    its own: 3 is a failure its summary explains, and a lifeline exit writes no summary.
   - **Why a pipe and not kqueue `EVFILT_PROC NOTE_EXIT` on the parent pid:**
     - it is the same on Linux;
     - it needs no sandbox right to watch another process;
     - it has no race: if the writer is already gone, the first read returns EOF;
     - it costs one blocked thread and nothing per frame.
-  - **Meshes:** each service sweeps leftover `stepv-*.msh` files from its tmp at startup, so a
-    killed service's mesh goes on its next start. Every other way out unlinks the mesh.
+  - **Run files:** each run's files are in a directory of its own, `stepv-run-<uuid>`, in the
+    service's tmp: the mesh, and the kernel's `$TMPDIR`, where #102's IGES copy goes.
+    - Its `lock` is created already locked (`O_EXLOCK`) and held until the run removes the
+      directory. A process that dies releases its locks.
+    - At start-up each service sweeps only the run directories whose lock it can take, so only
+      dead runs' are swept: a killed service's, or one whose kernel's job a teardown killed
+      along with the IGES copy's remover.
+    - Two client processes start two instances of the service in one container. A sweep that
+      went by file name alone removed the other instance's live mesh (review).
 - **The read loop drains:** the kernel's exit doesn't end the reading. What it wrote before
   exiting is read to the end of the pipe, under the deadline, and only a stream that ends with
   DONE is a finished run. Before this, frames still in the pipe at the exit could be dropped,
@@ -1667,7 +1679,10 @@ memory is freed at once. Two designs failed before this one:
     - cancel (signal 9);
     - 11 malformed or unbounded requests, all refused;
     - from the service's log, the kills, and that each of the 9 kernels it spawned is gone;
-    - no mesh left in the service's container.
+    - a dead run's directory, planted with a free lock, swept by the next instance;
+    - a live run that finishes with its mesh while a second instance, started beside it, sweeps
+      (`kept 1 live`);
+    - no run directory left in the service's container.
   - A second copy puts `macos/Tests/KernelStandIn` in place of the kernel, to hold the service
     to streams the real kernel doesn't write on cue:
     - frames then an immediate exit;
@@ -1676,6 +1691,8 @@ memory is freed at once. Two designs failed before this one:
       summary;
     - no output, and half a frame, both crashes;
     - stdout closed with no exit, ended by the deadline.
+  - `STANDIN_ROUNDS=500 scripts/ql-e2e/supervisor.sh` repeats the stand-in step: events must
+    all reach the client before its completion, every time.
   - `tests/fd.rs`: the kernel exits within 1 s of its lifeline closing (the control, without
     a lifeline, lives its 5 s).
   - `macos/Tests/FramesTests`: a real kernel stream decodes the same in 1-, 7-, 9- and

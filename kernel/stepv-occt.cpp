@@ -32,6 +32,9 @@
 namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 2;
+// The lifeline closed (--lifeline): the caller is gone, and no summary was
+// written. Not 3, which is a clean failure its summary explains.
+constexpr int kExitLifeline = 4;
 const char* const kUsage =
     "usage: stepv-occt <input> [--format step|iges|brep] [--mesh <out>]\n"
     "                  [--topology <out.json>] [--edges] [--linear-rel <f>]\n"
@@ -50,7 +53,9 @@ const char* const kUsage =
     "           shape transfer, as one JSON line (outline.h); no outputs\n"
     "  --lifeline N  descriptor N is a pipe's read end whose writer is the\n"
     "           caller: when it closes (the caller exited, or let go), this\n"
-    "           process exits at once (#64)\n"
+    "           process exits at once, with status 4 and no summary (#64)\n"
+    "exit status: 0 geometry, 3 a failure the summary explains, 2 usage,\n"
+    "  4 the lifeline closed\n"
     "environment:\n"
     "  STEPV_OCCT_FACE_BUDGET_MS  time one face's healing may take, in ms\n"
     "           (default 2000); past it the face is drawn as its outline\n";
@@ -286,7 +291,7 @@ int main(int argc, char** argv) {
             char c;
             while (true) {
                 const ssize_t n = read(lifeline, &c, 1);
-                if (n == 0 || (n < 0 && errno != EINTR)) _exit(3);
+                if (n == 0 || (n < 0 && errno != EINTR)) _exit(kExitLifeline);
             }
         }).detach();
     }

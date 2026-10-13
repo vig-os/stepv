@@ -7,6 +7,9 @@
 //   supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step>
 //   supervisor-probe <service> hold <slow.step>    one run, then wait, for
 //                    the caller to kill the service under it
+//   supervisor-probe <service> live <slow.step>    one run that must finish
+//                    with its mesh, while the caller starts a second
+//                    instance of the service, whose sweep must spare it
 //   supervisor-probe <service> standin <frames> <late> <silent> <truncated> <noexit>
 //                    against KernelStandIn in place of the kernel
 //
@@ -16,7 +19,7 @@
 import Foundation
 
 let a = CommandLine.arguments
-let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> | hold <slow.step> | standin <frames> <late> <silent> <truncated> <noexit>"
+let usage = "usage: supervisor-probe <service> <small.step> <box.igs> <box.brep> <slow.step> | hold <slow.step> | live <slow.step> | standin <frames> <late> <silent> <truncated> <noexit>"
 guard a.count >= 3 else { print(usage); exit(2) }
 let service = a[1]
 var failed = false
@@ -68,6 +71,12 @@ case ("hold", 4):
     let held = Probe(a[3], "step", deadlineMs: 60_000)
     print("hold: \(outcomeLine(held.wait(60)))")
     exit(0)
+case ("live", 4):
+    let p = Probe(a[3], "step", deadlineMs: 60_000)
+    let r = p.wait(60)
+    check(r?.outcome == .done && r?.mesh != nil,
+          "a live run beside a second instance's sweep: \(meshLine(r))")
+    exit(failed ? 1 : 0)
 case ("standin", 8):
     for (path, what) in [(a[3], "frames then exit"), (a[4], "exits before its frames arrive")] {
         let p = Probe(path, "step")

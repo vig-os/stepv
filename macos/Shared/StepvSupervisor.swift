@@ -19,8 +19,10 @@
 import Foundation
 
 /// The extension's side of a run: the service calls it with each TREE and
-/// PROGRESS frame's payload as the kernel writes it, in order, and before
-/// the run's reply.
+/// PROGRESS frame's payload as the kernel writes it, in order. XPC does not
+/// order these messages against the run's reply, which can arrive first:
+/// the reply says how many events were sent, and StepvSupervisorRun
+/// completes only once it has them all.
 @objc(StepvRunObserver) protocol StepvRunObserver {
     func event(_ kind: Int, payload: Data)
 }
@@ -43,11 +45,12 @@ import Foundation
     /// Runs the kernel on `file` read as `format` ("step", "iges" or
     /// "brep"), at `linearRel` (0 to 1] and `angularDeg` (0 to 180].
     /// `deadlineMs` (1 to 600 000) and `memoryMB` (1 to 2^20) bound it, and
-    /// are required: a request out of range is refused, unrun. The reply carries the summary (the DONE frame's
-    /// JSON) and, on success, the STEPVMSH v3 mesh as an unlinked file.
+    /// are required: a request out of range is refused, unrun. The reply
+    /// carries the summary (the DONE frame's JSON), on success the STEPVMSH
+    /// v3 mesh as an unlinked file, and how many events were sent before it.
     func run(_ file: FileHandle, format: String, linearRel: Double, angularDeg: Double,
              deadlineMs: Int, memoryMB: Int,
-             reply: @escaping (StepvRunOutcome, String, Data?, FileHandle?) -> Void)
+             reply: @escaping (StepvRunOutcome, String, Data?, FileHandle?, Int) -> Void)
 }
 
 /// The XPC interfaces, both ways, shared by the two ends.
@@ -66,13 +69,16 @@ struct StepvRunResult {
 
 /// A run through the calling bundle's supervisor service, on a connection
 /// of its own. `onEvent` gets each TREE and PROGRESS payload, `completion`
-/// the result, each on an XPC queue; `completion` is called once, unless
-/// the run is cancelled first.
+/// the result, each on an XPC queue; `completion` is called once, after
+/// every event the service sent, unless the run is cancelled first.
 final class StepvSupervisorRun: NSObject, StepvRunObserver {
     private let connection: NSXPCConnection
     private let onEvent: (UInt8, Data) -> Void
     private let lock = NSLock()
     private var completion: ((StepvRunResult) -> Void)?
+    /// The reply, held until the events it counts are delivered.
+    private var replied: (result: StepvRunResult, events: Int)?
+    private var delivered = 0
 
     /// The service embedded in the calling bundle: "<bundle id>.supervisor".
     static var serviceName: String { (Bundle.main.bundleIdentifier ?? "") + ".supervisor" }
@@ -109,11 +115,11 @@ final class StepvSupervisorRun: NSObject, StepvRunObserver {
             self?.finish(StepvRunResult(outcome: .crashed, detail: "XPC: \(error.localizedDescription)"))
         } as? StepvSupervisorProtocol
         proxy?.run(handle, format: format, linearRel: linearRel, angularDeg: angularDeg,
-                   deadlineMs: deadlineMs, memoryMB: memoryMB) { [weak self] outcome, detail, summary, mesh in
+                   deadlineMs: deadlineMs, memoryMB: memoryMB) { [weak self] outcome, detail, summary, mesh, events in
             let json = summary.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
             let bytes = mesh.flatMap { try? $0.readToEnd() }
             try? mesh?.close()
-            self?.finish(StepvRunResult(outcome: outcome, detail: detail, summary: json, mesh: bytes))
+            self?.replied(StepvRunResult(outcome: outcome, detail: detail, summary: json, mesh: bytes), events: events)
         }
     }
 
@@ -126,7 +132,23 @@ final class StepvSupervisorRun: NSObject, StepvRunObserver {
 
     func event(_ kind: Int, payload: Data) {
         lock.lock(); let live = completion != nil; lock.unlock()
-        if live { onEvent(UInt8(truncatingIfNeeded: kind), payload) }
+        guard live else { return }
+        onEvent(UInt8(truncatingIfNeeded: kind), payload)
+        lock.lock()
+        delivered += 1
+        let ready = replied.flatMap { delivered >= $0.events ? $0.result : nil }
+        lock.unlock()
+        if let ready { finish(ready) }
+    }
+
+    /// The reply: complete now if its events are all delivered, else when
+    /// the last of them is.
+    private func replied(_ result: StepvRunResult, events: Int) {
+        lock.lock()
+        replied = (result, events)
+        let ready = delivered >= events
+        lock.unlock()
+        if ready { finish(result) }
     }
 
     private func finish(_ result: StepvRunResult) {

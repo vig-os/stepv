@@ -121,14 +121,21 @@ else
 fi
 wait "$holder" 2>/dev/null
 
-# 2. The probe proper, on a fresh service, which sweeps what runs left
-#    behind: step 1's mesh, and stale ones planted here, a mesh and an IGES
-#    copy whose remover a teardown killed too (#102).
-mkdir -p "$container_tmp"
-: >"$container_tmp/stepv-planted.msh"
-: >"$container_tmp/stepv-input-planted.igs"
+# 2. The probe proper, on a fresh service, which sweeps what dead runs left
+#    behind: step 1's run directory, and one planted here, with its lock
+#    free, a mesh and an IGES copy whose remover a teardown killed too (#102).
+mkdir -p "$container_tmp/stepv-run-planted"
+: >"$container_tmp/stepv-run-planted/lock"
+: >"$container_tmp/stepv-run-planted/mesh.msh"
+: >"$container_tmp/stepv-run-planted/stepv-input-planted.igs"
 start=$(date '+%Y-%m-%d %H:%M:%S')
 timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step} || rc=1
+if await_log 'started: swept ([2-9]|[1-9][0-9]+) dead run' 20; then
+  echo "ok: logged: $(grep -E -m1 'started: swept' "$tmp/log.txt")"
+else
+  echo "FAIL: the fresh service did not sweep step 1's and the planted dead runs"
+  rc=1
+fi
 
 # 3. From the service's own log: it killed the deadline run and the capped
 #    ones, and reaped them; the cancelled one died of its SIGKILL (signal 9,
@@ -163,13 +170,54 @@ codesign --force --sign - --identifier ch.exoma.stepv.kernel \
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$sxpc" 2>/dev/null \
   || fail "signing the stand-in's service"
 for m in frames late silent truncated noexit; do echo "$m" >"$tmp/files/$m.step"; done
-timeout 120 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
-  "$service" standin "$tmp"/files/{frames,late,silent,truncated,noexit}.step || rc=1
+# STANDIN_ROUNDS=N repeats it N times (ordering races show up as rare
+# failures: events must all reach the client before its completion).
+rounds=${STANDIN_ROUNDS:-1}
+failed_rounds=0
+for _ in $(seq "$rounds"); do
+  out=$(timeout 120 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+    "$service" standin "$tmp"/files/{frames,late,silent,truncated,noexit}.step) \
+    || { failed_rounds=$((failed_rounds + 1)); grep FAIL <<<"$out"; }
+done
+if [ "$rounds" -eq 1 ]; then
+  echo "$out"
+else
+  echo "stand-in rounds: $rounds, failed: $failed_rounds"
+fi
+[ "$failed_rounds" -eq 0 ] || rc=1
 
-# 5. Nothing left in the container: meshes unlinked on every way out, and
-#    the killed service's and the planted ones swept.
-left=$(find "$container_tmp" \( -name 'stepv-*.msh' -o -name 'stepv-input-*' \) 2>/dev/null)
-if [ -z "$left" ]; then echo "ok: no mesh or input copy left in $container_tmp"; else echo "FAIL: left in $container_tmp: $left"; rc=1; fi
+# 4b. A live run survives another instance's sweep. Two client processes
+#     each start their own instance of the service, in one container: B's
+#     start-up sweep must keep A's running run, whose mesh then arrives.
+start=$(date '+%Y-%m-%d %H:%M:%S')
+"$probe" "$service" live "$tmp/files/slow.step" >"$tmp/live.txt" 2>&1 &
+live=$!
+if await_log 'kernel pid [0-9]+ spawned' 20; then
+  apid=$(grep -E -m1 'kernel pid [0-9]+ spawned' "$tmp/log.txt" | sed -E 's/.*service pid ([0-9]+).*/\1/')
+  timeout 60 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
+    "$service" live "$tmp/files/frames.step" >/dev/null 2>&1
+  log_since >"$tmp/log.txt"
+  bline=$(grep -E 'started: swept' "$tmp/log.txt" | grep -v "service pid $apid " | head -1)
+  if [ -z "$bline" ]; then
+    echo "FAIL: no second instance of the service started beside pid $apid"
+    rc=1
+  elif grep -qE 'kept [1-9]' <<<"$bline"; then
+    echo "ok: a second instance beside pid $apid: ${bline#*: }"
+  else
+    echo "FAIL: the second instance kept no live run: $bline"
+    rc=1
+  fi
+else
+  echo "FAIL: the live run's kernel never started"
+  rc=1
+fi
+wait "$live" || rc=1
+cat "$tmp/live.txt"
+
+# 5. Nothing left in the container: each run's directory removed when it
+#    ends, and the killed service's and the planted one swept.
+left=$(find "$container_tmp" -maxdepth 1 -name 'stepv-*' 2>/dev/null)
+if [ -z "$left" ]; then echo "ok: no run directory left in $container_tmp"; else echo "FAIL: left in $container_tmp: $left"; rc=1; fi
 
 [ $rc -eq 0 ] && echo "supervisor: all checks passed" || echo "supervisor: FAILURES"
 exit $rc

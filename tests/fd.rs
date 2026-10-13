@@ -354,7 +354,7 @@ fn the_kernel_exits_when_its_lifeline_closes() {
                 lived < std::time::Duration::from_secs(1),
                 "the kernel outlived its lifeline by {lived:?}"
             );
-            assert_eq!(status.code(), Some(3), "{status}");
+            assert_eq!(status.code(), Some(4), "{status}");
         } else {
             assert!(
                 lived > std::time::Duration::from_secs(3),
