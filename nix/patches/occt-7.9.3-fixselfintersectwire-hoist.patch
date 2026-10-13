@@ -1,0 +1,38 @@
+--- a/src/ShapeFix/ShapeFix_IntersectionTool.cxx
++++ b/src/ShapeFix/ShapeFix_IntersectionTool.cxx
+@@ -10,6 +10,10 @@
+ //
+ // Alternatively, this file may be used under the terms of Open CASCADE
+ // commercial license or contractual agreement.
++//
++// Modified by stepv (https://github.com/vig-os/stepv), 2026-10-12:
++// FixSelfIntersectWire() fetches edge1 once per num1 instead of on every inner
++// iteration (stepv#74). Patch: nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch.
+ 
+ #include <BndLib_Add2dCurve.hxx>
+ #include <BRep_Builder.hxx>
+@@ -943,12 +947,14 @@
+   for (Standard_Integer num1 = 1; num1 < sewd->NbEdges() && NbSplit < 30; num1++)
+   {
+     // for each edge from first wire
++    // Fetched once per num1: NCollection_Sequence caches only the last accessed position,
++    // so fetching Edge(num1) and Edge(num2) alternately in the inner loop is O(n) per access.
++    TopoDS_Edge edge1 = sewd->Edge(num1);
+     for (Standard_Integer num2 = num1 + 2; num2 <= sewd->NbEdges() && NbSplit < 30; num2++)
+     {
+       // for each edge from second wire
+       if (num1 == 1 && num2 == sewd->NbEdges())
+         continue;
+-      TopoDS_Edge edge1 = sewd->Edge(num1);
+       TopoDS_Edge edge2 = sewd->Edge(num2);
+       if (edge1.IsSame(edge2))
+         continue;
+@@ -1622,6 +1628,8 @@
+                 sewd->Remove(numseg2);
+                 sewd->Remove(numseg1);
+                 NbRemoved = NbRemoved + 2;
++                // the edge at num1 was split and/or removed and the loop goes on: re-fetch it
++                edge1 = sewd->Edge(num1);
+                 // num1--;
+                 // break;
+               }

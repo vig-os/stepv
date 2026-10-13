@@ -1756,6 +1756,94 @@ memory is freed at once. Two designs failed before this one:
   requests through the real extensions. The deadline values and their reasoning will be added
   here.
 
+### #74 OCCT patch (2026-10-12)
+
+The healing budget's measurement left most of Ultimaker 3's transfer in OCCT's wire self-intersection check. The
+cause is one loop. `ShapeFix_IntersectionTool::FixSelfIntersectWire` fetched `edge1 =
+sewd->Edge(num1)` inside its inner `num2` loop. `NCollection_BaseSequence::Find` caches only the
+last position, so fetching `num1` and `num2` in turn walked the sequence back and forth on every
+pair. The function was O(n³) in a wire's edges.
+
+- **The patch:** `nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch`. `flake.nix` applies
+  it to nixpkgs' OCCT 7.9.3 (`occt`). The dev shell (`just kernel`, the macOS app's dylibs) and
+  the kernel derivation (the Linux tarball, `nix flake check`) both link that OCCT.
+  - It fetches `edge1` once per `num1`. It fetches it again after the big-segment branch's
+    `Remove(numseg2); Remove(numseg1)`, the one branch that changes the wire at `num1` and does
+    not leave the inner loop (its `num1--; break;` is commented out). Without that re-fetch the
+    hoist is wrong.
+  - A patch that does not apply fails the build. A different OCCT version fails evaluation, so a
+    nixpkgs bump must re-check the patch.
+  - The modified file carries a dated notice. NOTICE describes the change and its licence.
+- **Is `Edge(num1)` in range after the removals?** Yes, always, so it needs no guard.
+  `numseg2 >= num2 + dnum1 >= num1 + 2 + dnum1` and `numseg1 <= num1 + dnum1`, so after both
+  removals `NbEdges() >= num1 + dnum1 >= num1`. The original fetched only on the next iteration,
+  after checking `num2 <= NbEdges()`. The early fetch reads the same edge and changes nothing but
+  the sequence's position cache.
+- **The other changes to the wire leave position `num1` alone:**
+  - splits at `num2` (`SplitEdge1`/`2`, `FindVertAndSplitEdge`);
+  - `UnionVertexes`, which writes `num2 ± 1`. That is never `num1`, because `num2 >= num1 + 2` and
+    the pair `(1, NbEdges)` is skipped;
+  - `CutEdge`, which changes the shared `TShape` in place.
+
+  Every other split at `num1` leaves the loop.
+- **Evidence:**
+  - **The gate (issue #74):** 214k fuzzed wires, 173,459 real healing calls on the corpus and
+    37,339 on Ultimaker, all with 0 differences. A hoist without the re-fetch differs on about
+    56k of the fuzzed wires.
+  - **Here:** the corpus summaries are identical, Ultimaker's output matches, and the timings
+    are below.
+- **Corpus:** `corpus-diff.py`, comparing `origin/main`'s kernel with this branch's, found 0 of
+  401 files differ.
+- **Measured on Ultimaker 3:** two runs each, one after the other, on sage.
+
+  | | before | after |
+  | --- | ---: | ---: |
+  | read | 4.9 s, 4.8 s | 4.9 s, 4.8 s |
+  | transfer | 36.4 s, 35.0 s | 28.8 s, 28.8 s |
+  | mesh | 4.2 s, 4.2 s | 4.2 s, 4.3 s |
+  | wall | 48.7 s, 44.3 s | 41.2 s, 38.3 s |
+  | faces over budget | 4 | 4 |
+
+  The mesh and the topology files are byte-identical. The whole file saves 6 to 7.5 s, much less
+  than the gate's 25.5 s → 3.8 s summed over its hottest wire. The transfer's remaining time is
+  mostly projection and allocation (see "Per-face healing budget" above), and #73 (parallel
+  healing) addresses it.
+- **Tests:** `tests/occt_patch.rs` runs `kernel/occt-patch-check`, which is built beside the
+  kernel against the same OCCT.
+  - **Scaling.** The fix time of a convex 800-gon and of a 3,200-gon gives a growth exponent:
+    3.00 to 3.06 unpatched and 2.00 to 2.01 patched on sage; 2.96 and 1.98 on anvil
+    (x86_64-linux). The test requires < 2.5. It is a ratio of two CPU times in one process, not
+    a wall-clock threshold. A deterministic count is not possible from outside the
+    library: the cost is the sequence walk inside `Find`, and OCCT's public API cannot see it.
+  - **Equality.** 200 generated self-intersecting wires (splitmix64, the same on every platform)
+    must fix exactly as `tests/occt-patch/wires-<system>.txt` records. Each file was recorded
+    with nixpkgs' unpatched OCCT on its platform: `aarch64-darwin` on sage, `x86_64-linux` on
+    anvil. 91 of the wires reach the big-segment branch. The gate's hoist without the re-fetch
+    changes 39 of them.
+    - **Why one file per platform:** OCCT's own floating-point results differ across platforms.
+      Unpatched, x86_64-linux splits seed 194 once more than aarch64-darwin. The generator is
+      integer-only and builds the same wires everywhere, and on anvil the patched and unpatched
+      OCCT agree on all 200 wires. Whether the compiler or the architecture (FMA contraction on
+      aarch64, say) causes it is unconfirmed.
+    - **Provenance, in CI:** the flake check `occt-patch-reference` builds `occt-patch-check`
+      against nixpkgs' unpatched `pkgs.opencascade-occt` (from cache.nixos.org). It requires
+      that build to reproduce this platform's reference byte for byte, and to fail the scaling
+      test (exponent >= 2.5; 2.92 on sage). Both kernel lanes run it in `nix flake check`. Pointed
+      at the patched OCCT, it fails (2.03).
+    - A platform without a file fails the test and says how to record one; it never skips.
+    - The first Linux run differed on every seed. The generator drew a point's x and y as two
+      arguments of one call, and GCC evaluates arguments in the other order; the draws are now
+      sequenced.
+- **Not patched:** `scripts/test-linux-sandbox.sh` and `scripts/test-linux-viewer.sh` build the
+  kernel in Debian containers against Debian's packaged OCCT, as before. They test the sandbox
+  and the viewer, never ship, and do not run `tests/occt_patch.rs`. The patch changes only
+  time, so their results do not depend on it. A source build (`cmake -S kernel`, crates.io) uses
+  whatever OCCT the user has.
+- **Dropping the patch:** remove it once an OCCT release that stepv builds against carries the
+  fix. Upstream `master` still fetches inside the loop (checked 2026-10-12). Filing it upstream is
+  the step after this merge. When the patch goes, keep `tests/occt_patch.rs`: it then checks
+  upstream's fix.
+
 ### Work queue (ordered, 2026-10-04)
 
 Agent work, in order:
@@ -1837,6 +1925,41 @@ the real assembly's transfer time is #51.
   download pinned by sha256 and the resulting bytes recorded in the committed
   `tests/fixtures/corpus.sha256`; `flake.nix` with `pkgs.opencascade-occt` and the `native` module
   enabled.
+
+- **Binary cache (#74, 2026-10-13).** The patched OCCT (`flake.nix`, "#74 OCCT patch") is in no
+  public cache. Built from source it takes about 35 min on sage and about 55 min on a GitHub Linux
+  runner, longer than devkit's CI jobs allow. The public Cachix cache **`gerchowl`** holds it, for
+  aarch64-darwin and x86_64-linux.
+  - **What it caches:** whatever the CI jobs build that cache.nixos.org does not have. That is
+    mainly the patched OCCT, the kernel and the dev shell's own derivations.
+  - **Pulling:** anyone can pull, with the key
+    `gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU=`.
+    - The fleet hosts have it in nix.conf (g-fleet #505), and CI gets it from cachix-action.
+    - Anyone else opts in through their own nix.conf:
+
+      ```
+      extra-substituters = https://gerchowl.cachix.org
+      extra-trusted-public-keys = gerchowl.cachix.org-1:NVFLR+/ENpdnmiZ27ZscMfbOUI/hJODGjKcpbVt6mMU=
+      ```
+
+    - `flake.nix` has no `nixConfig`. Lix prints six warning lines on every `nix eval` for one,
+      and non-interactive runs ignore it.
+  - **Pushing:** only `main` and the releases, never a pull request.
+    - `kernel.yml` pushes on a push to `main` or a dispatch on `main`. `release-extension.yml`
+      pushes from `release.yml`'s dispatch.
+    - Every other run, and a PR above all, gets no token (`authToken` empty, `skipPush` true),
+      so code under review can't write store paths into the cache that releases build from.
+      `kernel.yml`'s step "A pull request holds no Cachix token" fails a PR run if
+      `cachix.dhall` or `CACHIX_AUTH_TOKEN` is present.
+    - The fleet hosts that hold g-fleet's sops token can also push. This is how the cache was
+      seeded: aarch64-darwin from sage, x86_64-linux built on anvil and pushed from sage.
+    - **Open:** devkit's managed `ci.yml` hands `secrets.CACHIX_AUTH_TOKEN` to
+      `setup-devkit-toolchain` on pull requests too, so its jobs still push from same-repo PRs.
+      That file is regenerated on upgrade, so the fix belongs in devkit: vig-os/devkit#1784
+      (seeded CI cache plus a trusted-only release push; "same-repo PRs can poison a shared
+      writable cache").
+  - **Rotating the token:** in g-fleet, run `just cachix-key gerchowl` (it checks the token and
+    re-encrypts `secrets/cachix.yaml`), then `just cachix-gh-secret vig-os/stepv`.
 
 ### Owed — only a human can do these
 

@@ -55,8 +55,28 @@
           # (added to `modules` below) brings cc/c++/cmake/make/pkg-config but
           # deliberately leaves third-party libraries to extraPackages, so OCCT
           # itself must be named here.
-          pkgs.opencascade-occt
+          occt
         ];
+
+        # nixpkgs' OCCT 7.9.3 with stepv's patches (NOTICE, plan.md "#74 OCCT
+        # patch"). The dev shell (`just kernel`, the macOS app's dylibs) and
+        # the kernel derivation both build against this one, so every shipped
+        # kernel carries the patch. A patch that no longer applies fails the
+        # build in patchPhase, and a different OCCT version fails evaluation:
+        # the patch was proven equivalent on 7.9.3's code only, so a bump must
+        # re-check it (drop it once an OCCT release we use has it).
+        occt =
+          assert pkgs.lib.assertMsg (pkgs.opencascade-occt.version == "7.9.3")
+            "nixpkgs moved OCCT to ${pkgs.opencascade-occt.version}: re-check nix/patches/occt-7.9.3-* (plan.md \"#74 OCCT patch\")";
+          pkgs.opencascade-occt.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [
+              # #74: ShapeFix_IntersectionTool::FixSelfIntersectWire fetched
+              # edge1 from the wire's sequence on every inner iteration, O(n^3)
+              # on long wires; fetched once per num1 (and again after the
+              # big-segment branch's removals), it is O(n^2).
+              ./nix/patches/occt-7.9.3-fixselfintersectwire-hoist.patch
+            ];
+          });
 
         # Devkit knobs read from .vig-os (#1224, #1432, #1431, #1282, #1633): the
         # flake-generated pre-commit hooks — the branch guard and the
@@ -151,8 +171,13 @@
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = ./kernel;
           nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [ pkgs.opencascade-occt ];
-          cmakeFlags = [ "-DCMAKE_BUILD_TYPE=Release" ];
+          buildInputs = [ occt ];
+          # STEPV_BUILD_TESTS: occt-patch-check beside the kernel, for the
+          # nextest check's tests/occt_patch.rs (not shipped).
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+            "-DSTEPV_BUILD_TESTS=ON"
+          ];
           meta.description = "stepv's OCCT kernel: STEP/IGES/BREP to meshes, run as a subprocess";
         };
 
@@ -173,11 +198,13 @@
             "stepv-capi"
           ];
 
-          # The harness corpus manifest and the committed CLI-test corpus live
-          # outside the cargo source filter; without this, crane drops them.
+          # The harness corpus manifest, the committed CLI-test corpus and the
+          # OCCT patch's reference output live outside the cargo source
+          # filter; without this, crane drops them.
           extraSrcFiles = [
             "tests/fixtures"
             "tests/data"
+            "tests/occt-patch"
           ];
 
           # Every crane derivation (nextest included) sees the built kernel.
@@ -195,9 +222,12 @@
           # every `just test-data` would re-dirty the tree.
           # The licence texts in licenses/ are verbatim upstream copies: a
           # whitespace "fix" would make them no longer the licence.
+          # The OCCT patches' blank context lines are a single space: trimmed,
+          # the patch no longer applies.
           hooksExcludes = [
             "^tests/data/"
             "^licenses/"
+            "^nix/patches/"
           ];
 
           tools = [
@@ -220,7 +250,58 @@
         # per-module dev-shell builds. Assigning these is the consumer's job by
         # construction — dropping the line is a visible omission, which is why
         # mkRustProject hands all three back together.
-        inherit (rust) checks;
+        checks = rust.checks // {
+          # The provenance of tests/occt-patch/wires-<system>.txt (#74): the
+          # check tool built against nixpkgs' UNPATCHED OCCT must reproduce
+          # this platform's reference byte for byte, and must FAIL the scaling
+          # test (exponent >= 2.5). That proves the reference was recorded
+          # without the patch, and that tests/occt_patch.rs catches the O(n^3).
+          # Cheap: one C++ file against OCCT from cache.nixos.org.
+          occt-patch-reference = pkgs.stdenv.mkDerivation {
+            name = "stepv-occt-patch-reference";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./kernel
+                ./tests/occt-patch
+              ];
+            };
+            nativeBuildInputs = [ pkgs.cmake ];
+            buildInputs = [ pkgs.opencascade-occt ];
+            dontUseCmakeConfigure = true;
+            buildPhase = ''
+              runHook preBuild
+              cmake -S kernel -B build -DCMAKE_BUILD_TYPE=Release -DSTEPV_BUILD_TESTS=ON
+              cmake --build build --target occt-patch-check -j"$NIX_BUILD_CORES"
+              runHook postBuild
+            '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              ref=tests/occt-patch/wires-${pkgs.stdenv.hostPlatform.system}.txt
+              build/occt-patch-check wires > wires.txt
+              if ! cmp -s wires.txt "$ref"; then
+                echo "unpatched OCCT does not reproduce $ref:"
+                diff "$ref" wires.txt | head -n 4
+                exit 1
+              fi
+              echo "unpatched OCCT reproduces $ref"
+              line=$(build/occt-patch-check scaling 800)
+              echo "unpatched scaling: $line"
+              exponent=$(printf '%s\n' "$line" | sed -n 's/.*"exponent":\([0-9][0-9.]*\)}$/\1/p')
+              if [ -z "$exponent" ]; then
+                echo "no exponent in: $line"
+                exit 1
+              fi
+              if ! awk -v e="$exponent" 'BEGIN { exit !(e + 0 >= 2.5) }'; then
+                echo "unpatched OCCT grows as n^$exponent, below 2.5: tests/occt_patch.rs would not catch the O(n^3)"
+                exit 1
+              fi
+              runHook postCheck
+            '';
+            installPhase = "cp wires.txt $out";
+          };
+        };
 
         # `stepv` is the CLI alone (what crates.io ships); `default` is the
         # product: the CLI with the kernel in libexec/stepv, where
