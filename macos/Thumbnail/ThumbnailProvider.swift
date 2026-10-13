@@ -8,7 +8,9 @@ import QuickLookThumbnailing
 final class ThumbnailProvider: QLThumbnailProvider {
     override func provideThumbnail(for request: QLFileThumbnailRequest,
                                    _ handler: @escaping (QLThumbnailReply?, Error?) -> Void) {
-        stepvLog.info("thumbnail request: \(request.fileURL.lastPathComponent, privacy: .public)")
+        // Notice, not info: persisted, so scripts/ql-e2e can tell a request
+        // the extension got from one Quick Look answered from its cache.
+        stepvLog.notice("thumbnail request: \(request.fileURL.path, privacy: .public)")
         let side = max(request.maximumSize.width, request.maximumSize.height) * request.scale
         let run = StepvKernel.tessellate(request.fileURL, linearRel: StepvKernel.thumbnail.linearRel,
                                          angularDeg: StepvKernel.thumbnail.angularDeg)

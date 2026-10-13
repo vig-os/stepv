@@ -1707,6 +1707,15 @@ memory is freed at once. Two designs failed before this one:
     `/Applications/stepv.app`, not from a process left running from an older install, which
     Quick Look keeps using until it exits.
   - `qlmanage` is never used: it hangs when a script drives it.
+  - **Quick Look's thumbnail cache is keyed on the file's inode** (sage, measured): the same
+    path asked twice, or a hard link to a thumbnailed file, is answered in 7–9 ms with no call
+    to the extension; a new inode, even at an old path or with the same mtime and size, runs it.
+    So each request gets freshly written bytes (never a clone). The extension logs each
+    thumbnail request at notice level, and a thumbnail with no request line fails as "QL
+    served a cached thumbnail; the extension did not run". A control in `run-all.sh` asks for
+    one file twice and requires the second to be caught this way. A failed verdict prints the
+    window's stepv log: #98's one CI failure (`thumb box.brep`, a thumbnail in 65 ms and no log
+    line) left no evidence of which it was.
   - It fails if any of the extension's lines for a file fails. It polls the log for that line
     under a timeout, rather than sleeping. It refuses to run when it can't tell which build a
     running extension process is.

@@ -16,7 +16,11 @@ kind=${1:?thumb|preview}
 file=${2:?file}
 work=${QL_E2E_DIR:?the run directory, from run-all.sh}
 copy="$work/$(date +%H%M%S)-$$-$kind-$(basename "$file")"
-cp "$file" "$copy"
+# Freshly written bytes: a new file, a new inode, whatever cp would do (GNU
+# cp may clone). Quick Look's thumbnail cache is keyed on the inode: a file
+# it has seen is answered from the cache, and the extension never runs.
+# QL_E2E_REUSE=1 uses <file> as it is: run-all.sh's cache-hit control.
+if [ "${QL_E2E_REUSE:-}" = 1 ]; then copy=$file; else cat "$file" >"$copy"; fi
 start=$(date '+%Y-%m-%d %H:%M:%S')
 echo "== $kind $(basename "$file")"
 case $kind in
@@ -41,4 +45,14 @@ while :; do
   [ $SECONDS -lt $end ] || break
   sleep 0.5
 done
-python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" <"$work/log.ndjson"
+python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" <"$work/log.ndjson" && exit 0
+# The evidence, for a failure on a machine no one can look at afterwards.
+echo "  stepv's log since $start:"
+python3 -c '
+import json, sys
+for line in sys.stdin:
+    try: e = json.loads(line)
+    except ValueError: continue
+    print("   ", e.get("timestamp", "")[11:23], e.get("processImagePath", "").rsplit("/", 1)[-1], e.get("eventMessage", "")[:200])
+' <"$work/log.ndjson"
+exit 1

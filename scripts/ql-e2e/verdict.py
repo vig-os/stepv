@@ -21,19 +21,31 @@ kind, path = sys.argv[1 + polling], sys.argv[2 + polling]
 process = {"thumb": "StepvThumbnail", "preview": "StepvPreview"}[kind]
 prefix = {"thumb": "thumbnail", "preview": "preview"}[kind] + f" {path}: "
 lines = []
+requested = False  # the thumbnail extension's "thumbnail request: <file>"
 for raw in sys.stdin:
     try:
         e = json.loads(raw)
     except ValueError:
         continue
     m = e.get("eventMessage", "")
+    requested |= m == f"thumbnail request: {path}"
     if m.startswith(prefix):
         lines.append((e.get("processImagePath", ""), m[len(prefix) :]))
 
 if polling:
     sys.exit(0 if lines else 1)
 ok = bool(lines)
-if not lines:
+if not lines and kind == "thumb" and not requested:
+    # Quick Look's thumbnail cache is keyed on the file's inode: it answers
+    # a file it has seen without calling the extension (ql-e2e.sh writes a
+    # fresh file per request so that never happens; this catches it if it
+    # does).
+    print(
+        f"  no request for {path}: QL served a cached thumbnail; the extension did not run"
+    )
+elif not lines and requested:
+    print(f"  {path}: the extension got the request but logged no result")
+elif not lines:
     print(f"  no log line for {path}: the extension did not run, or not this build")
 for image, said in lines:
     ours = image.startswith("/Applications/stepv.app/") and image.endswith(
