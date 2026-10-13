@@ -36,19 +36,23 @@ func check(_ ok: Bool, _ what: String) {
 }
 func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e6 }
 
-/// Waits until the service has logged `what` ("spawned N": run #N's kernel
-/// spawned; "queued N": run #N queued): supervisor.sh watches the log and
-/// answers on stdin. Ordering on the logged event itself, never on time,
-/// nor on a first event a short run may never send (#111).
-func awaitLogged(_ what: String) -> Bool {
-    print("await \(what)"); fflush(stdout)
+/// Asks supervisor.sh, on stdout, to wait until the service has logged
+/// `what` for run #`run` of service pid `pid` ("spawned": its kernel
+/// spawned; "queued": it was queued; "held-deadline": its deadline passed
+/// while a test build held it), and to answer on stdin. Ordering on the
+/// logged event itself, never on time, nor on a first event a short run may
+/// never send (#111); scoped by identity, never by a time window.
+func awaitLog(_ what: String, run: Int, pid: Int32) -> Bool {
+    print("await \(what) \(run) \(pid)"); fflush(stdout)
     return readLine() == "seen"
 }
 
-/// Requests made, in order: run #N in the log of the service instance this
-/// probe started, while no refused request comes before it (a refused
-/// request gets no run number).
-var submissions = 0
+/// Asks supervisor.sh to release run #`run` held by a test build
+/// (release-N in the service's tmp).
+func release(_ run: Int) {
+    print("release \(run)"); fflush(stdout)
+    _ = readLine()
+}
 
 final class Probe {
     let lock = NSLock()
@@ -56,14 +60,14 @@ final class Probe {
     var result: StepvRunResult?
     var replyAfterEvents = true
     let done = DispatchSemaphore(value: 0)
+    let taken = DispatchSemaphore(value: 0)
     var run: StepvSupervisorRun!
-    let ordinal: Int
+    /// Who the run is in the service's log, from the service itself.
+    var number = 0, servicePid: Int32 = 0
     var t0 = 0.0, ms = 0.0
 
     init(_ path: String, _ format: String, deadlineMs: Int = 20_000, memoryMB: Int = 4096,
          linearRel: Double = 0.001, angularDeg: Double = 20) {
-        submissions += 1
-        ordinal = submissions
         run = StepvSupervisorRun(serviceName: service, onEvent: { [unowned self] kind, _ in
             self.lock.lock(); self.kinds.append(kind)
             if self.result != nil { self.replyAfterEvents = false }
@@ -71,19 +75,37 @@ final class Probe {
         }, completion: { [unowned self] r in
             self.lock.lock(); self.result = r; self.ms = now() - self.t0; self.lock.unlock()
             self.done.signal()
+            self.taken.signal()  // a refused run is never accepted: do not wait for it
         })
+        run.onAccepted = { [unowned self] n, pid in
+            self.lock.lock(); (self.number, self.servicePid) = (n, pid); self.lock.unlock()
+            self.taken.signal()
+        }
         t0 = now()
         run.start(file: URL(fileURLWithPath: path), format: format, linearRel: linearRel, angularDeg: angularDeg,
                   deadlineMs: deadlineMs, memoryMB: memoryMB)
+    }
+
+    /// Waits until the service has taken the run: its number and pid.
+    /// False if it replied without taking it, or not within `seconds`.
+    func awaitTaken(_ seconds: Double = 20) -> Bool {
+        guard taken.wait(timeout: .now() + seconds) == .success else { return false }
+        lock.lock(); defer { lock.unlock() }
+        return number > 0 && servicePid > 0
+    }
+
+    /// Waits until the service has logged `what` for this run.
+    func awaitLogged(_ what: String) -> Bool {
+        awaitTaken() && awaitLog(what, run: number, pid: servicePid)
     }
 
     /// Waits until the service has logged this run's kernel as spawned. Not
     /// seen: says what became of the run, for the log of a failure no one
     /// can look at afterwards.
     func awaitSpawned() -> Bool {
-        if awaitLogged("spawned \(ordinal)") { return true }
+        if awaitLogged("spawned") { return true }
         lock.lock(); let r = result; lock.unlock()
-        print("  run \(ordinal) not seen spawned; its reply so far: \(outcomeLine(r))")
+        print("  run #\(number) of service pid \(servicePid) not seen spawned; its reply so far: \(outcomeLine(r))")
         return false
     }
 
@@ -103,8 +125,13 @@ func outcomeLine(_ r: StepvRunResult?) -> String {
 
 switch (a[2], a.count) {
 case ("hold", 4):
-    // The caller kills the service while this run's kernel works.
+    // The caller kills the service while this run's kernel works: it is
+    // told who the run is ("held run N service pid P") once its kernel is
+    // logged spawned.
     let held = Probe(a[3], "step", deadlineMs: 60_000)
+    if held.awaitSpawned() {
+        print("held run \(held.number) service pid \(held.servicePid)"); fflush(stdout)
+    }
     print("hold: \(outcomeLine(held.wait(60)))")
     exit(0)
 case ("admission", 5):
@@ -114,8 +141,9 @@ case ("admission", 5):
     // withdrawn by its deadline while A still runs.
     let a1 = Probe(a[3], "step", deadlineMs: 30_000)
     check(a1.awaitSpawned(), "admission: the first run's kernel spawned")
+    print("service pid \(a1.servicePid)")  // supervisor.sh scopes its log checks by it
     let b = Probe(a[4], "step", deadlineMs: 30_000)
-    check(awaitLogged("queued \(b.ordinal)"), "admission: the second run is queued")
+    check(b.awaitLogged("queued"), "admission: the second run is queued")
     b.run.cancel()
     let c = Probe(a[4], "step", deadlineMs: 30_000)
     let d = Probe(a[4], "step", deadlineMs: 1000)
@@ -132,23 +160,21 @@ case ("admission", 5):
     check(b.wait(1) == nil, "admission: no completion for the cancelled run")
     exit(failed ? 1 : 0)
 case ("handover", 5):
-    // L = 1 and a 30 s hold on each handover (a test build). A holds the
-    // slot; once B is logged queued (deadline 20 s), A is cancelled: B is
-    // handed the slot, and its deadline passes during the hold, which is
-    // 10 s longer than that deadline: so it does, however long the log
-    // took to show B queued (under 20 s), and the admission-time check
-    // refuses it, never spawned.
-    let a1 = Probe(a[3], "step", deadlineMs: 120_000)
-    check(a1.awaitSpawned(), "handover: the first run's kernel spawned")
-    let b = Probe(a[4], "step", deadlineMs: 20_000)
-    check(awaitLogged("queued \(b.ordinal)"), "handover: the second run is queued")
-    a1.run.cancel()
-    let rb = b.wait(60)
+    // A test build holds each admitted run before it starts until the test
+    // releases it. B (deadline 2 s) is held; once the service logs that its
+    // deadline passed while held, the test releases it, and the
+    // admission-time check refuses it, never spawned: ordered on the
+    // service's own events, not on a hold of some length.
+    let b = Probe(a[4], "step", deadlineMs: 2000)
+    check(b.awaitLogged("held-deadline"), "handover: the run's deadline passed while it was held after admission")
+    release(b.number)
+    let rb = b.wait(15)
     check(rb?.outcome == .deadline && rb?.detail.contains("past its deadline before admission, never spawned") == true,
-          "handover: a deadline that passes as the slot is handed over: \(outcomeLine(rb))")
+          "handover: a deadline that passes between admission and start: \(outcomeLine(rb))")
     exit(failed ? 1 : 0)
 case ("live", 4):
     let p = Probe(a[3], "step", deadlineMs: 60_000)
+    if p.awaitTaken() { print("service pid \(p.servicePid)"); fflush(stdout) }
     let r = p.wait(60)
     check(r?.outcome == .done && r?.mesh != nil,
           "a live run beside a second instance's sweep: \(meshLine(r))")
@@ -187,6 +213,8 @@ func meshLine(_ r: StepvRunResult?) -> String {
 //    the kernel ran under the service's sandbox, not its own.
 let small = Probe(a[2], "step")
 let r1 = small.wait()
+// The service this probe talks to: supervisor.sh scopes its log checks by it.
+print("service pid \(small.servicePid)"); fflush(stdout)
 check(r1?.outcome == .done && r1?.mesh != nil, "step: \(meshLine(r1))")
 check(small.kinds.first == StepvEvent.tree && small.kinds.contains(StepvEvent.progress) && small.replyAfterEvents,
       "step: events \(small.kinds) (TREE first, PROGRESS, all before the reply)")
@@ -222,11 +250,18 @@ if Int(a[7]) ?? 1 >= 2 {
     let rb = beside.wait()
     check(rb?.outcome == .done && !held.isDone,
           "concurrent: \(String(format: "%.0f", beside.ms)) ms while the held run went on — \(meshLine(rb))")
+    // The deadline kill under concurrency: a 1.5 s run beside the held one
+    // is killed at its deadline while the held one goes on. (At L = 1 no
+    // two kernels run at once: the kill alone is section 3.)
+    let slowBeside = Probe(a[5], "step", deadlineMs: 1500)
+    let rsb = slowBeside.wait()
+    check(rsb?.outcome == .deadline && !held.isDone,
+          "deadline beside a running run: \(outcomeLine(rsb))")
     held.run.cancel()
 } else {
     // One kernel at a time (Admission): the second waits for the first,
     // which ends here, on a cancel.
-    check(awaitLogged("queued \(beside.ordinal)"), "admission limit 1: the second run queued behind the held one")
+    check(beside.awaitLogged("queued"), "admission limit 1: the second run queued behind the held one")
     let freed = now()
     held.run.cancel()
     let rb = beside.wait()

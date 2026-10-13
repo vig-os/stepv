@@ -38,13 +38,17 @@ for f in assembly.step box.igs box.brep; do
     "$e2e/ql-e2e.sh" "$k" "$root/tests/data/$f" || rc=1
   done
 done
-# The control: the same file thumbnailed twice. Quick Look answers the
-# second from its cache, and the verdict must say so and fail: proof that a
-# cached thumbnail can never pass for the extension's.
+# The control: one file thumbnailed twice, the second time through a hard
+# link: a new path, the same inode, which Quick Look's cache is keyed on. It
+# answers from the cache, the extension never sees the link's path, and the
+# verdict, which goes by the path, must say so and fail: proof that a cached
+# thumbnail can never pass for the extension's. By identity, not by time
+# (#111).
 cat "$root/tests/data/box.brep" >"$QL_E2E_DIR/cache-control.brep"
 QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control.brep" >/dev/null 2>&1 \
   || { echo "FAIL: cache control: the first request did not pass"; rc=1; }
-out=$(QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control.brep" 2>&1) \
+ln "$QL_E2E_DIR/cache-control.brep" "$QL_E2E_DIR/cache-control-link.brep"
+out=$(QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control-link.brep" 2>&1) \
   && { echo "FAIL: cache control: a cached thumbnail passed"; rc=1; }
 if grep -q "QL served a cached thumbnail" <<<"$out"; then
   echo "ok: cache control: a repeated request is caught as a cached thumbnail"
