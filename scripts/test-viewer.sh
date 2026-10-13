@@ -11,7 +11,10 @@
 #   3. With no usable adapter (WGPU_BACKEND naming one this OS lacks), the
 #      viewer falls back to the software window and says so on stderr.
 #   4. The same when the probe found one but the window's adapter selection
-#      fails (STEPV_VIEW_REJECT_ADAPTERS, a test hook).
+#      fails (STEPV_VIEW_REJECT_ADAPTERS, a test hook). Its siblings, the GPU
+#      refusing the viewer's pipelines (STEPV_VIEW_REJECT_PIPELINES) or the
+#      scene's buffers (STEPV_VIEW_REJECT_UPLOAD), are tests/cache.rs's window
+#      tests, run by scripts/test-window-tests.sh.
 #   5. A click (STEPV_VIEW_PICK) in the window picks the plate's top face,
 #      and the inspector's topology names it a plane.
 #   6. `stepv view --frames 30` on every tests/data file: the GPU backend, and

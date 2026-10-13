@@ -355,9 +355,10 @@ pub fn run(
     if let Some(note) = note {
         eprintln!("stepv: {note}");
     }
-    let software = |load: std::sync::mpsc::Receiver<Load>| {
-        let Some(l) = wait(&load) else {
-            return Err("the run produced no scene".to_owned());
+    let software = |back: app::Back| {
+        let l = match back {
+            app::Back::Load(load) => wait(&load).ok_or("the run produced no scene")?,
+            app::Back::Loaded(l) => l,
         };
         software::run(&l.scene, &l.title, opts.screenshot.as_deref(), opts.frames).map(|frames| {
             Ran {
@@ -367,15 +368,16 @@ pub fn run(
         })
     };
     if backend == Backend::Software {
-        return software(load);
+        return software(app::Back::Load(load));
     }
     match app::run(load, title, opts) {
         Ok(ran) => Ok(ran),
-        // The window never opened: the probe found an adapter the window
-        // could not use (a surface it cannot present to, a device it refused).
-        Err((e, Some(load))) => {
+        // The GPU cannot draw: the probe found an adapter the window could
+        // not use (a surface it cannot present to, a device or pipelines it
+        // refused), or the GPU refused the scene once it came.
+        Err((e, Some(back))) => {
             eprintln!("stepv: the GPU viewer could not start ({e}); using the software viewer");
-            software(load)
+            software(back)
         }
         Err((e, None)) => Err(e),
     }

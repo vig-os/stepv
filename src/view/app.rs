@@ -22,7 +22,7 @@ use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Sectio
 use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
 use super::tree::Tree;
 use super::widgets::{self, Tone};
-use super::{Backend, FrameStats, Load, Options, Ran, ThemePref, theme};
+use super::{Backend, FrameStats, Load, Loaded, Options, Ran, ThemePref, theme};
 use crate::render::Camera;
 use crate::topology::Topology;
 use crate::{FaceStatus, Scene};
@@ -203,7 +203,8 @@ impl Viewer {
         let info = rs.adapter.get_info();
         // The pipelines passed their check before the window opened
         // (`pipelines`); what is left to refuse is this scene's buffers (a
-        // scene past the device's limits), reported in the open window.
+        // scene past the device's limits). The window then hands the scene
+        // back for the software viewer (`Window::take`).
         let scope = rs.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut gpu_scene = GpuScene::upload(&rs.device, &renderer, Layout::new(scene));
         // Only solids are capped (#34): the topology knows which prototypes
@@ -220,7 +221,13 @@ impl Viewer {
                 .collect();
             gpu_scene.set_solids(&solid);
         }
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let refused = pollster::block_on(scope.pop())
+            .map(|e| e.to_string())
+            .or_else(|| {
+                std::env::var_os("STEPV_VIEW_REJECT_UPLOAD")
+                    .map(|_| "STEPV_VIEW_REJECT_UPLOAD is set".to_owned())
+            });
+        if let Some(e) = refused {
             return Err(format!("the GPU refused the scene's buffers: {e}"));
         }
         Ok(Self {
@@ -1199,6 +1206,9 @@ enum Stage {
     Ready(Box<Viewer>),
 }
 
+/// A scene the GPU refused once it came, and why (#85 review).
+type Refused = Arc<Mutex<Option<(String, Box<Loaded>)>>>;
+
 /// The window (#85): open before the run finishes, the loading stage, then
 /// the [`Viewer`] once the scene arrives.
 struct Window {
@@ -1206,6 +1216,9 @@ struct Window {
     /// The pipelines, built and checked before the window opened; the
     /// viewer takes them on `Done`.
     renderer: Option<Renderer>,
+    /// A scene the GPU refused, and why: handed back to `run`, for the
+    /// software viewer.
+    refused: Refused,
     stage: Stage,
     opts: Options,
     error: Arc<Mutex<Option<String>>>,
@@ -1225,13 +1238,13 @@ impl Window {
                 }
                 Load::Progress(p) => *progress = Some(p),
                 Load::Failed => ctx.send_viewport_cmd(ViewportCommand::Close),
-                Load::Done(l) => {
+                Load::Done(mut l) => {
                     let opts = self.opts.loaded(&l);
                     let (e, m) = (self.error.clone(), self.measured.clone());
                     let Some(r) = self.renderer.take() else {
                         return;
                     };
-                    match Viewer::new(rs, r, &l.scene, l.topology, &opts, e, m) {
+                    match Viewer::new(rs, r, &l.scene, l.topology.take(), &opts, e, m) {
                         Ok(v) => {
                             ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
                             if self.opts.screenshot.is_some() {
@@ -1241,8 +1254,10 @@ impl Window {
                             // The scene is on the GPU; its CPU copy goes (#28).
                             self.stage = Stage::Ready(Box::new(v));
                         }
+                        // The software viewer draws it instead, as it did
+                        // when the viewer was built before the window opened.
                         Err(e) => {
-                            *self.error.lock().unwrap() = Some(e);
+                            *self.refused.lock().unwrap() = Some((e, l));
                             ctx.send_viewport_cmd(ViewportCommand::Close);
                         }
                     }
@@ -1361,15 +1376,25 @@ fn pipelines(device: &wgpu::Device) -> Result<Renderer, String> {
     }
 }
 
-/// Runs the GPU viewer, open at once on `load`. On failure before the window
-/// opened, hands `load` back so the caller can fall back to the software
-/// viewer.
+/// What the GPU viewer hands back for the software viewer to draw.
+pub(super) enum Back {
+    /// The window never opened: the load, still to come.
+    Load(std::sync::mpsc::Receiver<Load>),
+    /// The GPU refused the scene, once it came.
+    Loaded(Box<Loaded>),
+}
+
+/// Runs the GPU viewer, open at once on `load`. When the GPU cannot draw (it
+/// refuses the pipelines before the window opens, or the scene once it
+/// arrives), hands back what the software viewer needs to draw it instead.
 pub(super) fn run(
     load: std::sync::mpsc::Receiver<Load>,
     title: &str,
     opts: &Options,
-) -> Result<Ran, (String, Option<std::sync::mpsc::Receiver<Load>>)> {
+) -> Result<Ran, (String, Option<Back>)> {
     let slot = Arc::new(Mutex::new(Some(load)));
+    let refused = Refused::default();
+    let refused2 = refused.clone();
     let used = Arc::new(Mutex::new(None::<Backend>));
     let error = Arc::new(Mutex::new(None::<String>));
     let measured = Arc::new(Mutex::new(None::<FrameStats>));
@@ -1433,6 +1458,7 @@ pub(super) fn run(
             Ok(Box::new(Window {
                 load,
                 renderer: Some(renderer),
+                refused: refused2,
                 stage: Stage::Loading {
                     tree: None,
                     progress: None,
@@ -1445,26 +1471,20 @@ pub(super) fn run(
         }),
     );
     let backend = *used.lock().unwrap();
+    if let Some((e, l)) = refused.lock().unwrap().take() {
+        return Err((e, Some(Back::Loaded(l))));
+    }
     if let Some(e) = error.lock().unwrap().take() {
         return Err((e, None));
     }
+    let load = || slot.lock().unwrap().take().map(Back::Load);
     match (result, backend) {
         (Ok(()), Some(backend)) => Ok(Ran {
             backend,
             frames: *measured.lock().unwrap(),
         }),
-        (Ok(()), None) => Err((
-            "the viewer closed before it opened".into(),
-            slot.lock().unwrap().take(),
-        )),
-        (Err(e), b) => Err((
-            e.to_string(),
-            if b.is_none() {
-                slot.lock().unwrap().take()
-            } else {
-                None
-            },
-        )),
+        (Ok(()), None) => Err(("the viewer closed before it opened".into(), load())),
+        (Err(e), b) => Err((e.to_string(), if b.is_none() { load() } else { None })),
     }
 }
 

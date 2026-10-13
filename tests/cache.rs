@@ -1034,3 +1034,32 @@ fn a_gpu_that_refuses_the_pipelines_falls_back_to_software() {
         "the software viewer drew nothing"
     );
 }
+
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_gpu_that_refuses_the_scene_falls_back_to_software() {
+    kernel();
+    let h = Home::new("viewupload");
+    // The window is open on the tree when the scene comes, and the GPU
+    // refuses its buffers: the scene goes to the software viewer instead.
+    let (code, j, err) = h.view_within(
+        &data("assembly.step"),
+        &[],
+        &[("STEPV_VIEW_REJECT_UPLOAD", "1")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (0, Some("ok")), "{j}");
+    assert_eq!(j["backend"], "software", "{j}");
+    let note = err
+        .lines()
+        .find(|l| l.starts_with("stepv: the GPU viewer could not start ("))
+        .unwrap_or_else(|| panic!("no fallback note: {err}"));
+    assert!(
+        note.contains("the GPU refused the scene's buffers"),
+        "{note}"
+    );
+    assert!(
+        h.0.join("shot.png").is_file(),
+        "the software viewer drew nothing"
+    );
+}

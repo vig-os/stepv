@@ -1392,9 +1392,10 @@ keeps the tree on a failed run.
   GPU that refuses them fails the creator, which hands the load back, and `view::run` falls
   back to the software viewer, as it did when the whole viewer was built there. So the window
   opens only on a GPU that can draw. What is left to refuse after `Done` is the scene's
-  buffers (a scene past the device's limits): that closes the window with the error.
-  `STEPV_VIEW_REJECT_PIPELINES` refuses them, for the tests, beside
-  `STEPV_VIEW_REJECT_ADAPTERS`.
+  buffers (a scene past the device's limits): the window then hands the scene back
+  (`app::Back::Loaded`), closes, and the software viewer draws it. So every GPU failure that
+  fell back before #85 still does. `STEPV_VIEW_REJECT_PIPELINES` and `STEPV_VIEW_REJECT_UPLOAD`
+  force the two refusals, for the tests, beside `STEPV_VIEW_REJECT_ADAPTERS`.
 - **Known limits:**
   - `--software`, or a machine with no usable GPU adapter, has no tree panel: the software
     viewer still waits for the whole run before it opens (#90);
@@ -1424,8 +1425,9 @@ keeps the tree on a failed run.
     - closed once it has drawn the tree (`STEPV_VIEW_CLOSE_LOADING=1`), with the kernel stalled
       30 s: exit 0, `cancelled` with its `message` and no `error`, in under 20 s, and the
       kernel's process is gone;
-    - with the pipelines refused (`STEPV_VIEW_REJECT_PIPELINES`), the software viewer draws
-      the scene (status `ok`, backend `software`, the fallback said on stderr).
+    - with the pipelines refused (`STEPV_VIEW_REJECT_PIPELINES`), or the scene's buffers once
+      it comes (`STEPV_VIEW_REJECT_UPLOAD`), the software viewer draws the scene (status `ok`,
+      backend `software`, the fallback said on stderr).
   - `view`'s unit tests: a loader that panics ends the software viewer's wait.
   - `tests/cache.rs`: `view` with no window session (`STEPV_VIEW_TEST_NO_SESSION`, and no
     `DISPLAY`) fails with `no window session:` and the header, and never starts the kernel.
