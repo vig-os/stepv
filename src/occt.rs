@@ -15,6 +15,7 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -146,6 +147,9 @@ pub enum Outcome {
     Timeout,
     /// Exceeded the memory cap: killed, or refused an allocation (Linux).
     MemoryCap,
+    /// Killed because its caller asked ([`run_streaming`]'s `cancel`): the
+    /// viewer's window closed before the run finished (#85).
+    Cancelled,
 }
 
 /// One kernel invocation.
@@ -339,7 +343,7 @@ pub fn run<'a>(
             let _ = out.read_to_string(&mut text);
             text
         },
-        || {},
+        || true,
     )?;
     let summary: Option<Summary> = s
         .output
@@ -347,7 +351,7 @@ pub fn run<'a>(
         .next()
         .and_then(|l| serde_json::from_str(l).ok());
     Ok(Run {
-        outcome: outcome(s.status, s.over_memory, summary.as_ref()),
+        outcome: outcome(s.status, s.over_memory, false, summary.as_ref()),
         summary,
         wall: s.wall,
     })
@@ -372,6 +376,9 @@ pub fn run<'a>(
 /// (about 5% of a large assembly's run): a run near its cap can time out
 /// streamed and not plain.
 ///
+/// With `cancel` (#85), setting it kills the kernel within a few
+/// milliseconds: the run is [`Outcome::Cancelled`], with no summary.
+///
 /// # Errors
 /// Only when the kernel cannot be spawned at all, as [`run`].
 #[allow(clippy::too_many_arguments)]
@@ -383,6 +390,7 @@ pub fn run_streaming<'a>(
     mesh_out: Option<&Path>,
     topology_out: Option<&Path>,
     edges: bool,
+    cancel: Option<&AtomicBool>,
     on_event: &mut dyn FnMut(Event),
 ) -> std::io::Result<Run> {
     let mut cmd = command(
@@ -413,17 +421,21 @@ pub fn run_streaming<'a>(
             while let Ok(e) = rx.try_recv() {
                 on_event(e);
             }
+            !cancel.is_some_and(|c| c.load(Ordering::Relaxed))
         },
     )?;
     let (outcome, summary) = match (s.status, s.output) {
         // Exited, but not with the stream the contract promises: no summary,
         // and the outcome is the exit's, as in `run`.
-        (Some(status), Err(_)) => (outcome(Some(status), s.over_memory, None), None),
+        (Some(status), Err(_)) => (outcome(Some(status), s.over_memory, false, None), None),
         // Killed: not complete, even when the summary made it out first.
-        (None, _) => (outcome(None, s.over_memory, None), None),
+        (None, _) => (outcome(None, s.over_memory, s.cancelled, None), None),
         (status, stream) => {
             let summary = stream.ok();
-            (outcome(status, s.over_memory, summary.as_ref()), summary)
+            (
+                outcome(status, s.over_memory, false, summary.as_ref()),
+                summary,
+            )
         }
     };
     Ok(Run {
@@ -471,9 +483,15 @@ fn command(
 }
 
 /// How a run ended, from how its process did and the summary it gave.
-fn outcome(status: Option<ExitStatus>, over_memory: bool, summary: Option<&Summary>) -> Outcome {
+fn outcome(
+    status: Option<ExitStatus>,
+    over_memory: bool,
+    cancelled: bool,
+    summary: Option<&Summary>,
+) -> Outcome {
     match status {
         None if over_memory => Outcome::MemoryCap,
+        None if cancelled => Outcome::Cancelled,
         None => Outcome::Timeout,
         Some(s) => match s.code() {
             Some(0) => Outcome::Ok,
@@ -494,9 +512,12 @@ fn outcome(status: Option<ExitStatus>, over_memory: bool, summary: Option<&Summa
 
 /// How a supervised kernel process ended.
 struct Supervised<T> {
-    /// `None`: killed, at the wall clock or the memory cap.
+    /// `None`: killed, at the wall clock, the memory cap, or on `tick`'s
+    /// word.
     status: Option<ExitStatus>,
     over_memory: bool,
+    /// Killed because `tick` said stop.
+    cancelled: bool,
     /// What `read` made of its stdout.
     output: T,
     wall: Duration,
@@ -508,12 +529,13 @@ struct Supervised<T> {
 /// `read` consumes its stdout on a thread of its own, so a chatty kernel can
 /// never fill the pipe and deadlock against the wait loop. `tick` runs on
 /// this thread every couple of milliseconds until `read` is done: the place
-/// to take what `read` hands over as it goes.
+/// to take what `read` hands over as it goes. While the process runs, a
+/// `tick` that returns `false` kills it.
 fn supervise<T: Send + 'static>(
     mut cmd: Command,
     limits: Limits,
     read: impl FnOnce(ChildStdout) -> T + Send + 'static,
-    mut tick: impl FnMut(),
+    mut tick: impl FnMut() -> bool,
 ) -> std::io::Result<Supervised<T>> {
     let start = Instant::now();
     // Killed and reaped on every way out, a panicking `tick` among them: the
@@ -530,7 +552,7 @@ fn supervise<T: Send + 'static>(
     let stdout = child.stdout.take().expect("stdout is piped");
     let reader = std::thread::spawn(move || read(stdout));
 
-    let mut over_memory = false;
+    let (mut over_memory, mut cancelled) = (false, false);
     let mut last_probe = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -552,24 +574,30 @@ fn supervise<T: Send + 'static>(
                 break None;
             }
         }
-        tick();
+        if !tick() {
+            cancelled = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
         std::thread::sleep(Duration::from_millis(2));
     };
     let wall = start.elapsed();
     // The process is gone, so its stdout ends; `read` may still be handing
     // over what it had, and waits on `tick` to take it.
     while !reader.is_finished() {
-        tick();
+        let _ = tick();
         std::thread::sleep(Duration::from_millis(1));
     }
     let output = match reader.join() {
         Ok(output) => output,
         Err(panic) => std::panic::resume_unwind(panic),
     };
-    tick();
+    let _ = tick();
     Ok(Supervised {
         status,
         over_memory,
+        cancelled,
         output,
         wall,
     })
@@ -637,7 +665,7 @@ pub fn outline<'a>(
             let _ = out.read_to_string(&mut text);
             text
         },
-        || {},
+        || true,
     )
     .map_err(|e| OutlineError(format!("cannot start kernel: {e}")))?;
     let Some(status) = s.status else {

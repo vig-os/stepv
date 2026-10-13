@@ -75,6 +75,7 @@ fn stream(kernel: &Path, input: &Path, limits: Limits, mesh: Option<&Path>) -> (
         mesh,
         None,
         false,
+        None,
         &mut |e| events.push(e),
     )
     .unwrap();
@@ -211,6 +212,47 @@ fn a_run_killed_after_the_outline_keeps_the_outline_but_no_summary() {
 }
 
 #[test]
+fn a_cancelled_run_is_killed_at_once() {
+    let t = Scratch::new("cancel");
+    // Stalled 30 s after the outline, under a 60 s cap: only the cancel can
+    // end it soon.
+    let stalled = t.script(
+        "stalled",
+        &format!(
+            "STEPV_OCCT_TEST_STALL_MS=30000 exec '{}' \"$@\"",
+            kernel().display()
+        ),
+    );
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut events = Vec::new();
+    let run = occt::run_streaming(
+        &stalled,
+        &data("assembly.step"),
+        Deflection::PREVIEW,
+        Limits {
+            timeout: Duration::from_secs(60),
+            memory: Some(1 << 30),
+        },
+        None,
+        None,
+        false,
+        Some(&cancel),
+        &mut |e| {
+            // The outline is out, and the kernel stalls: the viewer closes.
+            if matches!(e, Event::Tree(_)) {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            events.push(e);
+        },
+    )
+    .unwrap();
+    assert_eq!(run.outcome, Outcome::Cancelled);
+    assert!(run.summary.is_none());
+    assert!(matches!(events.as_slice(), [Event::Tree(_)]), "{events:?}");
+    assert!(run.wall < Duration::from_secs(20), "{:?}", run.wall);
+}
+
+#[test]
 fn a_broken_stream_has_no_summary_and_the_exits_outcome() {
     let t = Scratch::new("broken");
     let input = data("assembly.step");
@@ -286,6 +328,7 @@ fn a_slow_reader_still_sees_every_stage_finish() {
         None,
         None,
         false,
+        None,
         &mut |e| {
             if matches!(e, Event::Tree(_)) {
                 std::thread::sleep(Duration::from_millis(500));

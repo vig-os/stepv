@@ -1332,9 +1332,10 @@ as the outline should leave something a preview can show at once.
     - only a complete current-version entry loads;
     - the sweep takes stale `.part` files only.
 
-### Outline and progress first (#63, #54 step 5, 2026-10-12): part 1, the CLI
+### Outline and progress first (#63, #54 step 5, 2026-10-12): the CLI, then the viewer
 
-Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
+Part 1 of #63 (#84) is the CLI. Part 2, #85 (2026-10-13), opens the viewer on the outline; #89
+keeps the tree on a failed run.
 
 - **`view` writes the artifact:** its load is a cached run like `--png`'s. It is streamed, writes
   `cache::OutlineArtifact` on `Event::Tree` under the `cache::FileId` taken before the run, and
@@ -1366,9 +1367,39 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
 - **Stdout is unchanged:** one JSON line, the same keys whether stderr is a terminal or not.
   When stderr is not a terminal (a pipe, a file, Quick Look, the thumbnailer), nothing is
   written to it, and an uncached `--no-cache` run is not streamed.
+- **The viewer opens on the outline (#85):** `view` opens its window at once, past the session
+  check, and runs the kernel on a thread of its own (`run_view` and `load_view` in
+  `src/main.rs`), through the CLI's own `tessellate`: the artifact, the box and the progress line
+  are the same code. The loader tells the window `view::Load`s over a channel:
+  - `Tree`: a cached outline artifact's tree, sent before the kernel starts, then the run's
+    `Event::Tree`. The window draws it in the tree panel (`Tree::from_nodes`); until one
+    arrives the panel says "Reading the file…";
+  - `Progress`: the centre shows the file's name, "Transferring the shapes: P%" or
+    "Meshing: P%", and a bar. Before any progress it says "Reading the file…";
+  - `Done`: the scene, its topology, the title with the part count, the kernel's sandbox and
+    unhealed faces. The window builds the GPU scene, swaps the viewer in, and sets the title;
+  - `Failed`: the window closes, and the report says why, as before (#89 keeps the tree open
+    with the reason instead).
+- **Closing the window mid-load cancels the run (#85):** `occt::run_streaming` takes a `cancel`
+  flag, which `supervise`'s tick checks every 2 ms and then kills the kernel: the outcome is
+  `Outcome::Cancelled`, with no summary. `view` sets it once its window closes, so nothing runs
+  on for nobody. The report says status `cancelled`, exit 0, with the reason in `message`
+  ("the viewer was closed before the run finished"), not `error`: the user chose it, nothing
+  failed. Nothing is cached for it. The loader owns the channel's sender, so a loader that
+  panics closes it, and nothing waits on it for ever.
+- **The pipelines are checked before the window opens (#85 review):** eframe's creator builds
+  the viewer's pipelines inside a wgpu validation scope (`pipelines` in `src/view/app.rs`). A
+  GPU that refuses them fails the creator, which hands the load back, and `view::run` falls
+  back to the software viewer, as it did when the whole viewer was built there. So the window
+  opens only on a GPU that can draw. What is left to refuse after `Done` is the scene's
+  buffers (a scene past the device's limits): the window then hands the scene back
+  (`app::Back::Loaded`), closes, and the software viewer draws it. So every GPU failure that
+  fell back before #85 still does. `STEPV_VIEW_REJECT_PIPELINES` and `STEPV_VIEW_REJECT_UPLOAD`
+  force the two refusals, for the tests, beside `STEPV_VIEW_REJECT_ADAPTERS`.
 - **Known limits:**
-  - the viewer still waits for the whole run before opening its window, and shows nothing of
-    the outline or the progress in it: #85 (#63 part 2);
+  - `--software`, or a machine with no usable GPU adapter, has no tree panel: the software
+    viewer still waits for the whole run before it opens (#90);
+  - a failed run closes the window instead of keeping the tree with its reason (#89);
   - streaming for the progress line costs the run its parse again inside the timeout, as for
     the artifact (#76);
   - a non-STEP file has no outline, so the line has no part count (#76).
@@ -1381,6 +1412,23 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
     moment they exist (`posix_openpt(O_CLOEXEC)`, the slave opened by std), and asserted to be:
     the tests run in parallel, and an inheritable slave passed to another test's stepv and
     kernel would hold this terminal open until that process tree exits.
+  - `tests/stream.rs`: a run stalled after its outline and cancelled there is
+    `Outcome::Cancelled`, without a summary, within seconds of a 60 s cap.
+  - `tests/cache.rs`, window tests for #85. The window reports its frames on stderr under
+    `STEPV_VIEW_SCREENSHOT`: "loading: tree N rows, …, no geometry" for the first frame drawn with
+    the tree, then "scene: N parts" on the swap. A macOS CI runner never presents a window, so
+    those lines, not a picture, are what the tests read:
+    - with the kernel stalled 8 s after the outline, the loading frame shows the outline's
+      rows and no geometry, and the scene follows (exit 0, `ok`);
+    - with a cached artifact and a kernel that never writes a byte, the loading frame shows the
+      artifact's rows, and no scene; the run times out as before (exit 4);
+    - closed once it has drawn the tree (`STEPV_VIEW_CLOSE_LOADING=1`), with the kernel stalled
+      30 s: exit 0, `cancelled` with its `message` and no `error`, in under 20 s, and the
+      kernel's process is gone;
+    - with the pipelines refused (`STEPV_VIEW_REJECT_PIPELINES`), or the scene's buffers once
+      it comes (`STEPV_VIEW_REJECT_UPLOAD`), the software viewer draws the scene (status `ok`,
+      backend `software`, the fallback said on stderr).
+  - `view`'s unit tests: a loader that panics ends the software viewer's wait.
   - `tests/cache.rs`: `view` with no window session (`STEPV_VIEW_TEST_NO_SESSION`, and no
     `DISPLAY`) fails with `no window session:` and the header, and never starts the kernel.
     Without the check, it fails.
@@ -1394,7 +1442,7 @@ Part 1 of #63: the CLI. The viewer's own outline-first window is part 2, #85.
     (the kernel's caps are stepv's sampler, so a kernel orphaned by killing stepv would run on
     uncapped), and fails naming the limit. However a run ends, no member of its group may
     outlive it.
-    - the watchdog, at a 2 s deadline over a kernel that never finishes, kills that kernel too;
+    - the watchdog, at a 10 s deadline over a kernel that never finishes, kills that kernel too;
     - a `view` whose kernel is killed after its outline leaves the artifact under the pre-run
       `FileId`, equal to `occt::outline`, without a box;
     - `view --no-cache` leaves no artifact, where the same run cached leaves one (a kernel that

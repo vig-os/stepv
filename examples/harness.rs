@@ -57,10 +57,13 @@ enum Verdict {
     Timeout,
     /// Killed at `--memory-gb` (off by default: the harness measures peaks).
     MemoryCap,
+    /// A run outside the harness's contract: cancelled, which it never asks
+    /// for (#85).
+    Error,
 }
 
 impl Verdict {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Pass,
         Self::Wireframe,
         Self::Degraded,
@@ -70,6 +73,7 @@ impl Verdict {
         Self::Crash,
         Self::Timeout,
         Self::MemoryCap,
+        Self::Error,
     ];
 
     fn name(self) -> &'static str {
@@ -83,6 +87,7 @@ impl Verdict {
             Self::Crash => "crash",
             Self::Timeout => "timeout",
             Self::MemoryCap => "memory-cap",
+            Self::Error => "error",
         }
     }
 }
@@ -292,6 +297,11 @@ fn judge(kernel: &Path, path: &Path, args: &Args, mesh: &Path) -> std::io::Resul
     let verdict = match run.outcome {
         Outcome::Timeout => Verdict::Timeout,
         Outcome::MemoryCap => Verdict::MemoryCap,
+        // occt::run takes no cancel: a run that says so broke its contract.
+        Outcome::Cancelled => {
+            note = Some("cancelled, though the harness never cancels".into());
+            Verdict::Error
+        }
         Outcome::Crashed { signal, code } => {
             note = Some(format!("signal {signal:?}, exit {code:?}"));
             Verdict::Crash
@@ -449,10 +459,10 @@ fn report(records: &[Record]) -> String {
     let _ = writeln!(
         out,
         "| Source | Files | Pass | Wireframe | Degraded | Partial | Clean fail | Bad mesh | \
-         Crash | Timeout | Memory cap | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | \
+         Crash | Timeout | Memory cap | Error | Pass rate | Named | Coloured (part / face) | p50 ms | p95 ms | \
          Max RSS MB |"
     );
-    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(16));
+    let _ = writeln!(out, "| --- |{}", " ---: |".repeat(17));
     let mut row = |name: &str, rs: &[&Record]| {
         let count = |v| rs.iter().filter(|r| r.verdict == v).count();
         let passed: Vec<_> = rs.iter().filter(|r| r.verdict == Verdict::Pass).collect();
@@ -481,7 +491,7 @@ fn report(records: &[Record]) -> String {
         let c = Verdict::ALL.map(count);
         let _ = writeln!(
             out,
-            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
+            "| {name} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} / {} | {:.0} | {:.0} | {:.0} |",
             rs.len(),
             c[0],
             c[1],
@@ -492,6 +502,7 @@ fn report(records: &[Record]) -> String {
             c[6],
             c[7],
             c[8],
+            c[9],
             pct(c[0] + c[1], rs.len()),
             pct(named, parts),
             pct(colored, parts),
@@ -625,7 +636,11 @@ fn main() -> ExitCode {
             .filter(|r| {
                 matches!(
                     r.verdict,
-                    Verdict::Crash | Verdict::Timeout | Verdict::BadMesh | Verdict::MemoryCap
+                    Verdict::Crash
+                        | Verdict::Timeout
+                        | Verdict::BadMesh
+                        | Verdict::MemoryCap
+                        | Verdict::Error
                 ) || (r.source == "malformed" && r.verdict != Verdict::CleanFail)
             })
             .collect();
