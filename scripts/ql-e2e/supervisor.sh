@@ -67,16 +67,26 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -s
   -o "$probe" || fail "building the probe"
 codesign --force --sign - --entitlements "$tmp/probe.entitlements" "$probe" 2>/dev/null || fail "signing the probe"
 
-# Bounds how much log is read: from this instant on ($start for log show,
-# $start_iso for e2elog.py). Only a bound: runs are told apart by who they
-# are (service pid, run number), never by when they logged (#111).
+# Bounds how much log is read: from this instant on ($start_iso, for
+# e2elog.py). Only a bound: runs are told apart by who they are (service
+# pid, run number), never by when they logged (#111).
 set_start() {
-  start=$(date '+%Y-%m-%d %H:%M:%S')
   start_iso=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$root/scripts/ql-e2e")
 }
+# The supervisor's log, as logd pushes it: one `log stream` for the whole
+# run, read from a file. Not `log show`, which re-reads the system log on
+# every poll: on CI's small runner, next to a busy 4000-part kernel, that
+# fell more than 30 s behind lines logged on time (#113's CI).
+/usr/bin/log stream --style ndjson --level info \
+  --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' >"$tmp/stream.ndjson" 2>/dev/null &
+streamer=$!
+trap 'kill "$streamer" 2>/dev/null; rm -rf "$tmp"' EXIT
+# The stream prints a header line once it is filtering: from then on no line
+# is missed.
+end=$((SECONDS + 30))
+until [ -s "$tmp/stream.ndjson" ]; do [ $SECONDS -lt $end ] || fail "log stream did not start"; sleep 0.1; done
 log_since() {
-  timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
-    --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' 2>/dev/null \
+  cat "$tmp/stream.ndjson" \
     | python3 -c '
 import sys
 sys.path.insert(0, sys.argv[1])
