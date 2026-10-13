@@ -86,7 +86,9 @@ typedef void (*stepv_occt_event_fn)(void* ctx, int kind, const char* payload,
 // "brep" (NULL: by its extension).
 //
 // `input` may be "/dev/fd/N", a descriptor the caller opened (#91): it is
-// read from its start, needs `format`, and is not resolved, so a multi-file
+// read from its start, through the descriptor itself and never by
+// re-opening that name (#102; IGES through a private temporary copy), needs
+// `format`, and is not resolved, so a multi-file
 // assembly's part files are missing from it (#92). A descriptor without
 // `format`, a `format` not one of the three, or a descriptor that is not
 // open or cannot seek fails with cause "environment": the caller asked
