@@ -261,10 +261,12 @@ final class Delegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
-// Meshes a run left behind: a service that died mid-run never unlinked its
-// kernel's. None is in use yet: this service's runs start after this.
+// What runs left behind: a service that died mid-run never unlinked its
+// kernel's mesh, and a teardown that kills the kernel's whole job (launchd)
+// also kills the child that would have removed its IGES copy (#102,
+// stepv-input-*). None is in use yet: this service's runs start after this.
 if let tmp = try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()) {
-    for f in tmp where f.hasPrefix("stepv-") && f.hasSuffix(".msh") {
+    for f in tmp where (f.hasPrefix("stepv-") && f.hasSuffix(".msh")) || f.hasPrefix("stepv-input-") {
         unlink(NSTemporaryDirectory() + "/" + f)
     }
 }

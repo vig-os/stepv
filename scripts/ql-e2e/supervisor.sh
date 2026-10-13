@@ -121,7 +121,12 @@ else
 fi
 wait "$holder" 2>/dev/null
 
-# 2. The probe proper, on a fresh service (which sweeps step 1's mesh).
+# 2. The probe proper, on a fresh service, which sweeps what runs left
+#    behind: step 1's mesh, and stale ones planted here, a mesh and an IGES
+#    copy whose remover a teardown killed too (#102).
+mkdir -p "$container_tmp"
+: >"$container_tmp/stepv-planted.msh"
+: >"$container_tmp/stepv-input-planted.igs"
 start=$(date '+%Y-%m-%d %H:%M:%S')
 timeout 300 "$probe" "$service" "$tmp"/files/{assembly.step,box.igs,box.brep,slow.step} || rc=1
 
@@ -161,10 +166,10 @@ for m in frames late silent truncated noexit; do echo "$m" >"$tmp/files/$m.step"
 timeout 120 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" standin "$tmp"/files/{frames,late,silent,truncated,noexit}.step || rc=1
 
-# 5. No mesh left in the container: unlinked on every way out, and swept
-#    after the killed service.
-left=$(find "$container_tmp" -name 'stepv-*.msh' 2>/dev/null | wc -l | tr -d ' ')
-if [ "$left" = 0 ]; then echo "ok: no mesh left in $container_tmp"; else echo "FAIL: $left mesh(es) left in $container_tmp"; rc=1; fi
+# 5. Nothing left in the container: meshes unlinked on every way out, and
+#    the killed service's and the planted ones swept.
+left=$(find "$container_tmp" \( -name 'stepv-*.msh' -o -name 'stepv-input-*' \) 2>/dev/null)
+if [ -z "$left" ]; then echo "ok: no mesh or input copy left in $container_tmp"; else echo "FAIL: left in $container_tmp: $left"; rc=1; fi
 
 [ $rc -eq 0 ] && echo "supervisor: all checks passed" || echo "supervisor: FAILURES"
 exit $rc

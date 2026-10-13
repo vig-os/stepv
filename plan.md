@@ -1552,6 +1552,7 @@ OCCT's path readers re-open it.
   - With a private `$TMPDIR`, the IGES copy is gone after a successful run and after a failed
     one.
 - **Path inputs:** unchanged code. The corpus diff against the previous kernel is in #102's PR.
+
 ### #64 macOS kernel: an XPC supervisor and its child (2026-10-13): part 1, the service
 
 [#64](https://github.com/vig-os/stepv/issues/64) takes Quick Look's kernel out of the extension.
