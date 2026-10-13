@@ -134,6 +134,12 @@ for x in "$app"/Contents/PlugIns/*.appex; do
     [ -e "$xpc/Contents/Frameworks/${d#@rpath/}" ] || fail "$(basename "$x"): the kernel's $d is not in its service"
   done
 done
+# Nothing in an extension runs the kernel in-process (#64): no libstepvocct,
+# no OCCT linked into its binary; its supervisor service runs the kernel.
+for x in "$app"/Contents/PlugIns/*.appex; do
+  b="$x/Contents/MacOS/$(basename "$x" .appex)"
+  ! otool -L "$b" | grep -qE 'stepvocct|libTK' || fail "$(basename "$x") links the kernel in-process"
+done
 codesign --verify --deep --strict "$app" || fail "codesign --verify --deep --strict"
 echo "ok: each extension embeds its supervisor, kernel and Frameworks, signed and minimally entitled"
 # The service itself, outside Quick Look: runs, events, the deadline kill,

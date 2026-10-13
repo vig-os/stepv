@@ -659,7 +659,9 @@ relocates OCCT out of `/nix/store` into one shared `Frameworks/` (57 MB) and sig
   ABI (`kernel/stepv_occt.h`, libstepvocct, serialised because OCCT's readers share global state),
   and the renderer and header reader gained one (`capi/`, `stepv-capi`). That was the "second
   consumer" this plan named as the split trigger. Containment on macOS is the extension process,
-  which the system runs apart from Finder and kills on hang or memory pressure.
+  which the system runs apart from Finder and kills on hang or memory pressure. (#64 replaced
+  this: the kernel runs out of process, in each extension's supervisor service. The extensions
+  link the renderer and header reader only.)
 - **Buffers, not USDZ:** the preview builds an `SCNGeometry` straight from STEPVMSH, with
   per-face colour and the overlay. The thumbnail is pixel-identical to Linux's.
 - **Two traps, now in the code comments:**
@@ -1750,11 +1752,55 @@ memory is freed at once. Two designs failed before this one:
   - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
     26.4) and on CI's `macos-15-arm64` runner, whose window session runs Quick Look's
     extensions: ALL PASS in the Kernel workflow's "Quick Look end to end" step (run 38353253049).
-- **Part 2:** both extensions switch to the service, with `handler(nil)` once the tree is shown
-  (or on the first mesh, or on failure, when there is no tree), and their own deadlines. The
-  in-process kernel goes, and `ql-e2e` gains the deadline kill, the next request and concurrent
-  requests through the real extensions. The deadline values and their reasoning will be added
-  here.
+
+**Part 2: the extensions use the service** (closes #64).
+
+- **No kernel in the extensions:** they link `libstepv_capi.a` (the renderer and header reader)
+  and nothing of libstepvocct or OCCT; `scripts/test-macos.sh` holds each binary to that with
+  `otool -L`. The app's `Frameworks/` now serves the CLI's kernel alone.
+- **Thumbnail** (`macos/Thumbnail/ThumbnailProvider.swift`):
+  - The extension hands the file to the service and replies once with the rendered image, or
+    with no thumbnail, in which case Finder keeps the generic icon.
+  - **Deadline 15 s**, enforced by the service, with a 17 s backstop in the extension for a
+    service that can't reply. Quick Look's thumbnail watchdog is undocumented and reportedly
+    about 20 s; the extension must reply before it, so the kernel gets 15 s and the render and
+    reply get the rest. A thumbnail has one reply and nothing to show partway.
+  - So a file that takes longer gets no thumbnail: the Ultimaker 3 assembly (about 42 s) keeps
+    its icon.
+- **Preview** (`macos/Preview/PreviewViewController.swift`):
+  - The header (read in the extension by the Rust header reader) shows at once. Then the
+    assembly tree: the first 14 lines of the outline, indented, with the part count. Then
+    progress (`Transferring 42 %`, `Meshing 50 %`), then the scene.
+  - **`handler(nil)`** follows #64's rule:
+    - once the header and tree are on screen;
+    - with no tree (IGES, BREP, an outline that failed or was over the frame cap), on the
+      first mesh or the failure;
+    - and at the latest after **20 s**. Quick Look's preview watchdog is reportedly about 30 s,
+      and 10 s of margin covers a loaded machine.
+  - The view lives on after the handler, so the run may take up to **120 s**: the Ultimaker 3
+    loads in about 42 s, and 120 s bounds what one preview can cost. The kernel is cancelled
+    when the view goes, and is in any case bounded by that deadline and the 4096 MB cap.
+  - Quick Look has no cancel callback.
+- **Memory cap:** 4096 MB in both extensions, the CLI's default.
+- **ql-e2e on the real extensions:**
+  - A thumbnail and a preview of STEP, IGES and BREP. Each preview must log `ready (tree)`
+    before its scene for STEP, and `ready (mesh)` for IGES and BREP, exactly once.
+  - A 4000-part stress file is thumbnailed past its deadline (about 30 s of kernel, 1.6 GB,
+    on sage). Meanwhile `box.brep` is thumbnailed beside it and must draw while the held one
+    still runs.
+  - The held one gets no thumbnail within 25 s; the service logs `killed (deadline)`; the
+    kernel's pid is gone. On sage: killed at 15 051 ms, reaped in 47 ms.
+  - Then the next thumbnail must take under 3 s (on sage: 193 ms, so no throttle).
+- **Known limits:**
+  - **Multi-file assemblies:** the part files are out of reach from a descriptor (#92), and
+    the preview says how many are missing.
+  - **Signing:** Developer ID with the hardened runtime and library validation (#97). Ad-hoc,
+    the hardened runtime stays off.
+  - **Size:** three copies of the OCCT closure, +117 MB (#101).
+  - **Containment** is the service's sandbox (`macos-outer`): the kernel's own Seatbelt
+    profile can't nest inside it.
+  - **Timing:** the watchdog values are reports, not documentation. The deadlines are named in
+    `macos/Shared/StepvKernel.swift`, with this reasoning.
 
 ### Work queue (ordered, 2026-10-04)
 
