@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-04T11:16:29Z
-updated: 2026-10-24T11:21:58Z
+updated: 2026-10-30T00:15:28Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/stepv/issues/2
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-25T07:28:38.814Z
+synced: 2026-10-30T08:24:07.808Z
 ---
 
 # [Issue 2]: [Dependency Dashboard](https://github.com/vig-os/stepv/issues/2)
@@ -67,7 +67,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/workflows/kernel.yml (4)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `31.11.3`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.3`]
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `ubuntu 26.04`
 
@@ -106,15 +106,15 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/workflows/release-extension.yml (14)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `31.11.3`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.3`]
  - `actions/attest-build-provenance v4.2.2@4d101475d8b20a2381f78447822ac1eab6504dd8`
  - `actions/upload-artifact v7.0.1@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` → [Updates: `v7.0.2`]
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `31.11.3`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.3`]
  - `actions/attest-build-provenance v4.2.2@4d101475d8b20a2381f78447822ac1eab6504dd8`
  - `actions/upload-artifact v7.0.1@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` → [Updates: `v7.0.2`]
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `31.11.3`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.3`]
  - `rust-lang/crates-io-auth-action v1.0.5@c6f97d42243bad5fab37ca0427f495c86d5b1a18` → [Updates: `v1.0.6`]
  - `ubuntu 26.04`
  - `macos 15` → [Updates: `26`]
