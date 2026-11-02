@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-04T11:16:29Z
-updated: 2026-10-30T00:15:28Z
+updated: 2026-11-02T07:07:15Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/stepv/issues/2
@@ -13,23 +13,18 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-30T08:24:07.808Z
+synced: 2026-11-02T09:09:46.448Z
 ---
 
 # [Issue 2]: [Dependency Dashboard](https://github.com/vig-os/stepv/issues/2)
 
 This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.<br>[View this repository on the Mend.io Web Portal](https://developer.mend.io/github/vig-os/stepv).
 
-## Awaiting Schedule
-
-The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
-
- - [ ] <!-- unschedule-branch=renovate/actions-create-github-app-token-digest -->chore(deps): update actions/create-github-app-token digest to 64ab729
-
 ## Open
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
+ - [ ] <!-- rebase-branch=renovate/actions-create-github-app-token-digest -->[chore(deps): update actions/create-github-app-token digest to 64ab729](../pull/114)
  - [ ] <!-- rebase-branch=renovate/github-actions-(minor-and-patch) -->[ci(actions): update github-actions (minor and patch)](../pull/56) (`actions/upload-artifact`, `cachix/install-nix-action`, `rust-lang/crates-io-auth-action`)
  - [ ] <!-- rebase-branch=renovate/macos-26.x -->[ci(actions): update dependency macos to v26](../pull/57)
  - [ ] <!-- rebase-all-open-prs -->**Click on this checkbox to rebase all open PRs at once**
