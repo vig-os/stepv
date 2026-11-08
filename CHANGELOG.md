@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`stepv-cap`: the kernel memory cap for launches outside the CLI** ([#83](https://github.com/vig-os/stepv/issues/83), 83a part i):
+  - `stepv-cap --memory-mb N [--label NAME] [--report-json PATH] -- CMD...` runs `CMD` in its
+    own process group, held to the CLI's cap: the footprint of `CMD` and its descendants by
+    parent chain, summed, sampled every 5 ms. A process that is reparented or leaves the
+    group escapes the cap ([#128](https://github.com/vig-os/stepv/issues/128))
+  - Past the cap, it kills the group and exits 86, with one line on stderr naming the label,
+    the cap and the peak. Otherwise it exits as `CMD` did, by code or by signal. 125–127 are
+    its own failures. Only `--report-json`'s `over_cap` tells the cap's 86 from a `CMD` that
+    exits 86. `--report-json` writes the peak footprint and the wall time
+  - The CLI's sampler moved into `stepv::cap`, and the CLI uses it there unchanged
 - **macOS: the Quick Look extensions run the kernel out of process** ([#64](https://github.com/vig-os/stepv/issues/64), part 2):
   - Both extensions hand the file to their supervisor service and link no kernel and no OCCT
   - The preview shows the header at once, then the assembly tree and the progress, then the

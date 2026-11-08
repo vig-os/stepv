@@ -13,6 +13,7 @@
 //! `occt-wasm` spike failed its gate, `plan.md` §5 "S1 result").
 
 pub mod cache;
+pub mod cap;
 pub mod glb;
 pub mod header;
 pub mod measure;
