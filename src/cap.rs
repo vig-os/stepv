@@ -1,6 +1,7 @@
-//! The kernel memory cap (#83): one sampler, shared by the CLI's supervised
-//! kernel runs ([`crate::occt`], [`crate::measure`]) and the `stepv-cap`
-//! wrapper that every other kernel launch goes through (`src/bin/stepv-cap.rs`).
+//! The kernel memory cap (#83): the CLI's supervised kernel runs
+//! ([`crate::occt`]) and the `stepv-cap` wrapper (`src/bin/stepv-cap.rs`)
+//! share [`Sampler`] and [`footprint`]; the measurement server
+//! ([`crate::measure`]) shares only [`footprint`], with its own loop (#131).
 //!
 //! The cap is on the *footprint*, polled every [`POLL`], and enforced by
 //! killing: not `RLIMIT_AS`, for the reasons on [`crate::occt::Limits`].
@@ -17,7 +18,8 @@ pub const EXIT_OVER_CAP: u8 = 86;
 
 /// A process's current memory footprint in bytes, as the OS accounts it for
 /// the user: `ri_phys_footprint` on macOS (what Activity Monitor shows), the
-/// resident set on Linux. `None` when it cannot be read (the process exited).
+/// resident set on Linux (statm pages × 4096, shared pages included: #129).
+/// `None` when it cannot be read (the process exited).
 #[must_use]
 pub fn footprint(pid: u32) -> Option<u64> {
     #[cfg(target_os = "macos")]
@@ -48,12 +50,10 @@ pub fn footprint(pid: u32) -> Option<u64> {
     }
 }
 
-/// The footprint of `root` and every live descendant of it, summed, and the
-/// pids it counted (`root` first). `None` when `root` itself has exited.
+/// The footprint of `root` and its descendants by parent chain, summed, and
+/// the pids it counted (`root` first). `None` when `root` itself has exited.
 ///
-/// A descendant that leaves the tree (its parent died and it was reparented)
-/// is no longer counted: what `stepv-cap` wraps is a test or a kernel, and
-/// neither daemonizes.
+/// A process whose parent exits is reparented and escapes the count (#128).
 #[must_use]
 pub fn tree_footprint(root: u32) -> Option<(u64, Vec<u32>)> {
     let mut total = footprint(root)?;

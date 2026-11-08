@@ -7,13 +7,19 @@
 //! It is for kernel launches outside the `stepv` CLI (the scripts', the
 //! tests', the nix checks'), and for a test runner to wrap each test in;
 //! routing them all through it is #83's next step. The cap is the
-//! CLI's own ([`stepv::cap`]): the footprint of `CMD` and all its
-//! descendants, summed, sampled every 5 ms. `CMD` runs in a process group of
-//! its own; past `N` MiB, that group and every descendant are killed with
-//! SIGKILL, one line on stderr names `NAME` (default: the command line), the
-//! cap and the peak, and `stepv-cap` exits [`EXIT_OVER_CAP`]. SIGINT,
-//! SIGTERM, SIGHUP and SIGQUIT are passed on to the group. `CMD` sees its
-//! cap in `STEPV_CAP_MB`.
+//! CLI's own ([`stepv::cap`]): the footprint of `CMD` and its descendants
+//! by parent chain, summed, sampled every 5 ms. `CMD` runs in a process group
+//! of its own; past `N` MiB, that group and the descendants counted are
+//! killed with SIGKILL, one line on stderr names `NAME` (default: the command
+//! line), the cap and the peak, and `stepv-cap` exits [`EXIT_OVER_CAP`].
+//! SIGINT, SIGTERM, SIGHUP and SIGQUIT are passed on to the group (#130).
+//! `CMD` sees its cap in `STEPV_CAP_MB`.
+//!
+//! Limits: a process that is reparented (its parent exits) or leaves the
+//! group escapes the cap, and may outlive stepv-cap (#128). Exit 86 is
+//! ambiguous with a `CMD` that itself exits 86: only `--report-json`'s
+//! `over_cap` tells them apart. `CMD` runs in a background process group, so
+//! an interactive command reading the terminal gets SIGTTIN.
 //!
 //! Otherwise it exits as `CMD` did: its exit code, or the same signal.
 //! `125` is stepv-cap's own failure (usage, an unwritable report, an OS that
