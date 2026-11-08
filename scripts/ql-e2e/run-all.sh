@@ -130,7 +130,8 @@ if [ -n "$ms" ] && [ "$ms" -lt 3000 ]; then echo "ok: no throttle: ${ms} ms"; el
 # extension's view controller, which cancels its run, and the preview
 # service kills that kernel. The host logs what it does: the cancel must
 # come after its close (or switch), at 8 s, and before its quit, 3 s later,
-# so the kill at the quit cannot pass; reaped within 1 s; and gone.
+# so the kill at the quit cannot pass; reaped within 1 s; and gone. No
+# result is shown for it, and its handler is completed exactly once.
 #   $1: closed|switched; $2: the file; $3: the file switched to.
 preview_goes() {
   local how=$1 file=$2 to=${3:-} from out
@@ -145,6 +146,9 @@ preview_goes() {
   else
     echo "FAIL: $how preview: $out"; rc=1
   fi
+  # Nothing of it shown after, and Quick Look's handler completed once.
+  if out=$(runs gone "$file"); then echo "ok: $how preview: $out"; else
+    echo "FAIL: $how preview: $out"; rc=1; fi
 }
 echo "== preview huge.step, closed at 8 s while its kernel runs"
 cat "$huge" >"$QL_E2E_DIR/huge-closed.step"

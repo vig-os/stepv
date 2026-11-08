@@ -1800,11 +1800,24 @@ memory is freed at once. Two designs failed before this one:
     Look creates a **new** view controller for it and releases the old one. The old one's
     `deinit` cancels its run; its kernel is killed at the switch.
   - So `preparePreviewOfFile` is not called twice on one controller. Should it ever be, the
-    controller logs `preview controller reused: <old> replaced by <new>` and cancels the old
-    session before it starts the new one, so no run outlives its preview to its deadline.
-  - ql-e2e switches a preview of the 4000-part file to `box.brep` at 8 s: the old kernel's
-    cancel must fall between the logged switch and the quit, `box.brep` must be shown, and it
-    prints whether a controller was reused.
+    controller logs `preview controller reused: <old> replaced by <new>`, and the old session
+    is cancelled before the new one starts (`StepvPreviewSlot`). What a cancelled session (the
+    view closed, or superseded) guarantees:
+    - **Kernel:** its run is cancelled, and the service kills and reaps the kernel at once.
+    - **Display:** nothing more of it reaches the view. A tree, progress, result or ready that
+      is already on its way, or a decode still running, is dropped on the main thread and
+      logged `stale, dropped: preview <path> <what>`. It is never shown under the next file
+      and never marks the next file ready.
+    - **Handler:** Quick Look's completion handler is called exactly once per prepare: `nil`
+      when the preview is ready, or `CocoaError(.userCancelled)` if the session is cancelled
+      first. Each call is logged `preview <path>: ready (<why>)`.
+  - `macos/Tests/PreviewSessionTests` drives the reuse path with a fake service, whether or not
+    Quick Look ever takes it. A's result arrives and its decode is still running when B
+    supersedes it. Without the liveness check, A's scene is shown and marks B ready.
+  - ql-e2e switches a preview of the 4000-part file to `box.brep` at 8 s, and closes another.
+    The old kernel's cancel must fall between the host's logged switch or close and its quit.
+    No result line may follow for the file that went, and its handler must complete exactly
+    once. `box.brep` must be shown, and ql-e2e prints whether a controller was reused.
 - **Identity, not time, in ql-e2e** (#113's single `log stream`):
   - Each extension logs which run of which service took its file (`accepted: run #N (service
     pid P), thumbnail|preview <path>`); the service's own lines for that run begin `run #N

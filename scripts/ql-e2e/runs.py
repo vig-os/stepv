@@ -15,6 +15,9 @@ never a timestamp (#111).
                                      (preview) cancelled with SIGKILL after the host's
                                      line <from> and before its line <to>; its kernel pid
   runs.py logged <message>          whether any line says exactly <message>
+  runs.py gone <file>                (preview) a preview that went (closed, superseded):
+                                     no result shown for <file>, and Quick Look's handler
+                                     completed exactly once ("ready (<why>)")
   runs.py reused <file>              (preview) whether a controller was prepared again
                                      for another file after <file>
 
@@ -155,6 +158,16 @@ if what == "cancelled":
 
 if what == "logged":
     sys.exit(0 if any(e["message"] == args[0] for e in evs) else 1)
+
+if what == "gone":
+    mine = [
+        e["message"] for e in evs if e["message"].startswith(f"preview {args[0]}: ")
+    ]
+    ready = [m for m in mine if m.startswith(f"preview {args[0]}: ready (")]
+    shown = [m for m in mine if m not in ready]
+    whys = [m.split("ready (", 1)[1].split(")")[0] for m in ready]
+    print(f"{len(ready)} completion(s) {whys}, {len(shown)} result(s) shown")
+    sys.exit(0 if len(ready) == 1 and not shown else 1)
 
 if what == "reused":
     said = [

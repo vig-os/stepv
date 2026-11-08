@@ -2,6 +2,13 @@
 // Look's handler(nil) rule, the client backstop, and the decode of the
 // result off the main thread. The view controller only draws what it is
 // handed; macos/Tests/PreviewSessionTests drives this with a fake service.
+//
+// A session ends live or cancelled (the view went, or another prepare
+// superseded it), on the main thread. Once cancelled, nothing of it reaches
+// the view: a tree, progress, result or ready already on its way, a decode
+// already running, is dropped and logged "stale, dropped". Quick Look's
+// handler is called exactly once per session: nil when ready, or
+// CocoaError(.userCancelled) if it is cancelled first.
 
 import Foundation
 
@@ -31,14 +38,26 @@ final class StepvPreviewSession<Prepared> {
     var onResult: (Prepared) -> Void = { _ in }
     var onReady: (String) -> Void = { _ in }
 
+    let path: String
+    /// Released once called: Quick Look's handler retains its view
+    /// controller, which holds this session, and a controller kept alive
+    /// past its close would never cancel its run (ql-e2e's closed preview).
+    private var handler: ((Error?) -> Void)?
     private let prepare: (StepvRunResult) -> Prepared
     private let ready = StepvOnce()
     private let finished = StepvOnce()
     private var cancelRun: (() -> Void)?
+    /// Main thread only: false once cancelled.
+    private var live = true
+    private let started = Date()
 
-    /// `prepare` runs on a background queue: decoding a mesh and building
-    /// its scene can take long enough to stall the main thread.
-    init(prepare: @escaping (StepvRunResult) -> Prepared) {
+    /// `handler`: Quick Look's, for `path`. `prepare` runs on a background
+    /// queue: decoding a mesh and building its scene can take long enough to
+    /// stall the main thread.
+    init(path: String, handler: @escaping (Error?) -> Void,
+         prepare: @escaping (StepvRunResult) -> Prepared) {
+        self.path = path
+        self.handler = handler
         self.prepare = prepare
     }
 
@@ -48,7 +67,7 @@ final class StepvPreviewSession<Prepared> {
     /// replies; this is for a service that cannot).
     func start(readyAfter: TimeInterval, replyAfter: TimeInterval, _ start: Start) {
         cancelRun = start({ [weak self] kind, payload in
-            DispatchQueue.main.async { self?.event(kind, payload) }
+            DispatchQueue.main.async { if self?.current("event") == true { self?.event(kind, payload) } }
         }, { [weak self] result in
             self?.finish(result)
         })
@@ -63,15 +82,38 @@ final class StepvPreviewSession<Prepared> {
         }
     }
 
-    /// The view went: its kernel goes.
+    /// Main thread. The view went, or another prepare superseded this one:
+    /// its kernel goes, nothing more of it is shown, and Quick Look's handler
+    /// is completed as cancelled if it was not yet called.
     func cancel() {
+        guard live else { return }
+        live = false
         _ = finished.claim()
         cancelRun?()
+        if ready.claim() { complete("cancelled", CocoaError(.userCancelled)) }
     }
 
-    /// Quick Look's handler(nil), once.
+    /// Main thread. Quick Look's handler(nil), once, while live.
     func markReady(_ why: String) {
-        if ready.claim() { onReady(why) }
+        if current("ready (\(why))"), ready.claim() {
+            onReady(why)
+            complete(why, nil)
+        }
+    }
+
+    private func complete(_ why: String, _ error: Error?) {
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        stepvLog.notice("preview \(self.path, privacy: .public): ready (\(why, privacy: .public)) in \(ms) ms")
+        let handler = self.handler
+        self.handler = nil
+        handler?(error)
+    }
+
+    /// Main thread: whether this session is still the view's; if not, `what`
+    /// is dropped, and said so.
+    private func current(_ what: String) -> Bool {
+        if !live { stepvLog.notice("stale, dropped: preview \(self.path, privacy: .public) \(what, privacy: .public)") }
+        return live
     }
 
     private func event(_ kind: UInt8, _ payload: Data) {
@@ -95,8 +137,24 @@ final class StepvPreviewSession<Prepared> {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let prepared = self.prepare(result)
-            DispatchQueue.main.async { self.onResult(prepared) }
+            DispatchQueue.main.async { if self.current("result") { self.onResult(prepared) } }
         }
+    }
+}
+
+/// A view controller's preview, one at a time (#64). Quick Look makes a
+/// controller per previewed item, so a second prepare on one is not
+/// expected; if one comes, the session it replaces is cancelled first.
+final class StepvPreviewSlot<Prepared> {
+    private(set) var session: StepvPreviewSession<Prepared>?
+
+    /// Main thread: `next` (nil: none) becomes the view's preview.
+    func replace(with next: StepvPreviewSession<Prepared>?, path: String) {
+        if let old = session {
+            stepvLog.notice("preview controller reused: \(old.path, privacy: .public) replaced by \(path, privacy: .public)")
+            old.cancel()
+        }
+        session = next
     }
 }
 

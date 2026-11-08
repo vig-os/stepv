@@ -77,47 +77,37 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
     /// What the background decode hands the main thread: the scene and its
     /// camera, or nil, with the panel's lines.
     private typealias Prepared = (scene: SCNScene?, camera: SCNNode?, lines: [String])
-    private var session: StepvPreviewSession<Prepared>?
+    /// The preview on show; its session owns Quick Look's handler.
+    private let slot = StepvPreviewSlot<Prepared>()
     // The panel's parts, on the main thread: the header, the tree, and the
     // run's status (progress, then the result).
     private var header: [String] = []
     private var tree: [String] = []
     private var status: [String] = []
-    private var handler: ((Error?) -> Void)?
-    private var started = Date()
-    private var path = ""
 
     // Closing the preview releases this controller: Quick Look has no
     // cancel callback, and the remote view gets no disappear calls, but
     // QLPreviewView.close() and a closed panel release it (ql-e2e proves the
     // kernel is reaped then). Its kernel goes with it.
-    deinit { session?.cancel() }
+    deinit { slot.session?.cancel() }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
-        // Quick Look makes a controller per previewed item (plan.md, #64): a
-        // second prepare on this one is not expected, but if one comes, the
-        // run it replaces must not live on to its deadline.
-        if let old = session {
-            stepvLog.notice("preview controller reused: \(self.path, privacy: .public) replaced by \(url.path, privacy: .public)")
-            old.cancel()
-        }
-        self.handler = handler
-        started = Date()
-        path = url.path
+        let session = StepvPreviewSession<Prepared>(path: url.path, handler: handler,
+                                                    prepare: PreviewViewController.prepare)
+        // Supersedes any earlier preview on this controller (StepvPreviewSlot).
+        slot.replace(with: session, path: url.path)
+        tree = []
         header = StepvSceneBuilder.describe(StepvKernel.info(url))
         guard let format = StepvKernel.format(of: url) else {
             status = ["No preview: not a STEP, IGES or BREP file"]
             showPanel()
-            return ready("failure")
+            return session.markReady("failure")
         }
         status = ["Reading…"]
         showPanel()
-        let session = StepvPreviewSession<Prepared>(prepare: PreviewViewController.prepare)
         session.onTree = { [weak self] lines in self?.tree = lines; self?.showPanel() }
         session.onProgress = { [weak self] line in self?.status = [line]; self?.showPanel() }
         session.onResult = { [weak self] p in self?.show(p) }
-        session.onReady = { [weak self] why in self?.ready(why) }
-        self.session = session
         session.start(readyAfter: StepvKernel.previewHandlerAfter,
                       replyAfter: StepvKernel.previewReplyAfter) { onEvent, completion in
             let run = StepvSupervisorRun(onEvent: onEvent, completion: completion)
@@ -127,15 +117,6 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                       deadlineMs: StepvKernel.previewDeadlineMs, memoryMB: StepvKernel.memoryMB)
             return run.cancel
         }
-    }
-
-    /// Tells Quick Look the preview is up; the session calls it once.
-    private func ready(_ why: String) {
-        guard let handler else { return }
-        self.handler = nil
-        let ms = Int(Date().timeIntervalSince(started) * 1000)
-        stepvLog.notice("preview \(self.path, privacy: .public): ready (\(why, privacy: .public)) in \(ms) ms")
-        handler(nil)
     }
 
     /// Off the main thread: the mesh decoded and its scene built.
@@ -178,8 +159,8 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         status = p.lines
         showPanel()
         // What scripts/ql-e2e reads back: this file, and what was shown.
-        stepvLog.notice("preview \(self.path, privacy: .public): \(p.scene != nil ? "shown" : "none", privacy: .public): \((self.header + p.lines).joined(separator: "; "), privacy: .public)")
-        session?.markReady(p.scene != nil ? "mesh" : "failure")
+        stepvLog.notice("preview \(self.slot.session?.path ?? "?", privacy: .public): \(p.scene != nil ? "shown" : "none", privacy: .public): \((self.header + p.lines).joined(separator: "; "), privacy: .public)")
+        slot.session?.markReady(p.scene != nil ? "mesh" : "failure")
     }
 
     private func showPanel() {

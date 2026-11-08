@@ -132,6 +132,30 @@ cases = [
     ("cancelled: never", start + prev + closed + quits, c, 1),
     ("cancelled: no close logged", start + prev + cancel + quits, c, 1),
 ]
+pr = [ev(Q, "preview /p.step: ready (tree) in 90 ms")]
+shown = [ev(Q, "preview /p.step: shown: STEP; 4000 parts")]
+stale = [ev(Q, "stale, dropped: preview /p.step result")]
+cases += [
+    (
+        "gone",
+        start + prev + pr + closed + cancel + stale + quits,
+        ("gone", "/p.step"),
+        0,
+    ),
+    (
+        "gone: a result shown",
+        start + prev + pr + closed + shown + quits,
+        ("gone", "/p.step"),
+        1,
+    ),
+    (
+        "gone: completed twice",
+        start + prev + pr + closed + pr + quits,
+        ("gone", "/p.step"),
+        1,
+    ),
+    ("gone: never completed", start + prev + closed + quits, ("gone", "/p.step"), 1),
+]
 failed = 0
 for name, stream, args, want in cases:
     rc, out = run(stream, *args)
