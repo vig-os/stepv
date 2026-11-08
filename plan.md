@@ -1,8 +1,9 @@
 # stepv — implementation plan and handoff
 
 **Status:** S1–S5 built and tested; S6 (release) wired and **waiting on human credentials**
-(§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and
-in-process inside the macOS Quick Look extensions, whose sandbox forbids exec. With the per-face
+(§5 "S6", §7 "Owed"). The kernel is native OCCT 7.9.3. It runs as a subprocess on Linux, and on
+macOS as the child of an XPC supervisor service inside each Quick Look extension, whose sandbox
+forbids exec (#64). With the per-face
 recovery ladder, 99.5% of a 391-file corpus is shown faithfully, the other 0.5% is drawn with a
 flagged overlay, and nothing crashes or hangs. With seven CAD writers and a real 143 MB assembly
 added (#12, 2026-10-11) it is 99.2% of 400 (faithful or wireframe; 99.0% fully faithful). The one
@@ -659,7 +660,9 @@ relocates OCCT out of `/nix/store` into one shared `Frameworks/` (57 MB) and sig
   ABI (`kernel/stepv_occt.h`, libstepvocct, serialised because OCCT's readers share global state),
   and the renderer and header reader gained one (`capi/`, `stepv-capi`). That was the "second
   consumer" this plan named as the split trigger. Containment on macOS is the extension process,
-  which the system runs apart from Finder and kills on hang or memory pressure.
+  which the system runs apart from Finder and kills on hang or memory pressure. (#64 replaced
+  this: the kernel runs out of process, in each extension's supervisor service. The extensions
+  link the renderer and header reader only.)
 - **Buffers, not USDZ:** the preview builds an `SCNGeometry` straight from STEPVMSH, with
   per-face colour and the overlay. The thumbnail is pixel-identical to Linux's.
 - **Two traps, now in the code comments:**
@@ -885,8 +888,7 @@ and #34 (capping, fat lines).
   - The numbering is `stepv::topology_edges`, now the one function `--topology` uses too, so an
     edge id names its JSON curve by construction. A test checks every id against every
     `tests/data` file's topology.
-  - Only `stepv view` asks for v4. Thumbnails, `--glb`, `--mesh` and Quick Look's in-process path
-    stay v3, so the issue's "Quick Look keeps v3 behind a flag" holds.
+  - Only `stepv view` asks for v4. Thumbnails, `--glb`, `--mesh` and Quick Look stay v3, so the issue's "Quick Look keeps v3 behind a flag" holds.
   - The Swift reader also accepts v4 and skips the edges; `just macos-test` decodes a real v4
     file against v3.
   - `assembly.step` has 21 edges.
@@ -1671,7 +1673,7 @@ memory is freed at once. Two designs failed before this one:
     dyld's open failed with "file system sandbox blocked open()". A service's sandbox reads its
     own bundle and nothing of the app around it.
   - The app grows from 57 to 174 MB: three copies of the closure, +117 MB. The options and
-    their evaluation are in [#101](https://github.com/vig-os/stepv/issues/101). Part 2 drops
+    their evaluation are in [#101](https://github.com/vig-os/stepv/issues/101). Part 2 dropped
     the extensions' in-process copy of libstepvocct.
 - **Signing:** the kernel is signed `app-sandbox` + `inherit`, so it runs in the service's
   sandbox; without `inherit` a sandboxed child traps. The service is signed `app-sandbox` alone.
@@ -1755,11 +1757,108 @@ memory is freed at once. Two designs failed before this one:
   - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
     26.4) and on CI's `macos-15-arm64` runner, whose window session runs Quick Look's
     extensions: ALL PASS in the Kernel workflow's "Quick Look end to end" step (run 38353253049).
-- **Part 2:** both extensions switch to the service, with `handler(nil)` once the tree is shown
-  (or on the first mesh, or on failure, when there is no tree), and their own deadlines. The
-  in-process kernel goes, and `ql-e2e` gains the deadline kill, the next request and concurrent
-  requests through the real extensions. The deadline values and their reasoning will be added
-  here.
+
+**Part 2: the extensions use the service** (closes #64).
+
+- **No kernel in the extensions:** they link `libstepv_capi.a` (the renderer and header reader)
+  and nothing of libstepvocct or OCCT; `scripts/test-macos.sh` holds each binary to that with
+  `otool -L`. The app's `Frameworks/` now serves the CLI's kernel alone.
+- **Thumbnail** (`macos/Thumbnail/ThumbnailProvider.swift`):
+  - The extension hands the file to the service and replies once with the rendered image, or
+    with no thumbnail, in which case Finder keeps the generic icon.
+  - **Deadline 15 s**, enforced by the service, with a 17 s backstop in the extension for a
+    service that can't reply. Quick Look's thumbnail watchdog is undocumented and reportedly
+    about 20 s; the extension must reply before it, so the kernel gets 15 s and the render and
+    reply get the rest. A thumbnail has one reply and nothing to show partway.
+  - So a file that takes longer gets no thumbnail: the Ultimaker 3 assembly (about 42 s) keeps
+    its icon.
+- **Preview** (`macos/Preview/PreviewViewController.swift`):
+  - The header (read in the extension by the Rust header reader) shows at once. Then the
+    assembly tree: the first 14 lines of the outline, indented, with the part count. Then
+    progress (`Transferring 42 %`, `Meshing 50 %`), then the scene.
+  - **`handler(nil)`** follows #64's rule:
+    - once the header and tree are on screen;
+    - with no tree (IGES, BREP, an outline that failed or was over the frame cap), on the
+      first mesh or the failure;
+    - and at the latest after **20 s**. Quick Look's preview watchdog is reportedly about 30 s,
+      and 10 s of margin covers a loaded machine.
+  - The view lives on after the handler, so the run may take up to **120 s**: the Ultimaker 3
+    loads in about 42 s, and 120 s bounds what one preview can cost. The kernel is cancelled
+    when the view goes, and is in any case bounded by that deadline and the 4096 MB cap.
+  - Quick Look has no cancel callback.
+- **Memory cap:** 4096 MB in both extensions, the CLI's default.
+- **Closing a preview:**
+  - Quick Look has no cancel callback, and the remote view gets no disappear calls. Closing the
+    preview (`QLPreviewView.close()`, a closed panel) releases the extension's view controller,
+    whose `deinit` cancels its run, and the service kills that kernel.
+  - Quick Look keeps the controller alive while its completion handler is outstanding. So a
+    preview closed **before** it is ready is released, and its kernel cancelled, only once the
+    handler is called: at its tree, mesh or failure, or at the 20 s ready timer at the latest.
+    Measured: closed at 0.3 s, ready (tree) at 4.97 s, cancelled 32 ms later. #122 asks whether
+    to call the handler sooner. For the same reason the session releases the handler once
+    called: kept, it held the controller past every close.
+  - ql-e2e closes a preview of the 4000-part file once its ready line is logged: the host acts
+    on a signal, not at a set time. The host logs its close and, 3 s later, its quit. The
+    kernel's SIGKILL cancel must fall between the two in the log, be reaped within 1 s, and be
+    gone. Without the `deinit` cancel it fails: the kill comes only at the quit.
+  - A second case closes once the file's kernel is spawned, before it is ready. The close must
+    come before the file's ready line, and the cancel after that line, before the host quits
+    at 40 s.
+- **One controller, one preview** (measured on sage, macOS 26.4, and kept as a ql-e2e case):
+  - When the previewed item changes (`QLPreviewView.previewItem` set to another file), Quick
+    Look creates a **new** view controller for it and releases the old one. The old one's
+    `deinit` cancels its run; its kernel is killed at the switch.
+  - So `preparePreviewOfFile` is not called twice on one controller. Should it ever be, the
+    controller logs `preview controller reused: <old> replaced by <new>`, and the old session
+    is cancelled before the new one starts (`StepvPreviewSlot`). What a cancelled session (the
+    view closed, or superseded) guarantees:
+    - **Kernel:** its run is cancelled, and the service kills and reaps the kernel at once.
+    - **Display:** nothing more of it reaches the view. A tree, progress, result or ready that
+      is already on its way, or a decode still running, is dropped on the main thread and
+      logged `stale, dropped: preview <path> <what>`. It is never shown under the next file
+      and never marks the next file ready.
+    - **Handler:** Quick Look's completion handler is called exactly once per prepare: `nil`
+      when the preview is ready, or `CocoaError(.userCancelled)` if the session is cancelled
+      first. Each call is logged `preview <path>: ready (<why>)`.
+  - `macos/Tests/PreviewSessionTests` drives the reuse path with a fake service, whether or not
+    Quick Look ever takes it. A's result arrives and its decode is still running when B
+    supersedes it. Without the liveness check, A's scene is shown and marks B ready.
+  - ql-e2e switches a preview of the 4000-part file to `box.brep` once it is ready, and closes
+    another.
+    The old kernel's cancel must fall between the host's logged switch or close and its quit.
+    No result line may follow for the file that went, and its handler must complete exactly
+    once. `box.brep` must be shown, and ql-e2e prints whether a controller was reused.
+- **Identity, not time, in ql-e2e** (#113's single `log stream`):
+  - Each extension logs which run of which service took its file (`accepted: run #N (service
+    pid P), thumbnail|preview <path>`); the service's own lines for that run begin `run #N
+    (service pid P`. `scripts/ql-e2e/runs.py` finds a request's kernel that way, and judges
+    by the stream's order alone: no timestamp is compared, and no window opened at a clock time.
+  - `scripts/ql-e2e/runs_test.py` checks each verdict on made-up streams first, a decoy service
+    whose pid has the real one's as a prefix among them.
+- **Preview backstop:** past 122 s (the run's 120 s cap plus the thumbnail's 2 s margin), the
+  preview gives up on a service that never replied: it cancels the run, shows why, and drops any
+  later reply. macos/Tests/PreviewSessionTests checks this against a fake service.
+- **ql-e2e on the real extensions:**
+  - A thumbnail and a preview of STEP, IGES and BREP. Each preview must log `ready (tree)`
+    before its scene for STEP, and `ready (mesh)` for IGES and BREP, exactly once.
+  - A 4000-part stress file is thumbnailed past its deadline (about 30 s of kernel, 1.6 GB,
+    on sage). Meanwhile `box.brep` is thumbnailed beside it: never queued, its kernel must
+    exit before the held one's kill, in the service's log.
+  - Where the service admits one kernel at a time (CI's 7 GB runner), `box.brep` must instead
+    be queued behind it and spawn only after its kill, if at all.
+  - The held one gets no thumbnail; its run logs `killed (deadline)`; the kernel's pid is gone.
+    On sage: killed at 15 051 ms, reaped in 47 ms.
+  - Then the next thumbnail must take under 3 s (on sage: 193 ms, so no throttle).
+- **Known limits:**
+  - **Multi-file assemblies:** the part files are out of reach from a descriptor (#92), and
+    the preview says how many are missing.
+  - **Signing:** Developer ID with the hardened runtime and library validation (#97). Ad-hoc,
+    the hardened runtime stays off.
+  - **Size:** three copies of the OCCT closure, +117 MB (#101).
+  - **Containment** is the service's sandbox (`macos-outer`): the kernel's own Seatbelt
+    profile can't nest inside it.
+  - **Timing:** the watchdog values are reports, not documentation. The deadlines are named in
+    `macos/Shared/StepvKernel.swift`, with this reasoning.
 
 ### #74 OCCT patch (2026-10-12)
 
@@ -1891,10 +1990,11 @@ the real assembly's transfer time is #51.
   external reference that points *above* it (`../parts/x.stp`) is refused and shows as missing.
   Widening that would mean trusting more of the disk to a hostile file. Quick Look is narrower
   still: it grants the one file, which is why multi-file assemblies are blank there (#19).
-- **macOS containment.** In-process, the extension cannot cap one file's time or memory itself.
-  It relies on the system killing a hung or ballooning extension. If that proves too coarse in
-  practice, the next step is an XPC service inside the `.appex`: launchd may start one where exec
-  is forbidden, and it brings back per-file kill.
+- **macOS containment.** ~~In-process, the extension cannot cap one file's time or memory.~~
+  Done in #64: each extension's XPC supervisor service runs the kernel as its child, with a
+  deadline and a memory cap, and kills it per file. What remains is the
+  nesting: the kernel's own Seatbelt profile cannot apply inside the service's sandbox
+  (`macos-outer`).
 - **Upstream report for `occt-wasm`** (#14). The STEP-import-needs-a-filesystem gap (§3) is known
   upstream (PR #371 "Known gap"), but no issue tracks it. Filing one is outward-facing, so it is
   left to a human.

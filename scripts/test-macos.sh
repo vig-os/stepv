@@ -108,6 +108,16 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -s
   "$root/macos/Shared/StepvFrames.swift" "$root/macos/Tests/FramesTests/main.swift" -o "$tmp/frames-tests"
 "$tmp/frames-tests" "$tmp/assembly.svev" || fail "the Swift SVEV reader"
 
+# The preview's session (#64) against a fake service that never replies:
+# the backstop cancels the run and shows the error once; a late reply is
+# dropped; a normal run is ready on its tree and prepared off the main thread.
+env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -swift-version 5 \
+  -target "$(uname -m)-apple-macos14.0" -import-objc-header "$root/macos/Shared/Bridge.h" \
+  "$root"/macos/Shared/{StepvFrames,StepvSupervisor,StepvKernel,StepvPreviewSession}.swift \
+  "$root/macos/Tests/PreviewSessionTests/main.swift" "$root/target/release/libstepv_capi.a" -liconv \
+  -o "$tmp/session-tests"
+"$tmp/session-tests" || fail "the preview session"
+
 app="$root/target/macos/stepv.app"
 for x in "$app"/Contents/PlugIns/*.appex; do
   ents=$(codesign -d --entitlements - --xml "$x" 2>/dev/null | plutil -convert json -o - - 2>/dev/null \
@@ -133,6 +143,23 @@ for x in "$app"/Contents/PlugIns/*.appex; do
   for d in $deps; do
     [ -e "$xpc/Contents/Frameworks/${d#@rpath/}" ] || fail "$(basename "$x"): the kernel's $d is not in its service"
   done
+done
+# Nothing in an extension runs the kernel in-process (#64): no libstepvocct,
+# no OCCT linked into its binary; its supervisor service runs the kernel.
+# Fails closed: anything otool cannot read as a Mach-O binary with linked
+# libraries is a failure, not a pass (otool -L exits 0 on a text file).
+links_no_kernel() {
+  local deps
+  otool -h "$1" 2>/dev/null | grep -q 'Mach header' || return 1
+  deps=$(otool -L "$1" 2>/dev/null) || return 1
+  grep -q '(compatibility version' <<<"$deps" && ! grep -qE 'stepvocct|libTK' <<<"$deps"
+}
+printf 'not a binary\n' >"$tmp/text-file"
+! links_no_kernel /nonexistent || fail "the linkage check passes a binary that does not exist"
+! links_no_kernel "$tmp/text-file" || fail "the linkage check passes a text file"
+for x in "$app"/Contents/PlugIns/*.appex; do
+  links_no_kernel "$x/Contents/MacOS/$(basename "$x" .appex)" \
+    || fail "$(basename "$x") links the kernel in-process, or otool cannot read it"
 done
 codesign --verify --deep --strict "$app" || fail "codesign --verify --deep --strict"
 echo "ok: each extension embeds its supervisor, kernel and Frameworks, signed and minimally entitled"

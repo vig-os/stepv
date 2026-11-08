@@ -1,9 +1,10 @@
 //! C ABI over `stepv`'s renderer and header reader (`stepv.h`).
 //!
 //! For the macOS Quick Look extensions: their sandbox forbids exec, so they
-//! cannot run the `stepv` CLI and link this instead, next to the in-process
-//! kernel (`kernel/stepv_occt.h`). Thumbnails stay pixel-identical to the
-//! CLI's, overlay included, because this calls the same code.
+//! cannot run the `stepv` CLI and link this instead. The kernel itself runs
+//! in each extension's XPC supervisor service (#64); the extensions render
+//! its mesh and read the header with this. Thumbnails stay pixel-identical to
+//! the CLI's, overlay included, because this calls the same code.
 //!
 //! No panic may unwind into Swift: every entry point catches it and reports
 //! `STEPV_ERR_INTERNAL`.
