@@ -7,25 +7,23 @@
 #
 #   scripts/ql-e2e/ql-e2e.sh <thumb|preview> <file>
 #
-# Needs a window session, target/ql-e2e (build.sh) and the build under test
-# installed at /Applications/stepv.app (just macos-install).
+# Run by run-all.sh, which gives it the run directory and the log stream
+# (QL_E2E_DIR, QL_E2E_STREAM). Needs a window session, target/ql-e2e
+# (build.sh) and the build under test installed at /Applications/stepv.app
+# (just macos-install).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 bin="$root/target/ql-e2e"
 kind=${1:?thumb|preview}
 file=${2:?file}
 work=${QL_E2E_DIR:?the run directory, from run-all.sh}
+stream=${QL_E2E_STREAM:?the log stream file, from run-all.sh}
 copy="$work/$(date +%H%M%S)-$$-$kind-$(basename "$file")"
 # Freshly written bytes: a new file, a new inode, whatever cp would do (GNU
 # cp may clone). Quick Look's thumbnail cache is keyed on the inode: a file
 # it has seen is answered from the cache, and the extension never runs.
 # QL_E2E_REUSE=1 uses <file> as it is: run-all.sh's cache-hit control.
 if [ "${QL_E2E_REUSE:-}" = 1 ]; then copy=$file; else cat "$file" >"$copy"; fi
-# The log window opens at a whole second (log show), so the verdict counts
-# only events from this request's own start on (e2elog.py): never the lines
-# of a request before it.
-start=$(date '+%Y-%m-%d %H:%M:%S')
-since=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$root/scripts/ql-e2e")
 echo "== $kind $(basename "$file")"
 case $kind in
   thumb)
@@ -39,24 +37,26 @@ case $kind in
     [ $rc -eq 124 ] && pkill -f "$bin/ql-preview-host.app/Contents/MacOS/ql-preview-host" ;;
   *) echo "kind: thumb|preview" >&2; exit 2 ;;
 esac
-# The log lags: poll until the extension's line for this file is in it, at
-# most 30 s, then judge everything logged for the file.
+# The extension's result line for this path, from the one log stream: by
+# the path alone, never by when it was stamped (e2elog.py). At most 30 s;
+# past that, say so and judge what is there. For the cache control's
+# second request that is the expected end: no line ever comes.
 end=$((SECONDS + 30))
-while :; do
-  timeout 60 /usr/bin/log show --start "$start" --style ndjson --info \
-    --predicate 'subsystem == "ch.exoma.stepv"' >"$work/log.ndjson" 2>/dev/null
-  python3 "$root/scripts/ql-e2e/verdict.py" --logged "$kind" "$copy" "$since" <"$work/log.ndjson" && break
-  [ $SECONDS -lt $end ] || break
-  sleep 0.5
+until python3 "$root/scripts/ql-e2e/verdict.py" --logged "$kind" "$copy" <"$stream"; do
+  [ $SECONDS -lt $end ] || { echo "  no result line for $copy in the log stream within 30 s"; break; }
+  sleep 0.2
 done
-python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" "$since" <"$work/log.ndjson" && exit 0
-# The evidence, for a failure on a machine no one can look at afterwards.
-echo "  stepv's log since $start:"
+python3 "$root/scripts/ql-e2e/verdict.py" "$kind" "$copy" <"$stream" && exit 0
+# The evidence, for a failure on a machine no one can look at afterwards:
+# the stream's last Quick Look extension lines, this request's among them if
+# any came.
+echo "  the extensions' last lines in the log stream:"
 python3 -c '
-import json, sys
-for line in sys.stdin:
-    try: e = json.loads(line)
-    except ValueError: continue
-    print("   ", e.get("timestamp", "")[11:23], e.get("processImagePath", "").rsplit("/", 1)[-1], e.get("eventMessage", "")[:200])
-' <"$work/log.ndjson"
+import sys
+sys.path.insert(0, sys.argv[1])
+import e2elog
+ql = [e for e in e2elog.events(sys.stdin) if e["category"] == "quicklook"]
+for e in ql[-20:]:
+    print("   ", e["process"].rsplit("/", 1)[-1], "pid", e["pid"], e["message"][:200])
+' "$root/scripts/ql-e2e" <"$stream"
 exit 1

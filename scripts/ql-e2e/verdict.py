@@ -1,34 +1,36 @@
-"""ql-e2e's verdict (#64): the installed stepv extension's own log line for
-one run's file, from `log show --style ndjson` on stdin, counting only the
-events from the request's own start (e2elog.py).
+"""ql-e2e's verdict (#64): the installed stepv extension's own log lines for
+one request's file, from run-all.sh's `log stream --style ndjson` on stdin
+(e2elog.py). The file's path is the request's identity: ql-e2e.sh gives each
+request a path of its own, and only lines naming exactly that path count,
+whenever they were stamped.
 
-  verdict.py <thumb|preview> <file> <since>
+  verdict.py <thumb|preview> <file>
 
 PASS needs at least one line, and every line for the file from the right
 extension, running out of /Applications/stepv.app, and saying it drew
 ("thumbnail <file>: drawn") or showed geometry ("preview <file>: shown"):
 one failing line fails the run, whatever else passed. Exit 0 on PASS.
 
-  verdict.py --logged <thumb|preview> <file> <since>
+  verdict.py --logged <thumb|preview> <file>
 
-Exit 0 if any line for the file is logged yet, silently: what ql-e2e.sh
-polls for before it judges."""
+Exit 0 if a result line for the file is in the stream yet, silently: what
+ql-e2e.sh waits for before it judges."""
 
 import sys
 
 from e2elog import events
 
 polling = sys.argv[1] == "--logged"
-kind, path, since = sys.argv[1 + polling], sys.argv[2 + polling], sys.argv[3 + polling]
+kind, path = sys.argv[1 + polling], sys.argv[2 + polling]
 process = {"thumb": "StepvThumbnail", "preview": "StepvPreview"}[kind]
 prefix = {"thumb": "thumbnail", "preview": "preview"}[kind] + f" {path}: "
 lines = []
 requested = False  # the thumbnail extension's "thumbnail request: <file>"
-for e in events(sys.stdin, since):
+for e in events(sys.stdin):
     m = e["message"]
     requested |= m == f"thumbnail request: {path}"
     if m.startswith(prefix):
-        lines.append((e["process"], m[len(prefix) :]))
+        lines.append((e["process"], e["pid"], m[len(prefix) :]))
 
 if polling:
     sys.exit(0 if lines else 1)
@@ -45,14 +47,14 @@ elif not lines and requested:
     print(f"  {path}: the extension got the request but logged no result")
 elif not lines:
     print(f"  no log line for {path}: the extension did not run, or not this build")
-for image, said in lines:
+for image, pid, said in lines:
     ours = image.startswith("/Applications/stepv.app/") and image.endswith(
         "/" + process
     )
     good = ours and said.startswith("drawn" if kind == "thumb" else "shown")
     ok &= good
     print(
-        f"  {'PASS' if good else 'FAIL'}: {image.rsplit('/', 1)[-1] or '?'}: {said}"
+        f"  {'PASS' if good else 'FAIL'}: {image.rsplit('/', 1)[-1] or '?'} pid {pid}: {said}"
         + ("" if ours else f" (from {image}, not /Applications/stepv.app's {process})")
     )
 print("  VERDICT:", "PASS" if ok else "FAIL")

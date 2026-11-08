@@ -1742,11 +1742,16 @@ memory is freed at once. Two designs failed before this one:
     thumbnail request at notice level, and a thumbnail with no request line fails as "QL
     served a cached thumbnail; the extension did not run". A control in `run-all.sh` asks for
     one file twice and requires the second to be caught this way. A failed verdict prints the
-    window's stepv log: #98's one CI failure (`thumb box.brep`, a thumbnail in 65 ms and no log
-    line) left no evidence of which it was.
-  - It fails if any of the extension's lines for a file fails. It polls the log for that line
-    under a timeout, rather than sleeping. It refuses to run when it can't tell which build a
-    running extension process is.
+    extensions' last log lines: #98's one CI failure (`thumb box.brep`, a thumbnail in 65 ms and
+    no log line) left no evidence of which it was.
+  - It fails if any of the extension's lines for a file fails. It waits for that line, at most
+    30 s, rather than sleeping. It refuses to run when it can't tell which build a running
+    extension process is.
+  - **The log is read from one `log stream`**, started by `run-all.sh` before the first request
+    and shared with `supervisor.sh`, and every line is found by identity: a request's own path,
+    a service pid and run number. Never by time (#111): on CI's macOS VM a log event's
+    timestamp ran ~0.7 s behind the wall clock, so a window opened at the request's start
+    dropped the request's own line, and a 769 ms thumbnail was judged cached.
   - Part 1: a thumbnail and a preview of STEP, IGES and BREP, all pass locally (sage, macOS
     26.4) and on CI's `macos-15-arm64` runner, whose window session runs Quick Look's
     extensions: ALL PASS in the Kernel workflow's "Quick Look end to end" step (run 38353253049).

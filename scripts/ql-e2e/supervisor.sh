@@ -67,38 +67,42 @@ env -i PATH=/usr/bin:/bin HOME="$HOME" TMPDIR="$tmp" /usr/bin/xcrun swiftc -O -s
   -o "$probe" || fail "building the probe"
 codesign --force --sign - --entitlements "$tmp/probe.entitlements" "$probe" 2>/dev/null || fail "signing the probe"
 
-# Bounds how much log is read: from this instant on ($start_iso, for
-# e2elog.py). Only a bound: runs are told apart by who they are (service
-# pid, run number), never by when they logged (#111).
-set_start() {
-  start_iso=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elog; print(e2elog.now())' "$root/scripts/ql-e2e")
-}
 # The supervisor's log, as logd pushes it: one `log stream` for the whole
 # run, read from a file. Not `log show`, which re-reads the system log on
 # every poll: on CI's small runner, next to a busy 4000-part kernel, that
-# fell more than 30 s behind lines logged on time (#113's CI).
-/usr/bin/log stream --style ndjson --level info \
-  --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' >"$tmp/stream.ndjson" 2>/dev/null &
-streamer=$!
-trap 'kill "$streamer" 2>/dev/null; rm -rf "$tmp"' EXIT
+# fell more than 30 s behind lines logged on time (#113's CI). Under
+# run-all.sh, its stream (QL_E2E_STREAM), which holds these lines too.
+# Every line is found by who it is about (service pid, run number), never by
+# when it was stamped: the log's timestamps do not keep to the clock this
+# script reads (e2elog.py, #111).
+if [ -n "${QL_E2E_STREAM:-}" ]; then
+  stream=$QL_E2E_STREAM
+else
+  stream="$tmp/stream.ndjson"
+  /usr/bin/log stream --style ndjson --level info \
+    --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' >"$stream" 2>/dev/null &
+  streamer=$!
+  trap 'kill "$streamer" 2>/dev/null; rm -rf "$tmp"' EXIT
+fi
 # The stream prints a header line once it is filtering: from then on no line
 # is missed.
 end=$((SECONDS + 30))
-until [ -s "$tmp/stream.ndjson" ]; do [ $SECONDS -lt $end ] || fail "log stream did not start"; sleep 0.1; done
-log_since() {
-  cat "$tmp/stream.ndjson" \
-    | python3 -c '
+until [ -s "$stream" ]; do [ $SECONDS -lt $end ] || fail "log stream did not start"; sleep 0.1; done
+# The supervisor's lines in the stream so far, one message a line.
+log_lines() {
+  python3 -c '
 import sys
 sys.path.insert(0, sys.argv[1])
 import e2elog
-for e in e2elog.events(sys.stdin, sys.argv[2]):
-    print(e["message"])' "$root/scripts/ql-e2e" "$start_iso"
+for e in e2elog.events(sys.stdin):
+    if e["category"] == "supervisor":
+        print(e["message"])' "$root/scripts/ql-e2e" <"$stream"
 }
 # Polls the log until it holds a line matching $1 (ERE), at most $2 s.
 await_log() {
   local end=$((SECONDS + $2))
   while [ $SECONDS -lt $end ]; do
-    log_since >"$tmp/log.txt"
+    log_lines >"$tmp/log.txt"
     grep -E -q "$1" "$tmp/log.txt" && return 0
     sleep 0.5
   done
@@ -169,18 +173,16 @@ await_file() {
 }
 container_tmp="$HOME/Library/Containers/$service/Data/tmp"
 rc=0
-run_start=$(date '+%Y-%m-%d %H:%M:%S')
 
 # 1. The service dies under a running kernel (SIGKILL: no cleanup of its
 #    own runs): the kernel's lifeline closes and it exits within 1 s. Its
 #    mesh stays behind until the next service sweeps it (step 2).
-set_start
 echo "== supervisor probe: $service"
 drive "$probe" "$service" hold "$tmp/files/huge.step" >"$tmp/hold.txt" 2>&1 &
 holder=$!
 if await_file "$tmp/hold.txt" '^held run [0-9]+ service pid [0-9]+' 40; then
   read -r _ _ hrun _ _ spid < <(grep -E -m1 '^held run' "$tmp/hold.txt")
-  log_since >"$tmp/log.txt"
+  log_lines >"$tmp/log.txt"
   kpid=$(grep -oE -m1 "$(log_pattern spawned "$hrun" "$spid")" "$tmp/log.txt" \
     | sed -E 's/.*kernel pid ([0-9]+) spawned/\1/')
   limit=$(grep -E "$(log_pattern started 0 "$spid")" "$tmp/log.txt" | grep -oE -m1 'admission limit [0-9]+' | grep -oE '[0-9]+$')
@@ -216,7 +218,6 @@ mkdir -p "$container_tmp/stepv-run-planted"
 : >"$container_tmp/stepv-run-planted/lock"
 : >"$container_tmp/stepv-run-planted/mesh.msh"
 : >"$container_tmp/stepv-run-planted/stepv-input-planted.igs"
-set_start
 # The admission limit this machine gives the service (Admission), from the
 # held run's service (step 1): the concurrency check depends on it.
 [ -n "${limit:-}" ] || { echo "FAIL: the service logged no admission limit"; rc=1; limit=1; }
@@ -296,10 +297,9 @@ mkdir -p "$lxpc/Contents/Resources"
 echo 1 >"$lxpc/Contents/Resources/admission-limit"
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$lxpc" 2>/dev/null \
   || fail "signing the test supervisor"
-set_start
 drive timeout 120 "$tmp/limit1.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" admission "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
-log_since >"$tmp/log.txt"
+log_lines >"$tmp/log.txt"
 # This probe's service's lines alone (owned_by: anchored), in log order.
 owned_by "$(driven_pid)" "$tmp/log.txt" >"$tmp/mine.txt"
 order=$(python3 - "$tmp/mine.txt" <<'PY'
@@ -349,14 +349,12 @@ hxpc="$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/XPCServices
 rm -f "$container_tmp"/release-*  # none left over from an earlier run: only this test's release counts
 codesign --force --sign - --entitlements "$root/macos/supervisor.entitlements" "$hxpc" 2>/dev/null \
   || fail "signing the handover test supervisor"
-set_start
 drive timeout 60 "$tmp/handover.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
   "$service" handover "$tmp/files/huge.step" "$tmp/files/assembly.step" || rc=1
 
 # 4b. A live run survives another instance's sweep. Two client processes
 #     each start their own instance of the service, in one container: B's
 #     start-up sweep must keep A's running run, whose mesh then arrives.
-set_start
 "$probe" "$service" live "$tmp/files/slow.step" >"$tmp/live.txt" 2>&1 &
 live=$!
 # A's service, from A itself; its run is spawned once logged so.
@@ -366,7 +364,7 @@ if await_file "$tmp/live.txt" '^service pid [0-9]+' 20 \
   timeout 60 "$tmp/standin.app/Contents/PlugIns/StepvPreview.appex/Contents/MacOS/supervisor-probe" \
     "$service" live "$tmp/files/frames.step" >"$tmp/live-b.txt" 2>&1
   bpid=$(grep -oE -m1 'service pid [0-9]+' "$tmp/live-b.txt" | awk '{print $3}')
-  log_since >"$tmp/log.txt"
+  log_lines >"$tmp/log.txt"
   bline=$(grep -E -m1 "$(log_pattern started 0 "${bpid:-none}")" "$tmp/log.txt")
   if [ -z "$bpid" ] || [ "$bpid" = "$apid" ] || [ -z "$bline" ]; then
     echo "FAIL: no second instance of the service started beside pid $apid (got ${bpid:-none})"
@@ -391,11 +389,9 @@ if [ -z "$left" ]; then echo "ok: no run directory left in $container_tmp"; else
 
 if [ $rc -ne 0 ]; then
   # The evidence, for a failure on a machine no one can look at afterwards:
-  # every supervisor line of the whole run.
+  # every supervisor line of the stream.
   echo "  the supervisor log of this run:"
-  timeout 60 /usr/bin/log show --start "$run_start" --style compact --info \
-    --predicate 'subsystem == "ch.exoma.stepv" AND category == "supervisor"' 2>/dev/null \
-    | tail -n 300 | sed 's/^/    /'
+  log_lines | tail -n 300 | sed 's/^/    /'
 fi
 [ $rc -eq 0 ] && echo "supervisor: all checks passed" || echo "supervisor: FAILURES"
 exit $rc
