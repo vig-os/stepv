@@ -31,6 +31,24 @@ done
 # Canonical (/private/var, not /var): the extensions log the real path.
 QL_E2E_DIR=$(cd -P "$(mktemp -d)" && pwd); export QL_E2E_DIR
 trap 'rm -rf "$QL_E2E_DIR"' EXIT
+# stepv's log, the extensions' and the supervisor's, as logd pushes it: one
+# `log stream` for the whole run, started before the first request, read
+# from its file by every check (QL_E2E_STREAM). Not `log show`, polled per
+# request: each check finds its lines by who they are (a request's path, a
+# service pid), never by a window opened at a wall-clock time, which the
+# log's own timestamps do not keep to (e2elog.py, #111).
+QL_E2E_STREAM="$QL_E2E_DIR/stream.ndjson"; export QL_E2E_STREAM
+/usr/bin/log stream --style ndjson --level info \
+  --predicate 'subsystem == "ch.exoma.stepv"' >"$QL_E2E_STREAM" 2>/dev/null &
+streamer=$!
+trap 'kill "$streamer" 2>/dev/null; rm -rf "$QL_E2E_DIR"' EXIT
+# The stream prints a header line once it is filtering: from then on no line
+# is missed.
+end=$((SECONDS + 30))
+until [ -s "$QL_E2E_STREAM" ]; do
+  [ $SECONDS -lt $end ] || { echo "ql-e2e: log stream did not start within 30 s" >&2; exit 2; }
+  sleep 0.1
+done
 rc=0
 "$e2e/supervisor.sh" "$built" || rc=1
 for f in assembly.step box.igs box.brep; do
@@ -38,13 +56,17 @@ for f in assembly.step box.igs box.brep; do
     "$e2e/ql-e2e.sh" "$k" "$root/tests/data/$f" || rc=1
   done
 done
-# The control: the same file thumbnailed twice. Quick Look answers the
-# second from its cache, and the verdict must say so and fail: proof that a
-# cached thumbnail can never pass for the extension's.
+# The control: one file thumbnailed twice, the second time through a hard
+# link: a new path, the same inode, which Quick Look's cache is keyed on. It
+# answers from the cache, the extension never sees the link's path, and the
+# verdict, which goes by the path, must say so and fail: proof that a cached
+# thumbnail can never pass for the extension's. By identity, not by time
+# (#111).
 cat "$root/tests/data/box.brep" >"$QL_E2E_DIR/cache-control.brep"
 QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control.brep" >/dev/null 2>&1 \
   || { echo "FAIL: cache control: the first request did not pass"; rc=1; }
-out=$(QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control.brep" 2>&1) \
+ln "$QL_E2E_DIR/cache-control.brep" "$QL_E2E_DIR/cache-control-link.brep"
+out=$(QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$QL_E2E_DIR/cache-control-link.brep" 2>&1) \
   && { echo "FAIL: cache control: a cached thumbnail passed"; rc=1; }
 if grep -q "QL served a cached thumbnail" <<<"$out"; then
   echo "ok: cache control: a repeated request is caught as a cached thumbnail"

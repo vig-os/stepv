@@ -25,6 +25,10 @@ import Foundation
 /// completes only once it has them all.
 @objc(StepvRunObserver) protocol StepvRunObserver {
     func event(_ kind: Int, payload: Data)
+    /// The service took the run (valid, before admission): its number in
+    /// the service's log ("run #N (service pid P"). Not one of the events
+    /// the reply counts.
+    func accepted(_ run: Int)
 }
 
 /// How a run ended.
@@ -80,6 +84,15 @@ final class StepvSupervisorRun: NSObject, StepvRunObserver {
     private var replied: (result: StepvRunResult, events: Int)?
     private var delivered = 0
 
+    /// The supervisor service process this run talks to: the pid its log
+    /// lines carry ("service pid P"). 0 until a message from it arrived;
+    /// `onAccepted` comes with it set.
+    var servicePid: Int32 { connection.processIdentifier }
+    /// Called once the service has taken the run, with its number there and
+    /// the service's pid: who the run is in the service's log, so a test can
+    /// tell it from any other.
+    var onAccepted: ((_ run: Int, _ servicePid: Int32) -> Void)?
+
     /// The service embedded in the calling bundle: "<bundle id>.supervisor".
     static var serviceName: String { (Bundle.main.bundleIdentifier ?? "") + ".supervisor" }
 
@@ -128,6 +141,10 @@ final class StepvSupervisorRun: NSObject, StepvRunObserver {
     func cancel() {
         lock.lock(); completion = nil; lock.unlock()
         connection.invalidate()
+    }
+
+    func accepted(_ run: Int) {
+        onAccepted?(run, connection.processIdentifier)
     }
 
     func event(_ kind: Int, payload: Data) {
