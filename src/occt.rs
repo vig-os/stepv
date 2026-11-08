@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::cap::Sampler;
 use crate::{BBox, Color, Deflection, Edges, Face, FaceStatus, LineKind, Lines, Mesh, Part, Scene};
 
 /// The kernel's JSON summary, one line on its stdout. Present on success AND
@@ -556,7 +557,7 @@ fn supervise<T: Send + 'static>(
     let reader = std::thread::spawn(move || read(stdout));
 
     let (mut over_memory, mut cancelled) = (false, false);
-    let mut last_probe = Instant::now();
+    let mut memory = Sampler::new(limits.memory);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -566,16 +567,11 @@ fn supervise<T: Send + 'static>(
             let _ = child.wait();
             break None;
         }
-        if let Some(cap) = limits.memory
-            && last_probe.elapsed() >= Duration::from_millis(5)
-        {
-            last_probe = Instant::now();
-            if footprint(child.id()).is_some_and(|b| b > cap) {
-                over_memory = true;
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
+        if memory.over(|| footprint(child.id())) {
+            over_memory = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
         }
         if !tick() {
             cancelled = true;
@@ -888,38 +884,9 @@ pub fn read_events(
     }
 }
 
-/// A process's current memory footprint in bytes, as the OS accounts it for
-/// the user: `ri_phys_footprint` on macOS (what Activity Monitor shows), the
-/// resident set on Linux. `None` when it cannot be read (the process exited).
-#[must_use]
-pub fn footprint(pid: u32) -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` is a correctly sized, writable rusage_info_v2, which
-        // is what flavor RUSAGE_INFO_V2 writes.
-        let rc = unsafe {
-            libc::proc_pid_rusage(
-                pid as libc::c_int,
-                libc::RUSAGE_INFO_V2,
-                (&raw mut info).cast(),
-            )
-        };
-        (rc == 0).then_some(info.ri_phys_footprint)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // /proc/<pid>/statm: size resident shared ... in pages.
-        let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
-        let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-        Some(pages * 4096)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = pid;
-        None
-    }
-}
+/// A process's current memory footprint in bytes: [`crate::cap::footprint`],
+/// the sampler the kernel's memory cap reads.
+pub use crate::cap::footprint;
 
 /// A malformed mesh file. The kernel wrote it, so any of these is a bug on
 /// one side of the format, never bad user input.
