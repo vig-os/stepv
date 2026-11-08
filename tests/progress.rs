@@ -2,6 +2,8 @@
 //! real pseudo-terminal, and nothing when it is not; stdout's JSON line is
 //! the same either way. Runs the real kernel against `tests/data/`.
 
+mod common;
+
 use std::io::Read as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -226,8 +228,7 @@ fn a_cached_outline_names_the_parts_before_the_kernel_starts() {
     // A kernel that never says a word, killed at the 2 s cap: whatever the
     // line names came from the cache.
     let mute = h.0.join("mute-kernel");
-    std::fs::write(&mute, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&mute, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    common::executable(&mute, "exec sleep 30");
     let args = [
         input.to_str().unwrap(),
         "--png",

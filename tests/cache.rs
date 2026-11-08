@@ -3,6 +3,8 @@
 //! after its outline leaves the outline artifact but no entry. Run the real
 //! kernel against `tests/data/`.
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -152,8 +154,7 @@ fn a_timed_out_run_caches_nothing_and_blocks_nothing() {
 
     // A kernel that hangs; the 1 s cap kills it.
     let slow = h.0.join("slow-kernel");
-    std::fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::executable(&slow, "exec sleep 30");
     let timed_out = [&args[..], &["--timeout", "1"]].concat();
     let (code, j) = h.stepv(&timed_out, &[("STEPV_OCCT", slow.to_str().unwrap())]);
     assert_eq!(code, 4, "{j}");
@@ -218,8 +219,7 @@ fn a_memory_capped_run_caches_nothing() {
 /// An executable `sh` script `body` under `h`, as a stand-in kernel.
 fn script(h: &Home, name: &str, body: &str) -> PathBuf {
     let p = h.0.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::executable(&p, body);
     p
 }
 

@@ -232,6 +232,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tests no longer fail to run their own fake kernels on Linux** ([#117](https://github.com/vig-os/stepv/issues/117)):
+  - A child `sh` writes each test script (`tests/common`), so the test process never holds a
+    script's write descriptor. Before, a child forked by a parallel test could hold it, and
+    exec'ing the script failed with ETXTBSY (`Text file busy`)
 - **The Linux viewer job's Xvfb no longer drops a window test's connection**
   ([#104](https://github.com/vig-os/stepv/issues/104)):
   - Each Xvfb runs with `-noreset`. An X server resets when its last client disconnects and drops
