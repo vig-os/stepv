@@ -1791,22 +1791,27 @@ memory is freed at once. Two designs failed before this one:
   - Quick Look has no cancel callback, and the remote view gets no disappear calls. Closing the
     preview (`QLPreviewView.close()`, a closed panel) releases the extension's view controller,
     whose `deinit` cancels its run, and the service kills that kernel.
-  - ql-e2e closes a preview of the 4000-part file at 8 s. Its kernel must be cancelled with
-    SIGKILL and reaped within 3 s, and gone.
-- **One controller, one preview** (measured on sage, macOS 26.4):
+  - ql-e2e closes a preview of the 4000-part file at 8 s. The host logs its close and, 3 s
+    later, its quit; the kernel's SIGKILL cancel must fall between the two in the log, be reaped
+    within 1 s, and be gone. Without the `deinit` cancel it fails: the kill comes only at the
+    quit.
+- **One controller, one preview** (measured on sage, macOS 26.4, and kept as a ql-e2e case):
   - When the previewed item changes (`QLPreviewView.previewItem` set to another file), Quick
     Look creates a **new** view controller for it and releases the old one. The old one's
-    `deinit` cancels its run, and its kernel was killed at the switch.
-  - So `preparePreviewOfFile` is not called twice on one controller, and there is no second
-    session to cancel.
-- **Log scoping in ql-e2e:**
-  - Every assertion keeps only the events from its own request's start on, to the
-    microsecond (`scripts/ql-e2e/e2elog.py`), and attributes supervisor lines to their service
-    by pid.
-  - `log show --start` takes whole seconds. In #107's CI the repeated cache-control request
-    (7 ms, from Quick Look's cache) passed on the "drawn" line of the request before it, for
-    the same file, in the same second.
-  - Reproduced locally 5 of 5 before the fix; caught 5 of 5 after.
+    `deinit` cancels its run; its kernel is killed at the switch.
+  - So `preparePreviewOfFile` is not called twice on one controller. Should it ever be, the
+    controller logs `preview controller reused: <old> replaced by <new>` and cancels the old
+    session before it starts the new one, so no run outlives its preview to its deadline.
+  - ql-e2e switches a preview of the 4000-part file to `box.brep` at 8 s: the old kernel's
+    cancel must fall between the logged switch and the quit, `box.brep` must be shown, and it
+    prints whether a controller was reused.
+- **Identity, not time, in ql-e2e** (#113's single `log stream`):
+  - Each extension logs which run of which service took its file (`accepted: run #N (service
+    pid P), thumbnail|preview <path>`); the service's own lines for that run begin `run #N
+    (service pid P`. `scripts/ql-e2e/runs.py` finds a request's kernel that way, and judges
+    by the stream's order alone: no timestamp is compared, and no window opened at a clock time.
+  - `scripts/ql-e2e/runs_test.py` checks each verdict on made-up streams first, a decoy service
+    whose pid has the real one's as a prefix among them.
 - **Preview backstop:** past 122 s (the run's 120 s cap plus the thumbnail's 2 s margin), the
   preview gives up on a service that never replied: it cancels the run, shows why, and drops any
   later reply. macos/Tests/PreviewSessionTests checks this against a fake service.
@@ -1814,10 +1819,12 @@ memory is freed at once. Two designs failed before this one:
   - A thumbnail and a preview of STEP, IGES and BREP. Each preview must log `ready (tree)`
     before its scene for STEP, and `ready (mesh)` for IGES and BREP, exactly once.
   - A 4000-part stress file is thumbnailed past its deadline (about 30 s of kernel, 1.6 GB,
-    on sage). Meanwhile `box.brep` is thumbnailed beside it and must draw while the held one
-    still runs.
-  - The held one gets no thumbnail within 25 s; the service logs `killed (deadline)`; the
-    kernel's pid is gone. On sage: killed at 15 051 ms, reaped in 47 ms.
+    on sage). Meanwhile `box.brep` is thumbnailed beside it: never queued, its kernel must
+    exit before the held one's kill, in the service's log.
+  - Where the service admits one kernel at a time (CI's 7 GB runner), `box.brep` must instead
+    be queued behind it and spawn only after its kill, if at all.
+  - The held one gets no thumbnail; its run logs `killed (deadline)`; the kernel's pid is gone.
+    On sage: killed at 15 051 ms, reaped in 47 ms.
   - Then the next thumbnail must take under 3 s (on sage: 193 ms, so no throttle).
 - **Known limits:**
   - **Multi-file assemblies:** the part files are out of reach from a descriptor (#92), and

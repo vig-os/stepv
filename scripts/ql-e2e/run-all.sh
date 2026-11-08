@@ -3,6 +3,9 @@
 #   1. supervisor.sh: the supervisor service, probed outside Quick Look.
 #   2. Quick Look itself runs the installed extensions: a thumbnail and a
 #      preview of a small STEP file, an IGES and a BREP file.
+#   3. Through them, the supervisor's limits: a thumbnail past its deadline
+#      with another beside it, the next one unthrottled, and a preview
+#      closed, and one switched to another file, while its kernel runs.
 # Needs a window session and the build installed (just ql-e2e does both).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -50,12 +53,113 @@ until [ -s "$QL_E2E_STREAM" ]; do
   sleep 0.1
 done
 rc=0
+# The identity checks below, on made-up streams first.
+python3 "$e2e/runs_test.py" >"$QL_E2E_DIR/runs_test.txt" \
+  || { echo "FAIL: runs.py's own check:"; grep FAIL "$QL_E2E_DIR/runs_test.txt"; rc=1; }
 "$e2e/supervisor.sh" "$built" || rc=1
 for f in assembly.step box.igs box.brep; do
   for k in thumb preview; do
     "$e2e/ql-e2e.sh" "$k" "$root/tests/data/$f" || rc=1
   done
 done
+# The checks below find a request's run in the supervisor service by
+# identity (runs.py): the run and service pid its extension logged as
+# accepted for that file, then that run's own lines, in stream order.
+runs() { python3 "$e2e/runs.py" "$@" <"$QL_E2E_STREAM"; }
+# runs.py <args> until it passes, at most $1 s; its last output either way.
+await_runs() {
+  local end=$((SECONDS + $1)) out; shift
+  until out=$(runs "$@"); do
+    [ $SECONDS -lt $end ] || { echo "$out"; return 1; }
+    sleep 0.2
+  done
+  echo "$out"
+}
+bin="$root/target/ql-e2e"
+
+# Through the real thumbnail extension (#64): a file past its 15 s deadline
+# (4000 distinct parts: ~30 s of kernel and 1.6 GB on an M-series Mac), with
+# box.brep beside it, which must not wait for it where the service admits
+# two kernels; then the deadline kill with no kernel left, then the next
+# request with no throttle.
+huge="$QL_E2E_DIR/huge.step"
+"$root/target/kernel/stress-gen" "$root/tests/data/assembly.step" 4000 "$huge" >/dev/null 2>&1 \
+  || { echo "FAIL: stress-gen"; rc=1; }
+echo "== thumb huge.step (past its deadline), and box.brep beside it"
+timeout 60 "$bin/ql-thumb" "$huge" 256 40 >"$QL_E2E_DIR/huge.txt" 2>&1 &
+held=$!
+# box.brep goes once huge.step's own kernel is logged spawned.
+huge_kernel=$(await_runs 30 spawned thumbnail "$huge") \
+  || { echo "FAIL: huge.step's kernel was not seen spawned: $huge_kernel"; rc=1; }
+# The admission limit (#108) of the service that took huge.step.
+limit=$(runs limit thumbnail "$huge") || { echo "FAIL: $limit"; rc=1; limit=0; }
+echo "  thumbnail service admission limit: $limit"
+beside="$QL_E2E_DIR/beside-box.brep"
+cat "$root/tests/data/box.brep" >"$beside"
+if [ "$limit" -ge 2 ]; then
+  QL_E2E_REUSE=1 "$e2e/ql-e2e.sh" thumb "$beside" || rc=1
+elif [ "$limit" = 1 ]; then
+  # One kernel at a time (CI's 7 GB runner): box.brep waits in the queue
+  # until huge.step's kill, then runs or expires there; it need not draw.
+  timeout 60 "$bin/ql-thumb" "$beside" 256 40 >/dev/null 2>&1
+fi
+wait "$held"
+sed 's/^/  /' "$QL_E2E_DIR/huge.txt"
+if dl=$(await_runs 30 deadline "$huge") && ! grep -q "type=thumbnail" "$QL_E2E_DIR/huge.txt"; then
+  echo "ok: deadline: no thumbnail; kernel pid $dl"
+  if ps -p "${dl%% *}" >/dev/null 2>&1; then echo "FAIL: the killed kernel ${dl%% *} survives"; rc=1; else
+    echo "ok: no survivor: kernel pid ${dl%% *} is gone"; fi
+else
+  echo "FAIL: deadline: $dl, or a thumbnail came"; rc=1
+fi
+if [ "$limit" -ge 2 ]; then
+  if out=$(runs concurrent "$huge" "$beside"); then echo "ok: concurrent: $out"; else
+    echo "FAIL: concurrent: $out"; rc=1; fi
+elif [ "$limit" = 1 ]; then
+  if out=$(runs queued "$huge" "$beside"); then echo "ok: admission limit 1: $out"; else
+    echo "FAIL: admission limit 1: $out"; rc=1; fi
+fi
+echo "== the next request, right after the kill"
+"$e2e/ql-e2e.sh" thumb "$root/tests/data/assembly.step" >"$QL_E2E_DIR/next.txt" 2>&1 || rc=1
+cat "$QL_E2E_DIR/next.txt"
+ms=$(grep -oE 'in [0-9]+ ms' "$QL_E2E_DIR/next.txt" | head -1 | tr -dc 0-9)
+if [ -n "$ms" ] && [ "$ms" -lt 3000 ]; then echo "ok: no throttle: ${ms} ms"; else
+  echo "FAIL: throttle: the next thumbnail took ${ms:-?} ms"; rc=1; fi
+
+# A preview that goes while its kernel runs (#64): Quick Look releases the
+# extension's view controller, which cancels its run, and the preview
+# service kills that kernel. The host logs what it does: the cancel must
+# come after its close (or switch), at 8 s, and before its quit, 3 s later,
+# so the kill at the quit cannot pass; reaped within 1 s; and gone.
+#   $1: closed|switched; $2: the file; $3: the file switched to.
+preview_goes() {
+  local how=$1 file=$2 to=${3:-} from out
+  # open -W does not always block for this host: its logged quit ends it.
+  timeout 60 open -n -W -a "$bin/ql-preview-host.app" --args "$file" 11 8 ${to:+"$to"}
+  await_runs 30 logged "preview host quits $file" >/dev/null \
+    || { echo "FAIL: $how preview: the host never logged its quit"; rc=1; return; }
+  from="preview host closed $file"
+  [ -z "$to" ] || from="preview host switched $file to $to"
+  if out=$(runs cancelled "$file" "$from" "preview host quits $file") && ! ps -p "${out%% *}" >/dev/null 2>&1; then
+    echo "ok: $how preview: kernel pid $out, and gone"
+  else
+    echo "FAIL: $how preview: $out"; rc=1
+  fi
+}
+echo "== preview huge.step, closed at 8 s while its kernel runs"
+cat "$huge" >"$QL_E2E_DIR/huge-closed.step"
+preview_goes closed "$QL_E2E_DIR/huge-closed.step"
+# The previewed item changed under a live run: Quick Look prepares the next
+# file on a new controller (or, should it ever, on the same one, which then
+# cancels the run it replaces): either way the old kernel goes at the switch.
+echo "== preview huge.step, switched to box.brep at 8 s while its kernel runs"
+cat "$huge" >"$QL_E2E_DIR/huge-switched.step"
+cat "$root/tests/data/box.brep" >"$QL_E2E_DIR/switched-to-box.brep"
+preview_goes switched "$QL_E2E_DIR/huge-switched.step" "$QL_E2E_DIR/switched-to-box.brep"
+echo "  controller: $(runs reused "$QL_E2E_DIR/huge-switched.step")"
+python3 "$e2e/verdict.py" preview "$QL_E2E_DIR/switched-to-box.brep" <"$QL_E2E_STREAM" \
+  || { echo "FAIL: switched preview: box.brep was not shown"; rc=1; }
+
 # The control: one file thumbnailed twice, the second time through a hard
 # link: a new path, the same inode, which Quick Look's cache is keyed on. It
 # answers from the cache, the extension never sees the link's path, and the

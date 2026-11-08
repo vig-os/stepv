@@ -9,12 +9,16 @@ whenever they were stamped.
 PASS needs at least one line, and every line for the file from the right
 extension, running out of /Applications/stepv.app, and saying it drew
 ("thumbnail <file>: drawn") or showed geometry ("preview <file>: shown"):
-one failing line fails the run, whatever else passed. Exit 0 on PASS.
+one failing line fails the run, whatever else passed. A preview must also
+have told Quick Look it was ready (#64, "preview <file>: ready (<why>)"),
+exactly once: a STEP file on its tree, before the scene (in the stream's
+order); IGES and BREP, which have no tree, on their mesh. Exit 0 on PASS.
 
   verdict.py --logged <thumb|preview> <file>
 
-Exit 0 if a result line for the file is in the stream yet, silently: what
-ql-e2e.sh waits for before it judges."""
+Exit 0 if a result line for the file is in the stream yet (and for a
+preview, its ready line), silently: what ql-e2e.sh waits for before it
+judges."""
 
 import sys
 
@@ -25,15 +29,22 @@ kind, path = sys.argv[1 + polling], sys.argv[2 + polling]
 process = {"thumb": "StepvThumbnail", "preview": "StepvPreview"}[kind]
 prefix = {"thumb": "thumbnail", "preview": "preview"}[kind] + f" {path}: "
 lines = []
+readies = []  # (stream index, why): the preview's handler(nil)
+shown_at = None  # stream index of the first result line
 requested = False  # the thumbnail extension's "thumbnail request: <file>"
-for e in events(sys.stdin):
+for i, e in enumerate(events(sys.stdin)):
     m = e["message"]
     requested |= m == f"thumbnail request: {path}"
-    if m.startswith(prefix):
+    if m.startswith(prefix + "ready ("):
+        readies.append((i, m[len(prefix) + 7 :].split(")")[0]))
+    elif m.startswith(prefix):
         lines.append((e["process"], e["pid"], m[len(prefix) :]))
+        shown_at = i if shown_at is None else shown_at
 
 if polling:
-    sys.exit(0 if lines else 1)
+    # A preview's ready line can follow its result (IGES, BREP: ready on
+    # the mesh): judged once both are in.
+    sys.exit(0 if lines and (kind == "thumb" or readies) else 1)
 ok = bool(lines)
 if not lines and kind == "thumb" and not requested:
     # Quick Look's thumbnail cache is keyed on the file's inode: it answers
@@ -56,6 +67,16 @@ for image, pid, said in lines:
     print(
         f"  {'PASS' if good else 'FAIL'}: {image.rsplit('/', 1)[-1] or '?'} pid {pid}: {said}"
         + ("" if ours else f" (from {image}, not /Applications/stepv.app's {process})")
+    )
+if kind == "preview" and lines:
+    want = "tree" if path.lower().endswith((".step", ".stp")) else "mesh"
+    at, why = readies[0] if readies else (None, "never")
+    good = why == want and (want != "tree" or at < shown_at) and len(readies) == 1
+    ok &= good
+    order = ", before the scene" if want == "tree" else ""
+    print(
+        f"  {'PASS' if good else 'FAIL'}: ready ({why}), {len(readies)} time(s);"
+        f" wanted once, on its {want}{order}"
     )
 print("  VERDICT:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

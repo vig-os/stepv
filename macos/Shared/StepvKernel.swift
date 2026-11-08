@@ -50,6 +50,13 @@ enum StepvKernel {
     /// shows why (the thumbnail's margin over its run, 2 s).
     static let previewReplyAfter = 122.0
 
+    /// Which run of which service is this file's: the service's own lines
+    /// carry only "run #N (service pid P", so this line is how scripts/ql-e2e
+    /// finds a request's kernel by identity, never by when it was logged.
+    static func logAccepted(_ run: Int, servicePid: Int32, _ kind: String, _ path: String) {
+        stepvLog.notice("accepted: run #\(run) (service pid \(servicePid)), \(kind, privacy: .public) \(path, privacy: .public)")
+    }
+
     /// The kernel's reader for a file Quick Look hands over: by extension,
     /// as `stepv-occt` picks it for a path. A descriptor has none, so it is
     /// named (`--format`).

@@ -42,6 +42,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
                 return true
             }), nil)
         })
+        run.onAccepted = { n, pid in StepvKernel.logAccepted(n, servicePid: pid, "thumbnail", path) }
         run.start(file: request.fileURL, format: format, linearRel: StepvKernel.thumbnail.linearRel,
                   angularDeg: StepvKernel.thumbnail.angularDeg,
                   deadlineMs: StepvKernel.thumbnailDeadlineMs, memoryMB: StepvKernel.memoryMB)

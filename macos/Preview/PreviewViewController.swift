@@ -94,6 +94,13 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
     deinit { session?.cancel() }
 
     func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
+        // Quick Look makes a controller per previewed item (plan.md, #64): a
+        // second prepare on this one is not expected, but if one comes, the
+        // run it replaces must not live on to its deadline.
+        if let old = session {
+            stepvLog.notice("preview controller reused: \(self.path, privacy: .public) replaced by \(url.path, privacy: .public)")
+            old.cancel()
+        }
         self.handler = handler
         started = Date()
         path = url.path
@@ -114,6 +121,7 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
         session.start(readyAfter: StepvKernel.previewHandlerAfter,
                       replyAfter: StepvKernel.previewReplyAfter) { onEvent, completion in
             let run = StepvSupervisorRun(onEvent: onEvent, completion: completion)
+            run.onAccepted = { n, pid in StepvKernel.logAccepted(n, servicePid: pid, "preview", url.path) }
             run.start(file: url, format: format, linearRel: StepvKernel.preview.linearRel,
                       angularDeg: StepvKernel.preview.angularDeg,
                       deadlineMs: StepvKernel.previewDeadlineMs, memoryMB: StepvKernel.memoryMB)
