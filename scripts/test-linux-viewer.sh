@@ -50,15 +50,23 @@ mounts=(-v "$root:/src:ro" -v stepv-linux-viewer:/build)
     cargo test -q --release --test view
     # The measurement server (#33) under Landlock + seccomp.
     cargo test -q --release --test measure
+    # Runs a command on its own Xvfb, at the given screen size. xvfb-run
+    # starts it only once the server signals it is ready (SIGUSR1). -noreset
+    # (#104): an X server resets whenever its last client disconnects, and
+    # drops any connection that arrives during the reset. The window tests
+    # run in parallel, each stepv its own client, so one could connect just
+    # as the others had all closed, and winit failed with "Failed to open
+    # connection to X server". Kept up, the server serves every client.
+    xvfb() { size=$1; shift; xvfb-run -a -s "-screen 0 ${size}x24 -noreset" "$@"; }
     # The tests that need a window session (#84), on Xvfb.
-    xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-window-tests.sh -q --release
-    xvfb-run -a -s "-screen 0 1600x1000x24" scripts/test-viewer.sh /build/target/release/stepv \
+    xvfb 1600x1000 scripts/test-window-tests.sh -q --release
+    xvfb 1600x1000 scripts/test-viewer.sh /build/target/release/stepv \
       "$([ -d /shots ] && echo /shots/linux)"
     scripts/check-size.sh /build/target/release/stepv 24
     # No GPU at all: the drivers gone, the viewer must still open, in
     # software, and say why.
     rm -rf /usr/share/vulkan/icd.d /usr/share/glvnd/egl_vendor.d /usr/lib/*/dri
-    out=$(xvfb-run -a -s "-screen 0 1280x800x24" /build/target/release/stepv view \
+    out=$(xvfb 1280x800 /build/target/release/stepv view \
       tests/data/assembly.step --frames 5 2>/tmp/err) || true
     echo "$out" | grep -q "\"backend\":\"software\"" \
       || { echo "FAIL: no GPU: $out $(cat /tmp/err)" >&2; exit 1; }

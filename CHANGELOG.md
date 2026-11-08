@@ -232,6 +232,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Linux viewer job's Xvfb no longer drops a window test's connection**
+  ([#104](https://github.com/vig-os/stepv/issues/104)):
+  - Each Xvfb runs with `-noreset`. An X server resets when its last client disconnects and drops
+    a connection that arrives during the reset. The window tests run in parallel, so one could
+    connect just then and fail with `Failed to open connection to X server`
 - **The kernel reads an input descriptor directly** ([#102](https://github.com/vig-os/stepv/issues/102)):
   - `stepv-occt /dev/fd/N` never re-opens `/dev/fd/N` by name. macOS 15's sandbox, inherited
     from Quick Look's service, denies that re-open
