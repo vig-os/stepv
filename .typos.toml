@@ -34,3 +34,6 @@ Usefull = "Usefull"
 # freedesktop term (stepv, packaging/linux): a "thumbnailer" is the program a
 # file manager runs to make thumbnails; plural "thumbnailers", not "thumbnails".
 thumbnailers = "thumbnailers"
+# `ShapeFix_IntersectionTool::UnionVertexes()` (sic), named in plan.md's #74
+# section about the OCCT patch.
+Vertexes = "Vertexes"
