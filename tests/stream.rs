@@ -4,7 +4,8 @@
 //! `tests/data/`, and fake kernels (shell scripts) for the broken streams a
 //! real one never writes.
 
-use std::os::unix::fs::PermissionsExt;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -53,8 +54,7 @@ impl Scratch {
     /// An executable shell script standing in for the kernel.
     fn script(&self, name: &str, body: &str) -> PathBuf {
         let p = self.path(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::executable(&p, body);
         p
     }
 }
