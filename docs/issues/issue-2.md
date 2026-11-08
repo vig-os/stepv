@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-04T11:16:29Z
-updated: 2026-11-02T07:07:15Z
+updated: 2026-11-07T11:57:47Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/stepv/issues/2
@@ -13,7 +13,7 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-02T09:09:46.448Z
+synced: 2026-11-08T08:48:16.350Z
 ---
 
 # [Issue 2]: [Dependency Dashboard](https://github.com/vig-os/stepv/issues/2)
@@ -31,33 +31,8 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 ## Detected Dependencies
 
-<details><summary>github-actions (16)</summary>
+<details><summary>github-actions (4)</summary>
 <blockquote>
-
-<details><summary>.github/actions/setup-devkit-toolchain/action.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/abandon-release.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/ci.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/codeql.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/devkit-upgrade.yml</summary>
-
-
-</details>
 
 <details><summary>.github/workflows/kernel.yml (4)</summary>
 
@@ -77,24 +52,9 @@ The following updates have all been created. To force a retry/rebase of any, cli
 
 </details>
 
-<details><summary>.github/workflows/prepare-release.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/promote-release.yml</summary>
-
-
-</details>
-
 <details><summary>.github/workflows/release-assets.yml (1)</summary>
 
  - `ubuntu 26.04`
-
-</details>
-
-<details><summary>.github/workflows/release-core.yml</summary>
-
 
 </details>
 
@@ -114,26 +74,6 @@ The following updates have all been created. To force a retry/rebase of any, cli
  - `ubuntu 26.04`
  - `macos 15` → [Updates: `26`]
  - `ubuntu 26.04`
-
-</details>
-
-<details><summary>.github/workflows/release-publish.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/release.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/scorecard.yml</summary>
-
-
-</details>
-
-<details><summary>.github/workflows/sync-issues.yml</summary>
-
 
 </details>
 
