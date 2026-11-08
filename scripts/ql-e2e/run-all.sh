@@ -128,21 +128,31 @@ if [ -n "$ms" ] && [ "$ms" -lt 3000 ]; then echo "ok: no throttle: ${ms} ms"; el
 
 # A preview that goes while its kernel runs (#64): Quick Look releases the
 # extension's view controller, which cancels its run, and the preview
-# service kills that kernel. The host logs what it does: the cancel must
-# come after its close (or switch), at 8 s, and before its quit, 3 s later,
+# service kills that kernel. Quick Look holds the controller until the
+# preview's handler is called, so a ready preview is closed: the host acts
+# on a signal sent once the file's ready line is in the stream, never at a
+# set time (#113's CI: a tree that came after a fixed 8 s close). The host
+# logs its act and its quit, 3 s later: the cancel must fall between them,
 # so the kill at the quit cannot pass; reaped within 1 s; and gone. No
-# result is shown for it, and its handler is completed exactly once.
+# result is shown for the file, and its handler completed exactly once.
 #   $1: closed|switched; $2: the file; $3: the file switched to.
 preview_goes() {
-  local how=$1 file=$2 to=${3:-} from out
-  # open -W does not always block for this host: its logged quit ends it.
-  timeout 60 open -n -W -a "$bin/ql-preview-host.app" --args "$file" 11 8 ${to:+"$to"}
-  await_runs 30 logged "preview host quits $file" >/dev/null \
+  local how=$1 file=$2 to=${3:-} from out host
+  open -n -a "$bin/ql-preview-host.app" --args "$file" 90 signal ${to:+"$to"}
+  host=$(await_runs 30 first "preview host shows $file as pid ") \
+    || { echo "FAIL: $how preview: the host did not log its pid"; rc=1; return; }
+  host=${host##* }
+  if ready=$(await_runs 60 first "preview $file: ready ("); then
+    kill -USR1 "$host"
+  else
+    echo "FAIL: $how preview: never ready"; rc=1
+  fi
+  await_runs 100 logged "preview host quits $file" >/dev/null \
     || { echo "FAIL: $how preview: the host never logged its quit"; rc=1; return; }
   from="preview host closed $file"
   [ -z "$to" ] || from="preview host switched $file to $to"
   if out=$(runs cancelled "$file" "$from" "preview host quits $file") && ! ps -p "${out%% *}" >/dev/null 2>&1; then
-    echo "ok: $how preview: kernel pid $out, and gone"
+    echo "ok: $how preview: ${ready##*: }, then kernel pid $out, and gone"
   else
     echo "FAIL: $how preview: $out"; rc=1
   fi
@@ -150,13 +160,35 @@ preview_goes() {
   if out=$(runs gone "$file"); then echo "ok: $how preview: $out"; else
     echo "FAIL: $how preview: $out"; rc=1; fi
 }
-echo "== preview huge.step, closed at 8 s while its kernel runs"
+echo "== preview huge.step, closed once ready, while its kernel runs"
 cat "$huge" >"$QL_E2E_DIR/huge-closed.step"
 preview_goes closed "$QL_E2E_DIR/huge-closed.step"
+# Closed before it is ready: Quick Look keeps the controller until its
+# handler is called, so the run is cancelled at the preview's ready (its
+# tree, mesh or failure, or StepvKernel.previewHandlerAfter, 20 s, at the
+# latest), not at the close (#122). The host closes once the file's kernel
+# is spawned, and stays up 40 s: the close must come before the file's
+# ready line, and the cancel after it, before the quit.
+echo "== preview huge.step, closed before it is ready"
+early="$QL_E2E_DIR/huge-early.step"
+cat "$huge" >"$early"
+open -n -a "$bin/ql-preview-host.app" --args "$early" 40 signal-stay
+ready='' out=''
+if host=$(await_runs 30 first "preview host shows $early as pid ") \
+   && await_runs 30 spawned preview "$early" >/dev/null && kill -USR1 "${host##* }" \
+   && await_runs 50 logged "preview host quits $early" >/dev/null \
+   && ready=$(runs first "preview $early: ready (") \
+   && runs order "preview host closed $early" "$ready" \
+   && out=$(runs cancelled "$early" "$ready" "preview host quits $early") \
+   && ! ps -p "${out%% *}" >/dev/null 2>&1 && gone=$(runs gone "$early"); then
+  echo "ok: closed before ready: ${ready##*: }, then kernel pid $out, and gone; $gone"
+else
+  echo "FAIL: closed before ready: ${ready:-never ready}; ${out:-}; $(runs gone "$early")"; rc=1
+fi
 # The previewed item changed under a live run: Quick Look prepares the next
 # file on a new controller (or, should it ever, on the same one, which then
 # cancels the run it replaces): either way the old kernel goes at the switch.
-echo "== preview huge.step, switched to box.brep at 8 s while its kernel runs"
+echo "== preview huge.step, switched to box.brep once ready, while its kernel runs"
 cat "$huge" >"$QL_E2E_DIR/huge-switched.step"
 cat "$root/tests/data/box.brep" >"$QL_E2E_DIR/switched-to-box.brep"
 preview_goes switched "$QL_E2E_DIR/huge-switched.step" "$QL_E2E_DIR/switched-to-box.brep"

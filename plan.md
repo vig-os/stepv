@@ -1791,10 +1791,19 @@ memory is freed at once. Two designs failed before this one:
   - Quick Look has no cancel callback, and the remote view gets no disappear calls. Closing the
     preview (`QLPreviewView.close()`, a closed panel) releases the extension's view controller,
     whose `deinit` cancels its run, and the service kills that kernel.
-  - ql-e2e closes a preview of the 4000-part file at 8 s. The host logs its close and, 3 s
-    later, its quit; the kernel's SIGKILL cancel must fall between the two in the log, be reaped
-    within 1 s, and be gone. Without the `deinit` cancel it fails: the kill comes only at the
-    quit.
+  - Quick Look keeps the controller alive while its completion handler is outstanding. So a
+    preview closed **before** it is ready is released, and its kernel cancelled, only once the
+    handler is called: at its tree, mesh or failure, or at the 20 s ready timer at the latest.
+    Measured: closed at 0.3 s, ready (tree) at 4.97 s, cancelled 32 ms later. #122 asks whether
+    to call the handler sooner. For the same reason the session releases the handler once
+    called: kept, it held the controller past every close.
+  - ql-e2e closes a preview of the 4000-part file once its ready line is logged: the host acts
+    on a signal, not at a set time. The host logs its close and, 3 s later, its quit. The
+    kernel's SIGKILL cancel must fall between the two in the log, be reaped within 1 s, and be
+    gone. Without the `deinit` cancel it fails: the kill comes only at the quit.
+  - A second case closes once the file's kernel is spawned, before it is ready. The close must
+    come before the file's ready line, and the cancel after that line, before the host quits
+    at 40 s.
 - **One controller, one preview** (measured on sage, macOS 26.4, and kept as a ql-e2e case):
   - When the previewed item changes (`QLPreviewView.previewItem` set to another file), Quick
     Look creates a **new** view controller for it and releases the old one. The old one's
@@ -1814,7 +1823,8 @@ memory is freed at once. Two designs failed before this one:
   - `macos/Tests/PreviewSessionTests` drives the reuse path with a fake service, whether or not
     Quick Look ever takes it. A's result arrives and its decode is still running when B
     supersedes it. Without the liveness check, A's scene is shown and marks B ready.
-  - ql-e2e switches a preview of the 4000-part file to `box.brep` at 8 s, and closes another.
+  - ql-e2e switches a preview of the 4000-part file to `box.brep` once it is ready, and closes
+    another.
     The old kernel's cancel must fall between the host's logged switch or close and its quit.
     No result line may follow for the file that went, and its handler must complete exactly
     once. `box.brep` must be shown, and ql-e2e prints whether a controller was reused.

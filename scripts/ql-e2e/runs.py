@@ -12,9 +12,12 @@ never a timestamp (#111).
                                      and spawned only after <held>'s kill, if at all
   runs.py deadline <file>            (thumbnail) killed at its deadline; its kernel pid
   runs.py cancelled <file> <from> <to>
-                                     (preview) cancelled with SIGKILL after the host's
-                                     line <from> and before its line <to>; its kernel pid
+                                     (preview) cancelled with SIGKILL after line <from>
+                                     (the host's, or the extension's) and before line <to>;
+                                     its kernel pid
   runs.py logged <message>          whether any line says exactly <message>
+  runs.py first <prefix>             the first line that begins with <prefix>
+  runs.py order <a> <b>              line <a> is logged, and before line <b> if that is
   runs.py gone <file>                (preview) a preview that went (closed, superseded):
                                      no result shown for <file>, and Quick Look's handler
                                      completed exactly once ("ready (<why>)")
@@ -128,11 +131,11 @@ if what == "deadline":
 if what == "cancelled":
     path, start, end = args
     _, lines = lines_of("preview", path)
-    host = {e["message"]: i for i, e in enumerate(evs) if e["category"] == "ql-e2e"}
+    # The first of each line: the host's close, switch or quit, or the
+    # extension's ready line.
+    host = {e["message"]: i for i, e in reversed(list(enumerate(evs)))}
     if start not in host or end not in host:
-        sys.exit(
-            print(f"the host never logged '{start if start not in host else end}'") or 1
-        )
+        sys.exit(print(f"never logged: '{start if start not in host else end}'") or 1)
     c = first(
         lines,
         r"cancelled, kernel pid (\d+) signal 9, reaped ([\d.]+) ms after the cancel",
@@ -140,11 +143,16 @@ if what == "cancelled":
     if not c:
         sys.exit(print("its run was never cancelled") or 1)
     ok = host[start] < c[0] < host[end] and float(c[1].group(2)) <= 1000
-    said = start.split()[2]  # "closed" or "switched"
+    # "the host closed it", "the host switched it", or "it was ready"
+    said = (
+        f"the host {start.split()[2]} it"
+        if start.startswith("preview host ")
+        else "it was ready"
+    )
     where = (
-        f"before the host {said} it"
+        f"before {said}"
         if c[0] < host[start]
-        else f"after the host {said} it, before it quit"
+        else f"after {said}, before the host quit"
         if c[0] < host[end]
         else "only after the host quit"
     )
@@ -158,6 +166,14 @@ if what == "cancelled":
 
 if what == "logged":
     sys.exit(0 if any(e["message"] == args[0] for e in evs) else 1)
+
+if what == "first":
+    said = [e["message"] for e in evs if e["message"].startswith(args[0])]
+    sys.exit(print(said[0]) if said else 1)
+
+if what == "order":
+    at = {e["message"]: i for i, e in reversed(list(enumerate(evs)))}
+    sys.exit(0 if args[0] in at and at[args[0]] < at.get(args[1], len(evs)) else 1)
 
 if what == "gone":
     mine = [

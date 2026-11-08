@@ -156,6 +156,41 @@ cases += [
     ),
     ("gone: never completed", start + prev + closed + quits, ("gone", "/p.step"), 1),
 ]
+cases += [
+    ("first", start + prev + pr + pr, ("first", "preview /p.step: ready ("), 0),
+    ("first: none", start + prev, ("first", "preview /p.step: ready ("), 1),
+]
+o = ("order", "preview host closed /p.step", "preview /p.step: ready (tree) in 90 ms")
+cases += [
+    ("order", start + closed + pr + quits, o, 0),
+    ("order: after", start + pr + closed + quits, o, 1),
+    ("order: b never", start + closed, o, 0),
+    ("order: a never", start + pr, o, 1),
+]
+cases += [
+    (
+        "cancelled after its ready",
+        start + prev + closed + pr + cancel + quits,
+        (
+            "cancelled",
+            "/p.step",
+            "preview /p.step: ready (tree) in 90 ms",
+            "preview host quits /p.step",
+        ),
+        0,
+    ),
+    (
+        "cancelled: before its ready",
+        start + prev + closed + cancel + pr + quits,
+        (
+            "cancelled",
+            "/p.step",
+            "preview /p.step: ready (tree) in 90 ms",
+            "preview host quits /p.step",
+        ),
+        1,
+    ),
+]
 failed = 0
 for name, stream, args, want in cases:
     rc, out = run(stream, *args)
