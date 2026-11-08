@@ -237,29 +237,47 @@ of 60 and a million nodes. So:
     - In the common CAx-IF layout rep_1 is the child and rep_2 the parent.
     - When the relationship's order reverses the NAUO's, the same transform is applied inverted.
   - **The formula,** with each item scaled to mm by its own context's unit before composing:
-    `T = S_mm(item_parent) · S_mm(item_child)⁻¹`.
-    - `S_mm` turns the placement into a rigid frame, its location scaled by its context's mm-per-unit;
-      directions are unitless.
-    - T maps child mm to parent mm: the child's frame `item_child` lands on `item_parent`. It's stored
-      row-major 3×4 like `topology::PlacedPart::transform`.
+    `T = S_mm(item_child)⁻¹ · S_mm(item_parent)`, applied to the child's shape.
+    - `S_mm` turns the placement into a rigid frame (local → its representation's coordinates), its
+      location scaled by its context's mm-per-unit; directions are unitless.
+    - This is **OCCT's change-of-coordinates convention**, and stepv follows it on purpose: G3's oracle
+      is `--topology` within 1e-9, and M4b draws Rust and OCCT products in one scene, where two
+      conventions would misplace parts.
+    - Reading ISO 10303 as "carry the child's frame onto the parent's" gives
+      `S(item_parent) · S(item_child)⁻¹`. That differs whenever the two frames don't commute, and stepv
+      deliberately follows OCCT there too.
+    - T is stored row-major 3×4 like `topology::PlacedPart::transform`.
   - **Checked against OCCT's behaviour.** A clean-room description, read for behaviour only (OCCT is
     LGPL; no code is copied), from OCCT 7.9 `src/STEPControl/STEPControl_ActorRead.cxx`:
     - **`STEPControl_ActorRead::ComputeSRRWT`** takes item1 and item2 with `Rep1` and `Rep2` as
       origin and target.
     - **`STEPControl_ActorRead::ComputeTransformation`** checks that each item belongs to its
       representation, and swaps them back if each is in the other's. It converts each placement in its
-      own representation's units (it prepares the units per context before building each axis), and
-      builds the transform that carries the origin frame onto the target frame.
+      own representation's units (it prepares the units per context before building each axis).
+      It then builds a **change of coordinates** between the two axis systems:
+      `gp_Trsf::SetTransformation(target, origin)`.
+      - A probe compiled in the round-3 review against nixpkgs' TKMath 7.9.3, with item1 = Rz(90°) and
+        item2 = a translation by (10, 0, 0), maps the origin point to (0, −10, 0). That is `item1⁻¹ · item2`, not
+        `item2 · item1⁻¹`, which would give (10, 0, 0).
     - **`STEPControl_ActorRead::TransferEntity(CONTEXT_DEPENDENT_SHAPE_REPRESENTATION)`** transfers
-      the shape of `Rep1`, the origin and so the child, and applies that transform to it. When
-      `STEPConstruct_Assembly::CheckSRRReversesNAUO` finds the relationship reversed against the
-      NAUO, it transfers `Rep2`'s shape instead and applies the inverse transform.
+      the shape of `Rep1`, the origin and so the child, and moves it by that transform
+      (`ApplyTransformation`, a `Move` of the shape). Hence `S(item_child)⁻¹ · S(item_parent)`.
+    - **When `STEPConstruct_Assembly::CheckSRRReversesNAUO`** finds the relationship reversed against
+      the NAUO, it transfers `Rep2`'s shape instead and moves it by the inverse of the same transform.
+      The graph does the same: the child is rep_2, and its placement is `T⁻¹`. That is again
+      `S(item_child)⁻¹ · S(item_parent)`, with the items assigned by the match.
   - **Units:** composing in either side's raw units would be wrong whenever the two contexts differ,
-    such as an inch sub-assembly inside a mm assembly. G3 has a hand-written fixture of exactly that,
-    and a reversed-relationship fixture, both checked against `--topology`.
+    such as an inch sub-assembly inside a mm assembly. G3 has hand-written fixtures, all checked
+    against `--topology`:
+    - an inch sub-assembly inside a mm assembly;
+    - a reversed relationship;
+    - a **non-commuting** pair: the child's item is a non-identity rotation that doesn't commute with
+      the parent's item. It is the one that tells the two conventions apart.
 - **`MAPPED_ITEM`** (`REPRESENTATION_MAP` plus a target placement; 173 in the local corpus) is the
-  second instancing mechanism, and is resolved the same way: the map's origin and its target are each
-  scaled to mm in their own context, then composed.
+  second instancing mechanism, and is resolved with the same convention. OCCT calls the same
+  `ComputeTransformation` there, with the map's `mapping_origin` as the origin and the item's
+  `mapping_target` as the target (`STEPControl_ActorRead`'s mapped-item transfer). So the mapped shape
+  is moved by `S_mm(mapping_origin)⁻¹ · S_mm(mapping_target)`, each scaled to mm in its own context.
 - Any other transformation operator, such as `CARTESIAN_TRANSFORMATION_OPERATOR_3D`, leaves the
   instance **unplaced**, with a reason. It is never placed silently at the identity.
 - **Units:**
@@ -566,10 +584,13 @@ a view are indistinguishable:
   - **angle:** the tangent turns at most A/B times faster than the parameter, so `Δt ≤ a · B / A`;
   - **chord:** the step is in the parameter t, and the sag of a chord over a parameter interval Δt is at
     most `Δt² / 8 · max|C''(t)|`. On `C(t) = (A cos t, B sin t)`, `|C''(t)| ≤ A`, so `Δt ≤ √(8d / A)`.
-    - That is **r = A** in the circle rule, not the smallest radius of curvature, B²/A. That radius
-      bounds the sag per unit of *arc length*, not per unit of t.
-    - A counter-example to using B²/A: with A = 1, B = 0.5 and d = 1e-3, it gives Δt ≈ 0.17 and a sag
-      of about 3.8e-3 (3.8·d) at the major vertex. `√(8d / A)` gives Δt ≈ 0.089.
+    - **The bound used is exactly `Δt ≤ √(8d / A)`.** The circle formula `2·acos(1 − d/A)` is close but
+      not used. It is slightly larger, and not a proven bound for a curve that isn't a circle.
+    - The smallest radius of curvature, B²/A, bounds the sag per unit of *arc length*, not per unit of t.
+      So it can't be used here.
+    - A counter-example to using B²/A: with A = 1, B = 0.5 and d = 1e-3, the circle formula at
+      r = B²/A gives Δt ≈ 0.179 and a sag of ≈ 4.0e-3 (4·d) at the major vertex. `√(8d / A)` gives
+      Δt ≈ 0.089.
   - n is the larger of the two counts, which is conservative and costs extra points only on eccentric
     ellipses. A curvature-adaptive step is a later refinement.
 - **B-spline curves:** recursive subdivision (de Boor / knot insertion) until each span's control
@@ -590,9 +611,9 @@ a view are indistinguishable:
         lies inside the surface, short of it by at most `r_max · (1 − cos(Δu / 2))`, where r_max is
         the largest of the vertices' radii. A convex combination of radial vectors within an angular
         window Δu has a norm of at least cos(Δu/2) times the combined radius;
-      - sphere: if the vertices lie within an angle θ of some direction from the centre, every point
-        of the triangle is at least R·cos θ from the centre, so the deviation is at most
-        `R · (1 − cos θ)`;
+      - sphere: if the vertices lie within an angle θ ≤ π/2 of some direction from the centre, every
+        point of the triangle is at least R·cos θ from the centre, so the deviation is at most
+        `R · (1 − cos θ)`. Over π/2 the bound says nothing, and the triangle fails the gate;
     - **tori are checked by sampling**: the centroid, the edge midpoints and a 4 × 4 barycentric grid
       per triangle, each against the closed-form distance. A sample can miss the worst point, so this
       is labelled sampled in the report. An analytic torus bound is later work (§5).
@@ -864,7 +885,7 @@ run memory-bounded, one heavy job at a time.
 | --- | --- | --- | --- |
 | **G1** Scanner + entity table | `src/graph/{mod,lex}.rs`: map, header via `header::read`, records → id, interned type (complex as a sorted part list), arg span; the id → node lookup (dense or sorted); edition 3 `DATA(…)` parameters, `ANCHOR`/`SIGNATURE` skipped; CR/LF stripped in strings (the header path too); duplicate ids kept as OCCT keeps them; refusal with a byte offset | A table equal to an independent oracle (`ids` and types from a regex pass) on `tests/data`; the duplicate-id fixture agrees with `occt::outline`; all malformed fixtures refuse without panicking; Ultimaker/stress within §2.7's scan time and the "without `referrers`" heap | `nix develop -c cargo test graph::` and `nix develop -c cargo run --release --example graph_scan -- <file>` (time and heap) |
 | **G2** CSR + lazy args + complex parts + census | Forward CSR in the scan; `args()`/`args_of()` → `Value`, depth cap 64; `is_a`/`parts`/`of_type` over complex parts; `referrers()` built lazily; `census()`; `examples/graph_census.rs` writes per-file surface and edge-curve shares (3-D only, p-curves excluded) and the share of products all of whose faces are analytic | Round trip: every `#n` in a span is in `refs`, in order; args parse for every entity and every complex part of every corpus file; the unit, context, relationship and rational-B-spline walkthroughs of §2.4 as unit tests; the census table is committed to `docs/adr/0001-census.md`, replacing §2.6's guess; the "with `referrers`" heap | `nix develop -c cargo test graph::` and the census example over the corpus |
-| **G3** Structure as a DAG + placements + units | `structure()`: the product DAG, the cycle check, shown/leaf counts, `leaf_path`/`leaf_of`, lazy capped `occurrences()`, both naming rules, shapeless products dropped, `ITEM_DEFINED_TRANSFORMATION` (`T = S_mm(item_parent) · S_mm(item_child)⁻¹`, item_k with rep_k, parent and child by matching against the NAUO, swapped items corrected) and `MAPPED_ITEM`, each item scaled to mm, `Unplaced(reason)` | `Structure::tree()` equals `occt::outline`'s tree (names, shape, leaf numbers) on every corpus file except the two documented multi-file assemblies; placements equal `--topology`'s `PlacedPart::transform` within 1e-9 relative; **the inch sub-assembly inside a mm assembly** fixture and a reversed-relationship (rep_1 = parent) fixture place correctly; the root rule matches the outline's roots; a cyclic fixture refuses; a shared-sub-assembly fixture whose expansion exceeds the cap gives the outline's error while `structure()` stays O(products) | `nix develop -c cargo test --test graph_structure` (runs the kernel for the oracle) |
+| **G3** Structure as a DAG + placements + units | `structure()`: the product DAG, the cycle check, shown/leaf counts, `leaf_path`/`leaf_of`, lazy capped `occurrences()`, both naming rules, shapeless products dropped, `ITEM_DEFINED_TRANSFORMATION` (`T = S_mm(item_child)⁻¹ · S_mm(item_parent)` applied to the child's shape, OCCT's change-of-coordinates convention; item_k with rep_k, parent and child by matching against the NAUO, swapped items corrected, `T⁻¹` when reversed) and `MAPPED_ITEM` (the same convention), each item scaled to mm, `Unplaced(reason)` | `Structure::tree()` equals `occt::outline`'s tree (names, shape, leaf numbers) on every corpus file except the two documented multi-file assemblies; placements equal `--topology`'s `PlacedPart::transform` within 1e-9 relative; **the inch sub-assembly inside a mm assembly** fixture and a reversed-relationship (rep_1 = parent) fixture and a non-commuting fixture (the child's item a rotation that doesn't commute with the parent's) place exactly as `--topology` does; the root rule matches the outline's roots; a cyclic fixture refuses; a shared-sub-assembly fixture whose expansion exceeds the cap gives the outline's error while `structure()` stays O(products) | `nix develop -c cargo test --test graph_structure` (runs the kernel for the oracle) |
 | **G4** Conservative boxes | `bounds()`: the per-type table of §2.3, the 8-corner rule, post-order composition over the DAG, `Unknown` propagation (non-positive weights included), leaf boxes via `leaf_path` | On every corpus file, each product's box contains OCCT's prototype `bbox` (within its tolerance enlargement); 0 violations; the tightness ratio per product is reported; §2.7's structure + boxes time | `nix develop -c cargo test --test graph_bounds` |
 | **G5** `stepv graph` CLI | `summary` (header, units, census, model box), `tree` (paginated, depth-limited, capped), `census`, `query <jq>` via `jaq` over the lazy view (§2.4); text as `{"untrusted": …}`; `--timings` | Golden JSON on `tests/data`; an injection-style product name comes back only as a data field; the lazy-view test: a one-product face walk on the stress assembly keeps the heap ≤ 2× the graph's (this decides `ValT` vs native functions) | `nix develop -c cargo test --test graph_cli` |
 | **G6a** The viewer opens on the graph | `Load::Graph`, the graph's tree, box placeholders (translucent, wireframe), the status line, the fallback when the graph is refused | Headless viewer test (`tests/view.rs`): first frame with placeholders before `Done`; no placeholder drawn with the shaded pipeline; a refused graph gives today's behaviour, with the reason in the status line | `nix develop -c cargo test --test view` |
