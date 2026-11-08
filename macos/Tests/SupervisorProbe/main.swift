@@ -74,8 +74,11 @@ final class Probe {
             self.lock.unlock()
         }, completion: { [unowned self] r in
             self.lock.lock(); self.result = r; self.ms = now() - self.t0; self.lock.unlock()
-            self.done.signal()
             self.taken.signal()  // a refused run is never accepted: do not wait for it
+            // Last: once `done` is signalled, wait() returns and the probe may
+            // be freed (a refused run's `p().wait()`), so self is not touched
+            // after it (unowned: an abort, #113's sage run).
+            self.done.signal()
         })
         run.onAccepted = { [unowned self] n, pid in
             self.lock.lock(); (self.number, self.servicePid) = (n, pid); self.lock.unlock()
