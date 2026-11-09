@@ -13,13 +13,17 @@
 
 mod args;
 mod lex;
+mod structure;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::path::Path;
 use std::sync::OnceLock;
 
 pub use args::{ArgError, Args, MAX_DEPTH, Untrusted, Value};
+pub use structure::{
+    Expand, ExpandError, Instance, Occurrence, Occurrences, Path, Placement, Product, Reason,
+    Structure, StructureError, mapped_placement, structure,
+};
 
 use crate::header;
 
@@ -38,6 +42,17 @@ impl Node {
 /// An entity instance name as the file writes it: the `n` of `#n`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StepId(pub u32);
+
+/// An owned pointer to a string argument: no borrow of the [`Graph`], so a
+/// [`Structure`] outlives any one borrow of it. [`Graph::text`] resolves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextRef {
+    /// The entity whose arguments hold the string.
+    pub node: Node,
+    /// The string's bytes within that entity's argument span, quotes
+    /// excluded.
+    pub span: (u32, u32),
+}
 
 /// An entity's type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -199,7 +214,7 @@ impl Graph {
     ///
     /// # Errors
     /// When the file can't be read, or isn't Part 21 that the scanner reads.
-    pub fn open(path: &Path) -> Result<Graph, GraphError> {
+    pub fn open(path: &std::path::Path) -> Result<Graph, GraphError> {
         let io = |e: std::io::Error| GraphError::at(0, ErrorKind::Io(e.to_string()));
         let file = std::fs::File::open(path).map_err(io)?;
         if file.metadata().map_err(io)?.len() == 0 {
@@ -403,6 +418,29 @@ impl Graph {
     pub(crate) fn arg_bytes(&self, n: Node) -> &[u8] {
         let s = self.arg_start[n.index()] as usize;
         &self.bytes[s..s + self.arg_len[n.index()] as usize]
+    }
+
+    /// The text `t` points to; empty when `t` is not a span of its node's
+    /// arguments.
+    #[must_use]
+    pub fn text(&self, t: TextRef) -> Untrusted<'_> {
+        let (s, e) = (t.span.0 as usize, t.span.1 as usize);
+        let args = (t.node.index() < self.len()).then(|| self.arg_bytes(t.node));
+        Untrusted::new(args.and_then(|a| a.get(s..e)).unwrap_or_default())
+    }
+
+    /// An owned [`TextRef`] to `text`, a string argument parsed from `n`'s
+    /// arguments; `None` when `text` does not lie within them.
+    #[must_use]
+    pub fn text_ref(&self, n: Node, text: Untrusted<'_>) -> Option<TextRef> {
+        let args = self.arg_bytes(n).as_ptr_range();
+        let t = text.raw().as_ptr_range();
+        if t.start < args.start || t.end > args.end {
+            return None;
+        }
+        let s = t.start as usize - args.start as usize;
+        let span = (s as u32, (s + text.raw().len()) as u32);
+        Some(TextRef { node: n, span })
     }
 
     /// Resolves the scan's raw reference ids into the forward CSR, per

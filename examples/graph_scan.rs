@@ -7,15 +7,17 @@
 //!
 //! One line per file: the entity count, distinct types, duplicate ids, the
 //! scan time, and the heap the table holds beyond the map, in total and per
-//! entity, with the peak during the scan. A refused file prints its error.
-//! Exits 1 when any file was refused.
+//! entity, with the peak during the scan. Then [`stepv::graph::structure`]:
+//! its time (building `referrers` included, since it is their first use),
+//! the heap it adds, and the products, instances and leaves. A refused file
+//! prints its error. Exits 1 when any file was refused.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use stepv::graph::Graph;
+use stepv::graph::{self, Graph};
 
 /// The system allocator, counting the bytes live and their peak.
 struct Counting;
@@ -78,6 +80,22 @@ fn main() {
                     heap as f64 / g.len().max(1) as f64,
                     peak as f64 / 1e6,
                 );
+                let before = LIVE.load(Relaxed);
+                let t = Instant::now();
+                match graph::structure(&g) {
+                    Ok(s) => println!(
+                        "{f}: structure {:.3} s, heap +{:.1} MB, {} products, {} instances, {} leaves",
+                        t.elapsed().as_secs_f64(),
+                        (LIVE.load(Relaxed) - before) as f64 / 1e6,
+                        s.products.len(),
+                        s.products.iter().map(|p| p.children.len()).sum::<usize>(),
+                        s.leaves,
+                    ),
+                    Err(e) => {
+                        refused = true;
+                        println!("{f}: structure refused: {e}");
+                    }
+                }
             }
             Err(e) => {
                 refused = true;

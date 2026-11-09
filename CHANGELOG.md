@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G3: the product structure as a DAG, with placements in mm** ([#135](https://github.com/vig-os/stepv/issues/135), ADR-0001 §2.2, §2.4):
+  - `graph::structure` resolves products and their instances (NAUOs) into a DAG in
+    O(products + instances), without OCCT: OCCT's roots, children and order, which products are
+    shown, both naming rules, and leaf counts. A cycle refuses it. `leaf_path` and `leaf_of` map
+    leaf numbers to paths without expanding; `occurrences` and `tree` expand lazily under the
+    outline's caps (depth 60, a million nodes) and fail with its errors
+  - Placements follow OCCT's change of coordinates, `S_mm(item_child)⁻¹ · S_mm(item_parent)`,
+    with each item scaled to mm by its own representation's unit, swapped items corrected, and
+    the inverse when the relationship reverses the NAUO; `mapped_placement` does the same for a
+    `MAPPED_ITEM`. Anything else is `Unplaced` with a reason, never the identity
+  - On the local corpus (390 files with Ultimaker 3) the tree equals `occt::outline`'s, and every
+    leaf's placement equals `--topology`'s within 1e-9. `structure()` takes 0.04 s on Ultimaker
+    and on the 221 MB stress assembly
 - **The graph core, G2: references, lazy arguments, complex parts and the census** ([#134](https://github.com/vig-os/stepv/issues/134), ADR-0001 §2.1, §2.4):
   - The scan builds the forward CSR: `Graph::refs` lists a node's references across all its parts
     in record order, each resolved per reference as OCCT's reader does when an `#id` is duplicated
