@@ -21,8 +21,8 @@ use std::sync::OnceLock;
 
 pub use args::{ArgError, Args, MAX_DEPTH, Untrusted, Value};
 pub use structure::{
-    Expand, ExpandError, Instance, Occurrence, Occurrences, Path, Product, Structure,
-    StructureError, structure,
+    Expand, ExpandError, Instance, Occurrence, Occurrences, Path, Placement, Product, Reason,
+    Structure, StructureError, mapped_placement, structure,
 };
 
 use crate::header;
