@@ -1,30 +1,30 @@
-//! `graph::bounds` (ADR-0001 §2.3, G4) against its oracle, the kernel: each
-//! product's graph box contains the box `--topology` gives its prototype,
-//! within the kernel's tolerance enlargement, and each leaf's box contains
-//! that box carried by the part's transform. Every kernel run goes through
-//! `stepv-cap` at 4 GiB, one at a time.
+//! `graph::bounds` (ADR-0001 §2.3, G4) against the exact geometry, as the
+//! kernel triangulates it: every node of OCCT's mesh of a product's
+//! prototype, every point of its edges' polylines and every B-rep vertex lie
+//! inside the graph's box for that product, and, placed, inside the leaf's.
+//! Those points lie on the exact faces and edges. Every kernel run goes
+//! through `stepv-cap` at 4 GiB, one at a time.
 //!
-//! The tightness ratio (graph box ÷ OCCT box, by volume) is reported as
-//! data, not a gate. `STEPV_CORPUS` (paths, `:`-separated, files or
-//! directories) adds the local corpus.
+//! OCCT's own prototype box is reported, not gated: `BndLib` boxes a conic
+//! arc by points at `r / cos(π/8)`, so its box reaches up to about 8.2% of a
+//! radius past the exact shape, and "contains OCCT's box" would test that
+//! over-reach. The volume ratio (graph ÷ OCCT box) is reported as tightness
+//! data, with the over-reach count. `STEPV_CORPUS` (paths, `:`-separated,
+//! files or directories) adds the local corpus.
 
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use stepv::graph::{self, Bound, Graph};
-use stepv::occt;
 use stepv::topology::{self, Topology};
+use stepv::{BBox, Scene, occt};
 
-/// How far an OCCT box may reach past the graph's: `BRepBndLib::Add` grows
-/// each box by its shapes' tolerances, and the kernel reads with OCCT's
-/// default `read.maxprecision.val`, 1 mm, the most healing lets a tolerance
-/// grow to (ADR §2.3: "within the kernel's own enlargement").
-const ENLARGEMENT_MM: f64 = 1.0;
-
-/// Runs the kernel's `--topology` on `input` under the memory cap.
-fn topology_of(input: &Path) -> Result<Topology, String> {
+/// Runs the kernel on `input` under the memory cap, for its mesh with edge
+/// polylines and its topology.
+fn kernel(input: &Path) -> Result<(Scene, Topology), String> {
     let k = occt::kernel_path();
     assert!(
         k.is_file(),
@@ -33,21 +33,33 @@ fn topology_of(input: &Path) -> Result<Topology, String> {
     );
     let dir = std::env::temp_dir().join(format!("stepv-graph-bounds-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let out = dir.join(input.file_name().unwrap());
+    let name = input.file_name().unwrap().to_string_lossy();
+    let (mesh, topo) = (
+        dir.join(format!("{name}.mesh")),
+        dir.join(format!("{name}.topo")),
+    );
     let run = Command::new(env!("CARGO_BIN_EXE_stepv-cap"))
         .args(["--memory-mb", "4096", "--"])
         .arg(k)
         .arg(input)
+        .arg("--edges")
+        .arg("--mesh")
+        .arg(&mesh)
         .arg("--topology")
-        .arg(&out)
+        .arg(&topo)
         .output()
         .unwrap();
     if !run.status.success() {
         return Err(format!("kernel {}", run.status));
     }
-    let t = Topology::parse(&std::fs::read(&out).unwrap()).map_err(|e| e.to_string());
-    std::fs::remove_file(&out).unwrap();
-    t
+    let read = |p: &Path| {
+        let b = std::fs::read(p).map_err(|e| e.to_string());
+        let _ = std::fs::remove_file(p);
+        b
+    };
+    let scene = occt::read_mesh(&read(&mesh)?).map_err(|e| format!("mesh: {e:?}"))?;
+    let t = Topology::parse(&read(&topo)?).map_err(|e| e.to_string())?;
+    Ok((scene, t))
 }
 
 /// Per product-level leaf (the graph's numbering), the mesh parts under it:
@@ -86,61 +98,179 @@ fn parts_per_leaf(tree: &[topology::Node]) -> Vec<Vec<usize>> {
     out
 }
 
-/// What one file gave.
+/// What the files gave.
 #[derive(Default)]
 struct Tally {
     /// (product, prototype) pairs compared.
     products: usize,
     leaves: usize,
+    /// Points on the exact geometry compared: mesh nodes, edge polyline
+    /// points and B-rep vertices, in product coordinates.
+    points: usize,
     /// Pairs whose graph box is `Unknown`, by reason.
-    unknown: std::collections::BTreeMap<String, usize>,
-    /// Prototypes with edges or vertices outside any face: wireframe, which
-    /// the graph's box leaves out by design (ADR §2.3).
-    wireframe: usize,
+    unknown: BTreeMap<String, usize>,
     violations: Vec<String>,
-    /// Graph ÷ OCCT box volume, per pair.
-    ratios: Vec<f64>,
-    /// Kernel vertices (exact points of the B-rep) outside the graph box by
-    /// more than 1e-6 of its diagonal.
-    vertex_violations: Vec<String>,
-    vertices: usize,
-    /// The largest reach of an OCCT box past the graph's, in mm.
-    worst: f64,
+    /// Products whose OCCT box reaches past the graph's by over 1e-6 of its
+    /// diagonal (`BndLib`'s over-reach), and the worst reach in mm.
+    over_reach: usize,
+    worst_reach: (f64, String),
+    /// Products whose OCCT box isn't compared: a prototype has free edges.
+    wireframe: usize,
+    /// Graph ÷ OCCT box volume, per product, with what it was measured on.
+    ratios: Vec<(f64, String)>,
     secs: f64,
 }
 
-/// How far `o` reaches past `g`, when past the enlargement; the largest
-/// reach, within it or not, goes to `worst`.
-fn contains(g: &stepv::BBox, o: &[f64; 6], worst: &mut f64) -> Option<f64> {
-    let over = (0..3)
-        .map(|i| (g.min[i] - o[i]).max(o[3 + i] - g.max[i]))
-        .fold(0f64, f64::max);
-    *worst = worst.max(over);
-    (over > ENLARGEMENT_MM).then_some(over)
-}
-
-/// A prototype has geometry outside its faces.
-fn wireframe(p: &topology::Prototype) -> bool {
-    let mut on_face = vec![false; p.edges.len()];
-    p.faces
-        .iter()
-        .flat_map(|f| &f.edges)
-        .for_each(|&e| on_face[e] = true);
-    let mut on_edge = vec![false; p.vertices.len()];
-    p.edges
-        .iter()
-        .flat_map(|e| e.vertices.iter().flatten())
-        .for_each(|&v| on_edge[v] = true);
-    on_face.contains(&false) || on_edge.contains(&false)
+/// The inverse of a rigid transform, row-major 3×4.
+fn invert(m: &[f64; 12]) -> [f64; 12] {
+    let mut r = [0.; 12];
+    for i in 0..3 {
+        for j in 0..3 {
+            r[i * 4 + j] = m[j * 4 + i];
+        }
+        r[i * 4 + 3] = -(0..3).map(|k| m[k * 4 + i] * m[k * 4 + 3]).sum::<f64>();
+    }
+    r
 }
 
 fn apply(t: &[f64; 12], p: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|r| t[r * 4] * p[0] + t[r * 4 + 1] * p[1] + t[r * 4 + 2] * p[2] + t[r * 4 + 3])
 }
 
-/// The box of `o`'s 8 corners under `t`.
-fn placed(o: &[f64; 6], t: &[f64; 12]) -> [f64; 6] {
-    let mut b = [
+/// How far `p` lies outside `b`, beyond the slack the mesh's f32
+/// coordinates need: 1e-6 of the box's size and of `at`, the largest model
+/// coordinate the point was rounded at.
+fn outside(b: &BBox, p: [f64; 3], at: f64) -> Option<f64> {
+    let size = b.diagonal() + at;
+    let over = (0..3)
+        .map(|i| (b.min[i] - p[i]).max(p[i] - b.max[i]))
+        .fold(0f64, f64::max);
+    (over > 1e-6 * size.max(1.)).then_some(over)
+}
+
+/// A point's largest coordinate.
+fn norm(p: [f64; 3]) -> f64 {
+    p.iter().fold(0f64, |m, x| m.max(x.abs()))
+}
+
+/// The prototype's edges that bound a face: the others are wireframe,
+/// outside the B-rep and the box (ADR §2.3).
+fn face_edges(proto: &topology::Prototype) -> Vec<bool> {
+    let mut on_face = vec![false; proto.edges.len()];
+    proto
+        .faces
+        .iter()
+        .flat_map(|f| &f.edges)
+        .for_each(|&e| on_face[e] = true);
+    on_face
+}
+
+/// The B-rep vertices of the edges that bound a face, in prototype
+/// coordinates.
+fn vertices(proto: &topology::Prototype) -> Vec<[f64; 3]> {
+    let on_face = face_edges(proto);
+    let mut used = vec![false; proto.vertices.len()];
+    for (e, _) in proto.edges.iter().zip(&on_face).filter(|(_, f)| **f) {
+        e.vertices.iter().flatten().for_each(|&v| used[v] = true);
+    }
+    proto
+        .vertices
+        .iter()
+        .zip(used)
+        .filter_map(|(v, u)| u.then_some(*v))
+        .collect()
+}
+
+/// Mesh part `part`'s points on the exact geometry, in model coordinates:
+/// its triangulation's nodes, and its polylines of the edges that bound a
+/// face.
+fn points(scene: &Scene, part: usize, proto: &topology::Prototype) -> Vec<[f64; 3]> {
+    let on_face = face_edges(proto);
+    let p = &scene.parts[part];
+    let xyz = |v: &[f32]| [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])];
+    let mut out: Vec<[f64; 3]> = p.mesh.positions.chunks_exact(3).map(xyz).collect();
+    let mut at = 0;
+    for (&id, &len) in p.edges.ids.iter().zip(&p.edges.lens) {
+        let pts = &p.edges.points[at * 3..(at + len as usize) * 3];
+        at += len as usize;
+        if on_face.get(id as usize) == Some(&true) {
+            out.extend(pts.chunks_exact(3).map(xyz));
+        }
+    }
+    out
+}
+
+fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
+    let g = Graph::open(input).map_err(|e| format!("graph: {e}"))?;
+    let t = Instant::now();
+    let s = graph::structure(&g).map_err(|e| format!("structure: {e}"))?;
+    let b = graph::bounds(&g, &s);
+    all.secs += t.elapsed().as_secs_f64();
+    let (scene, topo) = kernel(input)?;
+    if scene.parts.len() != topo.parts.len() {
+        return Err("mesh and topology parts differ".into());
+    }
+    let file = input.file_name().unwrap().to_string_lossy().into_owned();
+    let (mut seen, mut products) = (HashSet::new(), HashSet::new());
+    for (leaf, parts) in parts_per_leaf(&topo.tree).iter().enumerate() {
+        let path = s
+            .leaf_path(leaf as u64)
+            .ok_or(format!("no path to leaf {leaf}"))?;
+        let (p, _) = *path.0.last().unwrap();
+        for &part in parts {
+            let placed = &topo.parts[part];
+            let proto = &topo.prototypes[placed.prototype];
+            let fresh = seen.insert((p, placed.prototype));
+            let (gb, lb) = match (b.product(p), b.leaf(leaf as u64)) {
+                (Bound::Box(gb), Bound::Box(lb)) => (gb, lb),
+                (Bound::Unknown(r), _) | (_, Bound::Unknown(r)) => {
+                    if fresh {
+                        *all.unknown.entry(r.to_string()).or_default() += 1;
+                    }
+                    continue;
+                }
+            };
+            let model = points(&scene, part, proto);
+            all.leaves += 1;
+            if let Some((q, over)) = model
+                .iter()
+                .find_map(|&q| outside(&lb, q, norm(q)).map(|o| (q, o)))
+            {
+                all.violations.push(format!(
+                    "{file} leaf {leaf}: {q:?} {over:.3e} mm outside {lb:?}"
+                ));
+            }
+            if !fresh {
+                continue;
+            }
+            all.products += 1;
+            let back = invert(&placed.transform);
+            let local = model.iter().map(|&q| (apply(&back, q), norm(q)));
+            let exact = vertices(proto).into_iter().map(|v| (v, 0.));
+            let mut bad = None;
+            for (q, at) in local.chain(exact) {
+                all.points += 1;
+                if let Some(over) = outside(&gb, q, at) {
+                    bad.get_or_insert(format!(
+                        "{file} product {p}: {q:?} {over:.3e} mm outside {gb:?}"
+                    ));
+                }
+            }
+            all.violations.extend(bad);
+        }
+        if let (true, Bound::Box(gb)) = (products.insert(p), b.product(p)) {
+            occt_box(all, &file, p, &gb, &topo, parts);
+        }
+    }
+    Ok(())
+}
+
+/// OCCT's box of product `p`, the union of its leaf's prototypes' boxes, as
+/// data: how far it reaches past the graph's box, and the volume ratio.
+/// Skipped when a prototype has free edges, which OCCT's box holds and the
+/// graph's leaves out.
+fn occt_box(all: &mut Tally, file: &str, p: usize, gb: &BBox, topo: &Topology, parts: &[usize]) {
+    let mut o = [
         f64::INFINITY,
         f64::INFINITY,
         f64::INFINITY,
@@ -148,178 +278,89 @@ fn placed(o: &[f64; 6], t: &[f64; 12]) -> [f64; 6] {
         f64::NEG_INFINITY,
         f64::NEG_INFINITY,
     ];
-    for k in 0..8 {
-        let p = apply(
-            t,
-            [0, 1, 2].map(|i| o[if k >> i & 1 == 0 { i } else { 3 + i }]),
-        );
+    for &part in parts {
+        let proto = &topo.prototypes[topo.parts[part].prototype];
+        let Some(b) = proto.bbox else { continue };
+        if face_edges(proto).contains(&false) {
+            all.wireframe += 1;
+            return;
+        }
         for i in 0..3 {
-            b[i] = b[i].min(p[i]);
-            b[3 + i] = b[3 + i].max(p[i]);
+            o[i] = o[i].min(b[i]);
+            o[3 + i] = o[3 + i].max(b[3 + i]);
         }
     }
-    b
-}
-
-fn check(input: &Path) -> Result<Tally, String> {
-    let g = Graph::open(input).map_err(|e| format!("graph: {e}"))?;
-    let t1 = Instant::now();
-    let s = graph::structure(&g).map_err(|e| format!("structure: {e}"))?;
-    let b = graph::bounds(&g, &s);
-    let mut tally = Tally {
-        secs: t1.elapsed().as_secs_f64(),
-        ..Tally::default()
-    };
-    let topo = topology_of(input)?;
-    let per_leaf = parts_per_leaf(&topo.tree);
-    let mut seen = std::collections::HashSet::new();
-    for (leaf, parts) in per_leaf.iter().enumerate() {
-        let path = s
-            .leaf_path(leaf as u64)
-            .ok_or(format!("no path to leaf {leaf}"))?;
-        let (p, _) = *path.0.last().unwrap();
-        for &part in parts {
-            let placed_part = &topo.parts[part];
-            let proto = &topo.prototypes[placed_part.prototype];
-            let Some(o) = proto.bbox else { continue };
-            let fresh = seen.insert((p, placed_part.prototype));
-            if wireframe(proto) {
-                tally.wireframe += usize::from(fresh);
-                continue;
-            }
-            match (b.product(p), b.leaf(leaf as u64)) {
-                (Bound::Box(gb), Bound::Box(lb)) => {
-                    tally.leaves += 1;
-                    if let Some(over) =
-                        contains(&lb, &placed(&o, &placed_part.transform), &mut tally.worst)
-                    {
-                        tally
-                            .violations
-                            .push(format!("leaf {leaf} part {part}: {over:.3e} mm outside"));
-                    }
-                    if !fresh {
-                        continue;
-                    }
-                    tally.products += 1;
-                    let slack = 1e-6 * gb.diagonal().max(1.);
-                    for v in &proto.vertices {
-                        tally.vertices += 1;
-                        if (0..3).any(|i| v[i] < gb.min[i] - slack || v[i] > gb.max[i] + slack) {
-                            tally
-                                .vertex_violations
-                                .push(format!("product {p}: vertex {v:?} outside {gb:?}"));
-                        }
-                    }
-                    if let Some(over) = contains(&gb, &o, &mut tally.worst) {
-                        tally.violations.push(format!(
-                            "product {p} prototype {}: {over:.3e} mm outside; graph {gb:?}, kernel {o:?}",
-                            placed_part.prototype
-                        ));
-                    }
-                    // Extents floored at 1e-3 of the OCCT box's diagonal, so a
-                    // flat part's ratio measures its outline, not float noise.
-                    let d = [0, 1, 2].map(|i| o[3 + i] - o[i]);
-                    let floor = 1e-3 * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    let vol = |d: [f64; 3]| d.iter().map(|x| x.max(floor)).product::<f64>();
-                    if floor > 0. {
-                        let gd = [0, 1, 2].map(|i| gb.max[i] - gb.min[i]);
-                        tally.ratios.push(vol(gd) / vol(d));
-                    }
-                }
-                (Bound::Unknown(r), _) | (_, Bound::Unknown(r)) => {
-                    if fresh {
-                        *tally.unknown.entry(r.to_string()).or_default() += 1;
-                    }
-                }
-            }
-        }
+    if !o[0].is_finite() {
+        return;
     }
-    Ok(tally)
-}
-
-fn quantile(v: &mut [f64], q: f64) -> f64 {
-    if v.is_empty() {
-        return f64::NAN;
+    let reach = (0..3)
+        .map(|i| (gb.min[i] - o[i]).max(o[3 + i] - gb.max[i]))
+        .fold(0f64, f64::max);
+    if reach > 1e-6 * gb.diagonal().max(1.) {
+        all.over_reach += 1;
     }
-    v.sort_by(f64::total_cmp);
-    v[((v.len() - 1) as f64 * q).round() as usize]
+    if reach > all.worst_reach.0 {
+        all.worst_reach = (reach, format!("{file} product {p}"));
+    }
+    // Extents floored at 1e-3 of the OCCT box's diagonal, so a flat part's
+    // ratio measures its outline, not float noise.
+    let d = [0, 1, 2].map(|i| o[3 + i] - o[i]);
+    let floor = 1e-3 * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let vol = |d: [f64; 3]| d.iter().map(|x| x.max(floor)).product::<f64>();
+    if floor > 0. {
+        let gd = [0, 1, 2].map(|i| gb.max[i] - gb.min[i]);
+        all.ratios
+            .push((vol(gd) / vol(d), format!("{file} product {p}")));
+    }
 }
 
-/// Runs `check` on `files`, reports on stderr, and fails on any violation
-/// or when nothing was compared.
+fn quantile(v: &[(f64, String)], q: f64) -> f64 {
+    v.get(((v.len().max(1) - 1) as f64 * q).round() as usize)
+        .map_or(f64::NAN, |r| r.0)
+}
+
+/// Runs `check` on `files`, reports on stderr, and fails on any point
+/// outside its box or when nothing was compared.
 fn run(files: &[PathBuf]) {
     let mut all = Tally::default();
-    let mut bad = Vec::new();
     for f in files {
         let stem = f.file_stem().unwrap_or_default();
         // The multi-file assemblies' top files: their parts live in other files.
         if stem == "s1-c5-214" || stem == "s1_pe_214" {
             continue;
         }
-        match check(f) {
-            Ok(t) => {
-                if !t.violations.is_empty() {
-                    bad.push(format!("{}:\n  {}", f.display(), t.violations.join("\n  ")));
-                }
-                eprintln!(
-                    "{}: {} products, {} leaves, {} unknown, {} wireframe, {} violations (worst reach {:.2e} mm), structure + boxes {:.3} s",
-                    f.display(),
-                    t.products,
-                    t.leaves,
-                    t.unknown.values().sum::<usize>(),
-                    t.wireframe,
-                    t.violations.len(),
-                    t.worst,
-                    t.secs
-                );
-                all.products += t.products;
-                all.leaves += t.leaves;
-                all.wireframe += t.wireframe;
-                all.violations.extend(t.violations);
-                all.ratios.extend(t.ratios);
-                all.vertices += t.vertices;
-                if !t.vertex_violations.is_empty() {
-                    eprintln!(
-                        "{}: VERTICES OUTSIDE:\n  {}",
-                        f.display(),
-                        t.vertex_violations.join("\n  ")
-                    );
-                }
-                all.vertex_violations.extend(t.vertex_violations);
-                all.worst = all.worst.max(t.worst);
-                for (k, v) in t.unknown {
-                    *all.unknown.entry(k).or_default() += v;
-                }
-            }
-            Err(e) => eprintln!("{}: not compared: {e}", f.display()),
+        if let Err(e) = check(f, &mut all) {
+            eprintln!("{}: not compared: {e}", f.display());
         }
     }
-    let n = all.ratios.len();
-    let (median, p95) = (
-        quantile(&mut all.ratios, 0.5),
-        quantile(&mut all.ratios, 0.95),
-    );
+    all.ratios.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (median, p95) = (quantile(&all.ratios, 0.5), quantile(&all.ratios, 0.95));
     eprintln!(
-        "bounds: {} files, {} products and {} leaves compared, {} violations (worst reach {:.2e} mm, allowed {ENLARGEMENT_MM} mm); {} wireframe, unknown {:?}; \
-         tightness (graph ÷ OCCT volume, {n} products) median {median:.3}, p95 {p95:.3}",
+        "bounds: {} files; {} products ({} points) and {} leaves compared, {} violations; unknown {:?}; \
+         structure + boxes {:.3} s (debug)",
         files.len(),
         all.products,
+        all.points,
         all.leaves,
         all.violations.len(),
-        all.worst,
-        all.wireframe,
-        all.unknown
+        all.unknown,
+        all.secs
     );
     eprintln!(
-        "bounds: {} kernel vertices checked, {} outside the graph box",
-        all.vertices,
-        all.vertex_violations.len()
+        "bounds: OCCT's box reaches past the graph's on {} of {} products ({} with wireframe not compared), worst {:.3e} mm ({}); \
+         tightness (graph ÷ OCCT volume) median {median:.3}, p95 {p95:.3}, top {:?}",
+        all.over_reach,
+        all.ratios.len(),
+        all.wireframe,
+        all.worst_reach.0,
+        all.worst_reach.1,
+        all.ratios.iter().rev().take(5).collect::<Vec<_>>()
     );
     assert!(
-        bad.is_empty(),
-        "{} files violate:\n{}",
-        bad.len(),
-        bad.join("\n")
+        all.violations.is_empty(),
+        "{} outside:\n{}",
+        all.violations.len(),
+        all.violations.join("\n")
     );
     assert!(all.products > 0, "no product compared");
 }

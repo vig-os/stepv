@@ -348,10 +348,19 @@ the node's box is `Unknown(reason)`. It is never a guess.
     AP203/214.
   - **Geometry outside the B-rep:** wireframe, `GEOMETRIC_CURVE_SET` and PMI aren't in a product's
     box.
-- **Checked against OCCT** (G4): on every corpus file, each product's graph box contains the kernel's
-  `topology::Prototype::bbox`, within the kernel's own enlargement (an OCCT box is grown by its
-  tolerance). The report gives the volume ratio (graph box ÷ OCCT box) per product, as tightness data,
-  not as a gate.
+- **Checked against the exact geometry, as OCCT triangulates it** (G4): on every corpus file, every
+  node of the kernel's mesh of a product's prototype, every point of its face edges' polylines
+  (`--edges`) and every B-rep vertex of those edges lies inside the product's graph box, and, placed,
+  inside its leaf's box. These points lie on the exact faces and edges. The slack is only the mesh's
+  f32 rounding (1e-6 of the box's size), tighter than any shape tolerance. Free edges and their
+  vertices (wireframe) are left out, as the box leaves them out.
+  - **Why not OCCT's own box:** it is itself over-conservative. OCCT's `BndLib` boxes a conic arc
+    by points at `r / cos(π/8)` (a circumscribed octagon), so its box can reach up to about 8.2% of a
+    radius past the exact shape, beyond its tolerance gap. On the local corpus, "the graph box contains
+    `topology::Prototype::bbox`" failed on 234 products by up to 62.8 mm (G4, round 1), while no kernel
+    vertex lay outside a graph box. That gate tested OCCT's over-reach, not the graph.
+  - OCCT's box stays as reported data, not a gate: how often and how far it reaches past the graph's,
+    and the volume ratio (graph box ÷ OCCT box) per product as tightness data.
 
 ### 2.4 The public Rust API (sketch)
 
@@ -457,6 +466,15 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     parent's `children` below, so a root leaf has a path too.
   - `Product::bodies` are the representations the transfer starts from (its shape definitions',
     and its shape aspects' unless GD&T): an assembly's own placement representation is one.
+- **G4's realised bounds API** (#136) keeps the sketch's names and signatures:
+  - `Bounds` owns a clone of the `Structure`, so `leaf(leaf)` takes no structure argument and
+    `Bounds` holds no borrow, like `Structure`.
+  - `Bound::Unknown` carries G3's `Reason(&'static str)`: `"unsupported surface"`,
+    `"non-positive weight"`, `"non-finite placement"`, and so on. A product with no B-rep geometry
+    at all (only placements, wireframe or external parts) is `Unknown("no B-rep geometry")`, and
+    adds nothing to its parents' boxes.
+  - `node(n)` answers for every face, shell, solid, edge, vertex and representation the walk reached,
+    in that representation's mm, else `Unknown("not reached")`.
 - **Complex entities** (`#1=(A(…) B(…) C(…));`, one record holding several entity types) are first-class:
   - Their type is the interned sorted list of part names. `TypeName::Complex` holds them as
     `&[Box<str>]`, the interned table's own slice, rather than the sketch's `&[&str]` (#152). `is_a`/`of_type` match any part, so
@@ -702,6 +720,15 @@ cap (the 2026-10-12 incident).
   file's measured 3.28 M entities and 1.12 references each), plus about 5% headroom for the type table
   and the dangling list. G1 and G2 measure them. A miss is a design finding to report, not a target to
   move quietly.
+- **Structure + boxes, measured (G4, #136):**
+  - Ultimaker takes **0.76 s** (`structure()` 0.04 s + `bounds()` 0.72 s), a miss against 0.5 s.
+    The stress assembly takes 0.25 s.
+  - Cause: the post-order walk reaches about 1.5 M entities in DAG order, which is random order in
+    the 143 MB map, so it is bound by memory latency. Parsing Ultimaker's 519k points takes 0.11 s
+    in file order and 0.31 s shuffled. Argument parsing is about 61% of the profile (B-spline poles
+    about 26%).
+  - The target stands. The fix (rayon over products in the Rust path, or a file-order pass) is
+    #177.
 - **The fast path's targets are measured, not promised.** M4b and M5 report, on Ultimaker, against the
   OCCT-only path (42 s today):
   - time to the first Rust-meshed product;
@@ -910,7 +937,7 @@ run memory-bounded, one heavy job at a time.
 | **G1** Scanner + entity table | `src/graph/{mod,lex}.rs`: map, header via `header::read`, records → id, interned type (complex as a sorted part list), arg span; the id → node lookup (dense or sorted); edition 3 `DATA(…)` parameters, `ANCHOR`/`SIGNATURE` skipped; CR/LF stripped in strings (the header path too); duplicate ids kept as OCCT keeps them; refusal with a byte offset | A table equal to an independent oracle (`ids` and types from a regex pass) on `tests/data`; the duplicate-id fixture agrees with `occt::outline`; all malformed fixtures refuse without panicking; Ultimaker/stress within §2.7's scan time and the "without `referrers`" heap | `nix develop -c cargo test graph::` and `nix develop -c cargo run --release --example graph_scan -- <file>` (time and heap) |
 | **G2** CSR + lazy args + complex parts + census | Forward CSR in the scan; `args()`/`args_of()` → `Value`, depth cap 64; `is_a`/`parts`/`of_type` over complex parts; `referrers()` built lazily; `census()`; `examples/graph_census.rs` writes per-file surface and edge-curve shares (3-D only, p-curves excluded) and the share of products all of whose faces are analytic | Round trip: every `#n` in a span is in `refs`, in order; args parse for every entity and every complex part of every corpus file; the unit, context, relationship and rational-B-spline walkthroughs of §2.4 as unit tests; the census table is committed to `docs/adr/0001-census.md`, replacing §2.6's guess; the "with `referrers`" heap | `nix develop -c cargo test graph::` and the census example over the corpus |
 | **G3** Structure as a DAG + placements + units | `structure()`: the product DAG, the cycle check, shown/leaf counts, `leaf_path`/`leaf_of`, lazy capped `occurrences()`, both naming rules, shapeless products dropped, `ITEM_DEFINED_TRANSFORMATION` (`T = S_mm(item_child)⁻¹ · S_mm(item_parent)` applied to the child's shape, OCCT's change-of-coordinates convention; item_k with rep_k, parent and child by matching against the NAUO, swapped items corrected, `T⁻¹` when reversed) and `MAPPED_ITEM` (the same convention), each item scaled to mm, `Unplaced(reason)` | `Structure::tree()` equals `occt::outline`'s tree (names, shape, leaf numbers) on every corpus file, the two multi-file assemblies included (the outline, like the graph, reads only the given file); placements equal `--topology`'s `PlacedPart::transform` within 1e-9 relative on every corpus file with instances, except the two multi-file assemblies' top files, whose parts the transfer reads from other files; both run locally on the whole corpus (`STEPV_CORPUS`), and CI runs both on the fetched `tests/fixtures/nist-pmi` and `occt-import-js` (trees on every file, placements on occt-import-js's CAx-IF assemblies), failing when `STEPV_CORPUS` names no file or compares no placement; **the inch sub-assembly inside a mm assembly** fixture and a reversed-relationship (rep_1 = parent) fixture and a non-commuting fixture (the child's item a rotation that doesn't commute with the parent's) place exactly as `--topology` does; the root rule matches the outline's roots; a cyclic fixture refuses; a shared-sub-assembly fixture whose expansion exceeds the cap gives the outline's error while `structure()` stays O(products) | `nix develop -c cargo test --test graph_structure` (runs the kernel for the oracle) |
-| **G4** Conservative boxes | `bounds()`: the per-type table of §2.3, the 8-corner rule, post-order composition over the DAG, `Unknown` propagation (non-positive weights included), leaf boxes via `leaf_path` | On every corpus file, each product's box contains OCCT's prototype `bbox` (within its tolerance enlargement); 0 violations; the tightness ratio per product is reported; §2.7's structure + boxes time | `nix develop -c cargo test --test graph_bounds` |
+| **G4** Conservative boxes | `bounds()`: the per-type table of §2.3, the 8-corner rule, post-order composition over the DAG, `Unknown` propagation (non-positive weights included), leaf boxes via `leaf_path` | On every corpus file, every node of the kernel's mesh of each prototype, its face edges' polyline points and its B-rep vertices lie inside the product's graph box and, placed, the leaf's (§2.3: OCCT's own box over-reaches by up to r·(1/cos(π/8) − 1), so it is data, not the gate); 0 violations, locally (`STEPV_CORPUS`) and in CI on nist-pmi and occt-import-js, failing when no product is compared; the tightness ratio and OCCT's over-reach per product are reported; §2.7's structure + boxes time | `nix develop -c cargo test --test graph_bounds` |
 | **G5** `stepv graph` CLI | `summary` (header, units, census, model box), `tree` (paginated, depth-limited, capped), `census`, `query <jq>` via `jaq` over the lazy view (§2.4); text as `{"untrusted": …}`; `--timings` | Golden JSON on `tests/data`; an injection-style product name comes back only as a data field; the lazy-view test: a one-product face walk on the stress assembly keeps the heap ≤ 2× the graph's (this decides `ValT` vs native functions) | `nix develop -c cargo test --test graph_cli` |
 | **G6a** The viewer opens on the graph | `Load::Graph`, the graph's tree, box placeholders (translucent, wireframe), the status line, the fallback when the graph is refused | Headless viewer test (`tests/view.rs`): first frame with placeholders before `Done`; no placeholder drawn with the shaded pipeline; a refused graph gives today's behaviour, with the reason in the status line | `nix develop -c cargo test --test view` |
 | **G6b** Meshes replace placeholders | Per-leaf replacement as meshes arrive, the tree-mismatch rule (the kernel's tree wins, unmapped placeholders dropped and counted), `OutlineArtifact::boxes` filled when every leaf has a box | Headless test: after `Done` no placeholder remains on a matching tree; a multi-file fixture shows the mismatch rule and its status line; the artifact's `boxes` length equals `leaves`, and it's absent when any box is `Unknown` | `nix develop -c cargo test --test view` and `nix develop -c cargo test --test cache` |

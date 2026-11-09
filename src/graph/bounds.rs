@@ -91,8 +91,8 @@ impl Bounds {
         self.products[p].placed(&t).bound()
     }
 
-    /// The box of a face, shell, solid, edge, vertex or representation the
-    /// walk reached, in its representation's mm.
+    /// The box of a face, shell, solid, edge, vertex, surface, curve or
+    /// representation the walk reached, in its representation's mm.
     #[must_use]
     pub fn node(&self, n: Node) -> Bound {
         self.nodes
@@ -382,6 +382,19 @@ impl Walk<'_> {
         self.topo(item, s, 0)
     }
 
+    /// `f`'s box for `n`, memoised: a surface or curve shared by several
+    /// faces or edges is boxed once.
+    fn shared(&mut self, n: Node, s: f64, f: impl FnOnce(&mut Self) -> Acc) -> Acc {
+        if let Some(&(at, a)) = self.memo.get(&n)
+            && at == s
+        {
+            return a;
+        }
+        let a = f(self);
+        self.memo.entry(n).or_insert((s, a));
+        a
+    }
+
     /// A solid, shell, face, edge or vertex, memoised.
     fn topo(&mut self, n: Node, s: f64, depth: usize) -> Acc {
         if let Some(&(at, a)) = self.memo.get(&n)
@@ -491,7 +504,7 @@ impl Walk<'_> {
             return why("nested too deep");
         }
         if self.any(c, &BSPLINE_CURVES) {
-            return self.poles(c, s, false);
+            return self.shared(c, s, |w| w.poles(c, s, false));
         }
         let Ok(a) = g.args(c) else {
             return why("unsupported curve");
@@ -510,8 +523,14 @@ impl Walk<'_> {
                 None => why("unbounded line"),
             };
         }
+        self.shared(c, s, |w| w.conic(c, &a, s))
+    }
+
+    /// A `CIRCLE`'s or an `ELLIPSE`'s whole box.
+    fn conic(&self, c: Node, a: &Args<'_>, s: f64) -> Acc {
+        let g = self.g;
         let conic = g.is_a(c, "CIRCLE") || g.is_a(c, "ELLIPSE");
-        let Some(f) = refers(&a, 1)
+        let Some(f) = refers(a, 1)
             .filter(|_| conic)
             .and_then(|p| frame(g, p, s).ok())
         else {
@@ -536,8 +555,12 @@ impl Walk<'_> {
         Acc::around(column(&f, 3), h)
     }
 
-    /// A surface's own box, without its face's bounds.
+    /// A surface's own box, without its face's bounds, memoised.
     fn surface(&mut self, sf: Node, s: f64, depth: usize) -> Acc {
+        self.shared(sf, s, |w| w.surface_of(sf, s, depth))
+    }
+
+    fn surface_of(&mut self, sf: Node, s: f64, depth: usize) -> Acc {
         let g = self.g;
         if depth > MAX_DEPTH {
             return why("nested too deep");
