@@ -13,7 +13,10 @@
 
 mod args;
 mod bounds;
+pub mod json;
 mod lex;
+#[cfg(feature = "query")]
+pub mod query;
 mod structure;
 
 use std::collections::{BTreeMap, HashMap};

@@ -20,6 +20,9 @@ use stepv::occt::{self, Limits, Outcome};
 use stepv::topology::Topology;
 use stepv::{Deflection, Scene, cache, glb, header, render, view};
 
+// `stepv graph …`: the graph core without the kernel (ADR-0001 G5).
+mod graph_cmd;
+
 const USAGE: &str = "\
 stepv — STEP/IGES/BREP preview and thumbnails
 
@@ -28,6 +31,9 @@ USAGE:
     stepv <input> --info
     stepv view <input> [options]     Interactive viewer window (needs a desktop
                                      session; fails at once without one)
+    stepv graph <subcommand> <input> The file's own graph as JSON, without the
+                                     kernel: summary, census, tree, query
+                                     (`stepv graph --help`)
 
 ARGS:
     <input>              .step / .stp / .iges / .igs / .brep
@@ -220,6 +226,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(("graph", rest)) = argv.split_first().map(|(c, r)| (c.as_str(), r)) {
+        return ExitCode::from(graph_cmd::main(rest));
+    }
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         print!("{USAGE}");
         return ExitCode::SUCCESS;

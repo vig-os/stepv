@@ -493,6 +493,31 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - `gpu::Renderer::plan` lists a frame's draws as `(Pipeline, Geometry)` pairs, and `render_with`
     encodes exactly those. Placeholder boxes have their own pipelines (unlit, alpha-blended, no
     depth write): a translucent fill and a line-list wireframe.
+- **G5's realised CLI and query view** (#137):
+  - **Native filters, not `ValT`.** jaq 3's `ValT::values` and `key_values` return `'static`
+    iterators, so an `Entity(Node)` variant would have to own the graph (an `Arc<Graph>` in every
+    value), and the whole value surface (arithmetic, ordering, `jaq_std::ValT`) would be
+    re-implemented beside `jaq_json::Val`'s, several hundred lines on their own. The fallback is the
+    view: native filters over plain `jaq_json` values, each materialising only when called.
+  - **The heap test passes with it** (`tests/graph_cli.rs`, stress assembly, debug build): the
+    graph's own heap (table + `referrers`) is 127.9 MB; the peak through a filter walking one
+    part's faces (663) is 179.3 MB, **1.40×**, against the 2× bar. The peak includes the
+    structure and the boxes, which `products` computes.
+  - `src/graph/json.rs` is always built: `View` (the graph, with `structure()` and `bounds()`
+    computed on first use and timed) and the JSON it writes, `summary`, `census`, `products`,
+    `tree(TreeOptions)` (a page of occurrences: `--depth`, `--offset`, `--limit`, the outline's
+    caps) and `entity`/`refs`/`referrers` by step id. `src/graph/query.rs`, behind `query`, is
+    `query(&View, filter, limit) -> Result<Answer, QueryError>`: the sketch's `(g, s, b)` became
+    the `View`, so a filter that only reads entities never builds the structure or the boxes.
+  - The filters are `summary`, `census`, `products`, `tree`, `entity($id)`, `refs($id)` and
+    `referrers($id)`, `$id` a step id; `.` is null. `env`, `halt` and the logging natives raise an
+    error, so a filter can't read the host or end the process.
+  - **Untrusted text:** every string from the file (header fields, names, type names, enumerations,
+    string arguments) is `{"untrusted": "…"}`, never a bare string or an object key, so the census
+    is a list of `{"type", "count"}`.
+  - `--timings` prints the phases (`scan`, then `structure`, `bounds`, `expand` as they ran, then
+    `answer`) on stderr. Ultimaker 3, release build: `summary` scan 0.56 s (cold), structure
+    0.035 s, bounds 0.69 s, total 1.29 s; `census` 0.22 s; `tree` 0.26 s.
 - **Complex entities** (`#1=(A(…) B(…) C(…));`, one record holding several entity types) are first-class:
   - Their type is the interned sorted list of part names. `TypeName::Complex` holds them as
     `&[Box<str>]`, the interned table's own slice, rather than the sketch's `&[&str]` (#152). `is_a`/`of_type` match any part, so

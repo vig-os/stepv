@@ -70,6 +70,17 @@ blake3 = "1"
 # MIT/Apache-2.0, no dependencies beyond libc.
 memmap2 = "0.9.11"
 
+# `stepv graph query` (ADR-0001 §2.4, G5): jq filters over the graph's lazy
+# JSON view. Pinned to exact versions: jaq's native-filter API is what the
+# view is built on, so an upgrade is a deliberate change. MIT. Behind the
+# default-on `query` feature, so the Quick Look library carries no query
+# engine.
+jaq-core = { version = "=3.1.2", optional = true }
+# The whole standard library (its definitions call every native); the view
+# refuses `env`, `halt` and the logging natives (src/graph/query.rs).
+jaq-std = { version = "=3.0.4", optional = true }
+jaq-json = { version = "=2.0.3", optional = true, default-features = false, features = ["std", "serde"] }
+
 # PNG encoding for `--png` (the rasteriser itself is src/render.rs).
 png = "0.18"
 
@@ -99,12 +110,19 @@ bytemuck = { version = "1", optional = true, features = ["derive"] }
 pollster = { version = "1", optional = true }
 
 [features]
-default = ["viewer"]
+default = ["viewer", "query"]
+# `stepv graph query`: jaq over the graph (ADR-0001 §2.4).
+query = ["dep:jaq-core", "dep:jaq-std", "dep:jaq-json"]
 # `stepv view`: the GPU viewer, and the software window it falls back to. Off
 # for a headless build (`--no-default-features`): thumbnails and --glb need no
 # window, and the Quick Look extensions (stepv-capi) must never link it (CI's
 # capi tripwire, scripts/check-capi-deps.sh).
 viewer = ["dep:minifb", "dep:eframe", "dep:egui-phosphor", "dep:bytemuck", "dep:pollster"]
+
+# `stepv graph query` is tested with the rest of `stepv graph`.
+[[test]]
+name = "graph_cli"
+required-features = ["query"]
 
 # proc_pid_rusage: the macOS half of the kernel memory cap; fcntl: handing
 # the kernel an fd input (src/occt.rs).
