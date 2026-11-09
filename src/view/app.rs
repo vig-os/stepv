@@ -179,9 +179,8 @@ struct Viewer {
     exact: ExactCut,
     /// STEPV_VIEW_SECTION: report the caps on stderr when they land.
     report_section: bool,
-    /// The graph's placeholders whose leaves the scene has no mesh for
-    /// (#138), and the graph's status line.
-    placeholders: Option<GpuPlaceholders>,
+    /// The graph's status line (#138): no placeholder outlives the scene
+    /// (#139).
     graph: Option<String>,
 }
 
@@ -278,7 +277,6 @@ impl Viewer {
             reveal: false,
             exact: ExactCut::default(),
             report_section: opts.section.is_some(),
-            placeholders: None,
             graph: None,
             cut: opts.section.is_some(),
             cap: true,
@@ -947,7 +945,7 @@ impl Viewer {
             &rs.device,
             &rs.queue,
             Some(&self.scene),
-            self.placeholders.as_ref(),
+            None,
             target,
             &view,
         );
@@ -1290,15 +1288,12 @@ impl Window {
                     let Some(r) = self.renderer.take() else {
                         return;
                     };
-                    // Each leaf's mesh replaces its box, by leaf number.
+                    // Each leaf's mesh replaces its box, by leaf number, and
+                    // the status line counts the boxes the scene dropped.
                     self.placeholders = None;
-                    let left = self.graph.scene(l.topology.as_ref().map(|t| &t.tree[..]));
-                    let placeholders = left.map(|p| {
-                        GpuPlaceholders::upload(&rs.device, &r, p.boxes.iter().map(|b| b.1))
-                    });
+                    self.graph.scene(l.topology.as_ref().map(|t| &t.tree[..]));
                     match Viewer::new(rs, r, &l.scene, l.topology.take(), &opts, e, m) {
                         Ok(mut v) => {
-                            v.placeholders = placeholders;
                             v.graph = self.graph.status.clone();
                             ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
                             if self.opts.screenshot.is_some() {

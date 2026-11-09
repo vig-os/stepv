@@ -6,7 +6,11 @@
 //! it contains the leaf's exact geometry. A leaf whose box is `Unknown` has
 //! no placeholder and is counted instead. When the kernel's scene arrives,
 //! each placeholder is replaced by its leaf's mesh, joined by leaf number
-//! ([`crate::topology::parts_per_leaf`]).
+//! ([`crate::topology::parts_per_leaf`]), and none outlives it (G6b, #139):
+//! a leaf the kernel has no mesh for loses its box and is counted as
+//! without geometry, and when the kernel's tree has another leaf count than
+//! the graph's, the kernel's tree wins: no box maps, and all are dropped
+//! and counted.
 
 use std::path::Path;
 
@@ -57,19 +61,24 @@ impl GraphState {
         }
     }
 
-    /// The kernel's scene arrived, with its topology's tree: the boxes left
-    /// once each leaf's mesh replaced its own ([`Placeholders::replace`]).
+    /// The kernel's scene arrived, with its topology's tree: each leaf's
+    /// mesh replaces its box ([`Placeholders::replace`]), the rest are
+    /// dropped ([`Placeholders::done`]), and the status line counts them.
     /// Without the tree there is no join, and the scene replaces them all.
-    pub fn scene(&mut self, tree: Option<&[topology::Node]>) -> Option<Placeholders> {
+    /// No box is drawn after the scene.
+    pub fn scene(&mut self, tree: Option<&[topology::Node]>) {
         self.scene = true;
-        let mut p = self.placeholders.take()?;
-        p.replace(&topology::parts_per_leaf(tree?));
-        (!p.boxes.is_empty()).then_some(p)
+        let (Some(mut p), Some(tree)) = (self.placeholders.take(), tree) else {
+            return;
+        };
+        p.replace(&topology::parts_per_leaf(tree));
+        p.done();
+        self.status = Some(p.status());
     }
 }
 
 /// The leaves still drawn as boxes, and what the graph said of the rest.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Placeholders {
     /// (leaf number, box in model mm), in leaf order.
     pub boxes: Vec<(u64, BBox)>,
@@ -77,6 +86,14 @@ pub struct Placeholders {
     pub leaves: u64,
     /// Leaves without a box (`Bound::Unknown`): no placeholder.
     pub unknown: u64,
+    /// Boxes dropped once the kernel was done without a mesh for their
+    /// leaf ([`Self::done`]): leaves without geometry.
+    pub without_geometry: u64,
+    /// The kernel's leaf count, when its tree disagrees with the graph's
+    /// ([`Self::replace`]).
+    pub kernel_leaves: Option<u64>,
+    /// Boxes dropped because the kernel's tree disagrees: none maps.
+    pub unmapped: u64,
 }
 
 impl Placeholders {
@@ -87,6 +104,9 @@ impl Placeholders {
             boxes: Vec::new(),
             leaves,
             unknown: 0,
+            without_geometry: 0,
+            kernel_leaves: None,
+            unmapped: 0,
         };
         for leaf in 0..leaves {
             match b.leaf(leaf) {
@@ -98,9 +118,21 @@ impl Placeholders {
     }
 
     /// Drops the placeholder of every leaf the kernel delivered a mesh for:
-    /// `delivered[leaf]` lists that leaf's mesh parts
-    /// ([`topology::parts_per_leaf`]).
+    /// `delivered[leaf]` lists that leaf's mesh parts, one entry per leaf
+    /// of the kernel's tree ([`topology::parts_per_leaf`]).
+    ///
+    /// The join is by leaf number, so it holds only when both trees have
+    /// the same leaves (ADR-0001 §3). When the kernel's leaf count differs,
+    /// as on a multi-file assembly whose part files the graph doesn't read,
+    /// the kernel's tree wins: every box left is dropped as unmapped.
     pub fn replace(&mut self, delivered: &[Vec<usize>]) {
+        let kernel = delivered.len() as u64;
+        if kernel != self.leaves {
+            self.kernel_leaves = Some(kernel);
+            self.unmapped += self.boxes.len() as u64;
+            self.boxes.clear();
+            return;
+        }
         self.boxes.retain(|(leaf, _)| {
             usize::try_from(*leaf)
                 .ok()
@@ -109,17 +141,47 @@ impl Placeholders {
         });
     }
 
-    /// The status line: "graph: 1,234 parts, 12 without a box".
+    /// The kernel is done: the boxes still left are of leaves it has no
+    /// mesh for. They are dropped, and counted as without geometry, so the
+    /// final view never shows a box that reads as "pending".
+    pub fn done(&mut self) {
+        self.without_geometry += self.boxes.len() as u64;
+        self.boxes.clear();
+    }
+
+    /// The status line: "graph: 1,234 parts, 12 without a box", then what
+    /// the scene dropped: ", 3 without geometry", or on a tree mismatch
+    /// "; the kernel's tree has 1,240 parts: 1,222 placeholders dropped".
     #[must_use]
     pub fn status(&self) -> String {
-        match self.unknown {
-            0 => format!("graph: {} parts", thousands(self.leaves)),
-            n => format!(
-                "graph: {} parts, {} without a box",
-                thousands(self.leaves),
-                thousands(n)
-            ),
+        let mut s = format!("graph: {} parts", thousands(self.leaves));
+        if self.unknown > 0 {
+            s += &format!(", {} without a box", thousands(self.unknown));
         }
+        if self.without_geometry > 0 {
+            s += &format!(", {} without geometry", thousands(self.without_geometry));
+        }
+        if let Some(k) = self.kernel_leaves {
+            s += &format!(
+                "; the kernel's tree has {} parts: {} placeholders dropped",
+                thousands(k),
+                thousands(self.unmapped)
+            );
+        }
+        s
+    }
+
+    /// The artifact's per-leaf boxes ([`crate::cache::OutlineArtifact::boxes`]),
+    /// `[xmin, ymin, zmin, xmax, ymax, zmax]` in leaf order: only when every
+    /// leaf has a box, since the schema can't say `Unknown`.
+    #[must_use]
+    pub fn leaf_boxes(&self) -> Option<Vec<[f64; 6]>> {
+        (self.unknown == 0 && self.boxes.len() as u64 == self.leaves).then(|| {
+            self.boxes
+                .iter()
+                .map(|(_, b)| [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
+                .collect()
+        })
     }
 }
 
@@ -167,14 +229,36 @@ mod tests {
         assert_eq!(thousands(1234), "1,234");
         assert_eq!(thousands(1_234_567), "1,234,567");
         let p = Placeholders {
-            boxes: Vec::new(),
             leaves: 1234,
             unknown: 12,
+            ..Placeholders::default()
         };
         assert_eq!(p.status(), "graph: 1,234 parts, 12 without a box");
         assert_eq!(
-            Placeholders { unknown: 0, ..p }.status(),
+            Placeholders {
+                unknown: 0,
+                ..p.clone()
+            }
+            .status(),
             "graph: 1,234 parts"
+        );
+        assert_eq!(
+            Placeholders {
+                without_geometry: 3,
+                ..p.clone()
+            }
+            .status(),
+            "graph: 1,234 parts, 12 without a box, 3 without geometry"
+        );
+        assert_eq!(
+            Placeholders {
+                kernel_leaves: Some(1240),
+                unmapped: 1222,
+                ..p
+            }
+            .status(),
+            "graph: 1,234 parts, 12 without a box; the kernel's tree has 1,240 parts: \
+             1,222 placeholders dropped"
         );
     }
 
@@ -196,7 +280,7 @@ mod tests {
                 placeholders: Placeholders {
                     boxes: vec![(0, b), (1, b)],
                     leaves: 2,
-                    unknown: 0,
+                    ..Placeholders::default()
                 },
             }))
         };
@@ -214,11 +298,12 @@ mod tests {
         let mut s = GraphState::default();
         assert!(s.graph(view()).is_some());
         assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
-        assert_eq!(s.scene(Some(&tree[..1])).map(|p| p.boxes.len()), Some(1));
+        s.scene(Some(&tree));
+        assert!(s.placeholders.is_none());
         assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
         // The scene first (a mesh-cache hit): no boxes, the status still.
         let mut s = GraphState::default();
-        assert!(s.scene(Some(&tree)).is_none());
+        s.scene(Some(&tree));
         assert!(s.graph(view()).is_none());
         assert!(s.placeholders.is_none());
         assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
@@ -231,7 +316,7 @@ mod tests {
             }
             assert!(s.graph(why()).is_none());
             if !scene_first {
-                assert!(s.scene(None).is_none());
+                s.scene(None);
             }
             assert_eq!(
                 s.status.as_deref(),
@@ -249,10 +334,64 @@ mod tests {
         let mut p = Placeholders {
             boxes: vec![(0, b), (1, b), (2, b)],
             leaves: 3,
-            unknown: 0,
+            ..Placeholders::default()
         };
-        // Leaf 1 came without geometry; leaf 2 is past the kernel's tree.
-        p.replace(&[vec![0, 1], vec![]]);
+        // Leaf 0's mesh came; leaves 1 and 2 are still to come.
+        p.replace(&[vec![0, 1], vec![], vec![]]);
         assert_eq!(p.boxes, vec![(1, b), (2, b)]);
+        assert_eq!(p.leaf_boxes(), None, "boxes were replaced");
+        // Done: leaf 2's came, leaf 1 has none, and its box goes too.
+        p.replace(&[vec![0, 1], vec![], vec![2]]);
+        p.done();
+        assert!(p.boxes.is_empty());
+        assert_eq!(p.without_geometry, 1);
+        assert_eq!(p.kernel_leaves, None);
+    }
+
+    /// #186 item 1: a kernel tree with another leaf count shifts the
+    /// numbering, so no box maps: all are dropped, and counted.
+    #[test]
+    fn a_kernel_tree_with_other_leaves_drops_every_box() {
+        let b = BBox {
+            min: [0.0; 3],
+            max: [1.0; 3],
+        };
+        let mut p = Placeholders {
+            boxes: vec![(0, b), (2, b)],
+            leaves: 3,
+            unknown: 1,
+            ..Placeholders::default()
+        };
+        p.replace(&[vec![0], vec![1], vec![2], vec![3]]);
+        p.done();
+        assert!(p.boxes.is_empty());
+        assert_eq!(
+            (p.kernel_leaves, p.unmapped, p.without_geometry),
+            (Some(4), 2, 0)
+        );
+    }
+
+    #[test]
+    fn the_artifact_has_boxes_only_when_every_leaf_has_one() {
+        let b = BBox {
+            min: [0.0, 1.0, 2.0],
+            max: [3.0, 4.0, 5.0],
+        };
+        let all = Placeholders {
+            boxes: vec![(0, b), (1, b)],
+            leaves: 2,
+            ..Placeholders::default()
+        };
+        assert_eq!(
+            all.leaf_boxes(),
+            Some(vec![[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]; 2])
+        );
+        let some = Placeholders {
+            boxes: vec![(0, b)],
+            leaves: 2,
+            unknown: 1,
+            ..Placeholders::default()
+        };
+        assert_eq!(some.leaf_boxes(), None);
     }
 }

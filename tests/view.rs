@@ -49,8 +49,9 @@ fn load_with_topology(name: &str) -> (Scene, Topology) {
     // Unique per call: tests run in parallel and load the same files.
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let flat = name.replace('/', "-");
     let mesh =
-        std::env::temp_dir().join(format!("stepv-view-{}-{n}-{name}.msh", std::process::id()));
+        std::env::temp_dir().join(format!("stepv-view-{}-{n}-{flat}.msh", std::process::id()));
     let topo = mesh.with_extension("json");
     let run = occt::run(
         &kernel,
@@ -600,6 +601,77 @@ fn placeholders_are_replaced_by_leaf_number() {
     let mut all = p.clone();
     all.replace(&per_leaf);
     assert!(all.boxes.is_empty());
+}
+
+/// #139's acceptance: after `Done` no placeholder remains on a matching
+/// tree, through the window's routing ([`placeholder::GraphState`]). Each
+/// meshed leaf's box is replaced; a leaf the kernel has no geometry for
+/// (the second pin, as the kernel writes such a leaf: a named node over
+/// unnamed, empty ones) loses its box too, and the status line counts it.
+#[test]
+fn after_done_no_placeholder_remains_on_a_matching_tree() {
+    let (_, topo) = load_with_topology("assembly.step");
+    let routed = |tree: &[stepv::topology::Node]| {
+        let mut s = placeholder::GraphState::default();
+        assert!(s.graph(Ok(Box::new(bracket_graph()))).is_some());
+        s.scene(Some(tree));
+        (s.placeholders.map(|p| p.boxes.len()), s.status)
+    };
+    assert_eq!(routed(&topo.tree), (None, Some("graph: 3 parts".into())));
+    let mut tree = topo.tree.clone();
+    let pin = last_part(&mut tree).expect("the bracket has parts");
+    *pin = stepv::topology::Node::Assembly {
+        name: "pin".into(),
+        children: vec![stepv::topology::Node::Assembly {
+            name: String::new(),
+            children: Vec::new(),
+        }],
+    };
+    let per_leaf = stepv::topology::parts_per_leaf(&tree);
+    assert_eq!(per_leaf.len(), 3, "the trees still match");
+    assert!(per_leaf[2].is_empty(), "{per_leaf:?}");
+    assert_eq!(
+        routed(&tree),
+        (None, Some("graph: 3 parts, 1 without geometry".into()))
+    );
+}
+
+/// The last leaf node of `tree`, in file order.
+fn last_part(tree: &mut [stepv::topology::Node]) -> Option<&mut stepv::topology::Node> {
+    let n = tree.last_mut()?;
+    if matches!(n, stepv::topology::Node::Part { .. }) {
+        return Some(n);
+    }
+    match n {
+        stepv::topology::Node::Assembly { children, .. } => last_part(children),
+        stepv::topology::Node::Part { .. } => unreachable!("returned above"),
+    }
+}
+
+/// #139's acceptance: a multi-file assembly whose part file is itself an
+/// assembly. The graph reads the main file alone: the bracket's three
+/// leaves with boxes, and the rack's part, whose geometry is in pins.stp,
+/// without one. OCCT follows the reference into two pins, so the kernel's
+/// tree has a leaf more. The kernel's tree wins: no box maps, every one is
+/// dropped, and the status line counts them.
+#[test]
+fn a_multi_file_tree_mismatch_drops_the_placeholders_and_says_so() {
+    let name = "multifile-nested/bracket.step";
+    let g = placeholder::load(&data(name)).expect("the graph reads the main file");
+    assert_eq!((g.leaves, g.placeholders.boxes.len()), (4, 3));
+    let (_, topo) = load_with_topology(name);
+    assert_eq!(stepv::topology::parts_per_leaf(&topo.tree).len(), 5);
+    let mut s = placeholder::GraphState::default();
+    assert!(s.graph(Ok(Box::new(g))).is_some());
+    s.scene(Some(&topo.tree));
+    assert!(s.placeholders.is_none());
+    assert_eq!(
+        s.status.as_deref(),
+        Some(
+            "graph: 4 parts, 1 without a box; the kernel's tree has 5 parts: \
+             3 placeholders dropped"
+        )
+    );
 }
 
 /// #138's acceptance: a file the graph refuses (here a `REFERENCE` section,

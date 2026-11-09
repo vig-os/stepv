@@ -14,6 +14,11 @@
 //   multifile/     the same assembly as a multi-file STEP: bracket.step holds
 //                  the structure, and each part is a sibling file it
 //                  references (the CAx-IF s1-c5-214 / SolidWorks export style)
+//   multifile-nested/  a multi-file STEP whose trees disagree (#139):
+//                  bracket.step holds the bracket inline beside a part that
+//                  references pins.stp, and pins.stp is itself an assembly
+//                  of two pins. The graph reads bracket.step alone (4
+//                  leaves); OCCT follows the reference (5 leaves)
 //   sketch.step    curves only, no surfaces: the sketch path
 //   box.igs        IGES
 //   box.brep       OCCT native BREP
@@ -41,6 +46,7 @@
 #include <Quantity_Color.hxx>
 #include <STEPCAFControl_Writer.hxx>
 #include <STEPControl_Writer.hxx>
+#include <TDF_LabelSequence.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDocStd_Document.hxx>
 #include <TopExp_Explorer.hxx>
@@ -148,6 +154,57 @@ bool step_multifile(const std::string& path) {
     return ok;
 }
 
+// The kernel's tree has a leaf more than the graph's: the part file is an
+// assembly, which OCCT's multi-file writer never writes (it keeps every
+// assembly in the main file), so pins.stp is replaced after the write.
+bool step_multifile_nested(const std::string& path) {
+    const std::filesystem::path p = std::filesystem::absolute(path);
+    std::filesystem::create_directories(p.parent_path());
+    const auto cwd = std::filesystem::current_path();
+    std::filesystem::current_path(p.parent_path());
+    Handle(TDocStd_Document) doc = bracket();
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    TDF_LabelSequence roots;
+    st->GetFreeShapes(roots);
+    const TDF_Label assy = roots.Value(1);
+    // A second root, whose one part goes to its own file, pins.stp.
+    const TopoDS_Shape pin =
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 2, 15).Shape();
+    TDF_Label rack = st->NewShape();
+    TDataStd_Name::Set(rack, "rack");
+    TDF_Label pins = st->AddShape(pin, false);
+    TDataStd_Name::Set(pins, "pins");
+    gp_Trsf away;
+    away.SetTranslation(gp_Vec(0, 50, 0));
+    st->AddComponent(rack, pins, TopLoc_Location(away));
+    st->UpdateAssemblies();
+    STEPCAFControl_Writer w;
+    w.SetColorMode(true);
+    w.SetNameMode(true);
+    bool ok = w.Transfer(assy, STEPControl_AsIs, nullptr) &&
+              w.Transfer(rack, STEPControl_AsIs, "") &&
+              w.Write(p.filename().c_str()) == IFSelect_RetDone;
+    // pins.stp becomes an assembly of two pins.
+    Handle(TDocStd_Document) two;
+    XCAFApp_Application::GetApplication()->NewDocument("MDTV-XCAF", two);
+    Handle(XCAFDoc_ShapeTool) t = XCAFDoc_DocumentTool::ShapeTool(two->Main());
+    TDF_Label top = t->NewShape();
+    TDataStd_Name::Set(top, "pins");
+    TDF_Label one = t->AddShape(pin, false);
+    TDataStd_Name::Set(one, "pin");
+    for (double x : {0.0, 10.0}) {
+        gp_Trsf tr;
+        tr.SetTranslation(gp_Vec(x, 0, 0));
+        t->AddComponent(top, one, TopLoc_Location(tr));
+    }
+    t->UpdateAssemblies();
+    STEPCAFControl_Writer pw;
+    pw.SetNameMode(true);
+    ok = ok && pw.Transfer(two, STEPControl_AsIs) && pw.Write("pins.stp") == IFSelect_RetDone;
+    std::filesystem::current_path(cwd);
+    return ok;
+}
+
 bool step_sketch(const std::string& path) {
     gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 25);
     TopoDS_Edge e = BRepBuilderAPI_MakeEdge(circle);
@@ -193,6 +250,7 @@ int main(int argc, char** argv) {
     } jobs[] = {{"assembly.step", step_assembly},
                 {"no-pcurves.step", step_no_pcurves},
                 {"multifile/bracket.step", step_multifile},
+                {"multifile-nested/bracket.step", step_multifile_nested},
                 {"sketch.step", step_sketch},
                 {"box.igs", iges_box},
                 {"box.brep", brep_box},

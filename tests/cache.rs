@@ -625,6 +625,40 @@ fn a_later_run_killed_after_its_outline_keeps_the_box() {
     );
 }
 
+/// #139's acceptance: a complete run fills the artifact's `boxes` from the
+/// graph, one per leaf of the kernel's tree, each the leaf's own box.
+#[test]
+fn a_complete_run_stores_a_box_per_leaf() {
+    kernel();
+    let h = Home::new("leafboxes");
+    let input = data("assembly.step");
+    let (code, j) = h.png(&input, &[], &[]);
+    assert_eq!(code, 0, "{j}");
+    let a = cache::load_outline_in(&h.cache_dir(), &input).expect("no outline artifact");
+    let boxes = a.boxes.expect("every leaf of the bracket has a box");
+    assert_eq!(boxes.len(), a.leaves);
+    let graph = stepv::view::placeholder::load(&input).unwrap();
+    assert_eq!(Some(boxes), graph.placeholders.leaf_boxes());
+}
+
+/// #139's acceptance: `boxes` is absent when any leaf's box is `Unknown`,
+/// since the schema can't say so: the multi-file bracket's parts are in
+/// their own files, which the graph doesn't read. It is absent too when
+/// the kernel's tree has another leaf count than the graph's.
+#[test]
+fn the_artifact_has_no_boxes_when_a_leaf_has_none() {
+    kernel();
+    for name in ["multifile/bracket.step", "multifile-nested/bracket.step"] {
+        let h = Home::new("noboxes");
+        let input = data(name);
+        let (code, j) = h.png(&input, &[], &[]);
+        assert_eq!(code, 0, "{name}: {j}");
+        let a = cache::load_outline_in(&h.cache_dir(), &input).expect("no outline artifact");
+        assert!(a.bbox.is_some(), "{name}: the run completed");
+        assert_eq!(a.boxes, None, "{name}");
+    }
+}
+
 /// The most a `view` test lets the viewer process hold (#86): its kernel
 /// has `--memory-mb`, the viewer itself has no cap of its own.
 const VIEW_FOOTPRINT_CAP: u64 = 2 << 30;
@@ -887,6 +921,8 @@ fn a_complete_view_adds_the_box() {
     let a = cache::load_outline_at(&cache::outline_path(&h.cache_dir(), &before))
         .expect("the viewer's run left no outline artifact");
     assert_eq!(a.bbox, Some(bbox));
+    // #139: the graph's boxes, from the viewer's own read of it.
+    assert_eq!(a.boxes.map(|b| b.len()), Some(a.leaves));
 }
 
 /// How many rows the viewer's tree has for `nodes`: one per node.

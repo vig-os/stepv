@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     position on stderr; `env` and `halt` are refused
   - Nothing bounds a filter's work yet (#187): deep recursion aborts the process (SIGABRT), and
     collecting a walk over a file's reference cycle never ends
+- **The graph core, G6b: meshes replace placeholders** ([#139](https://github.com/vig-os/stepv/issues/139), ADR-0001 §3):
+  - No placeholder outlives the scene. Each leaf's mesh replaces its box; a leaf the kernel has no
+    geometry for loses its box too, and the status line counts it ("graph: 3 parts, 1 without
+    geometry")
+  - When the kernel's tree has another leaf count than the graph's (a multi-file assembly whose
+    part files the graph doesn't read), the kernel's tree wins: no box maps, every one is dropped,
+    and the status line says so ("…; the kernel's tree has 5 parts: 3 placeholders dropped")
+  - The outline artifact's `boxes` is filled, one per leaf from the graph, by a complete run of a
+    STEP file when every leaf has a box and the trees have the same leaf count; otherwise it stays
+    absent (#66)
 - **The graph core, G6a: the viewer opens on the graph** ([#138](https://github.com/vig-os/stepv/issues/138), ADR-0001 §2.7, §2.8):
   - `stepv view` reads a STEP file's graph in-process, beside the kernel's run, and shows its
     tree and a box placeholder per leaf before the mesh arrives. On Ultimaker 3 the first frame of

@@ -493,6 +493,23 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - `gpu::Renderer::plan` lists a frame's draws as `(Pipeline, Geometry)` pairs, and `render_with`
     encodes exactly those. Placeholder boxes have their own pipelines (unlit, alpha-blended, no
     depth write): a translucent fill and a line-list wireframe.
+- **G6b's realised replacement** (#139):
+  - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
+    meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The
+    final view can't show a box that reads as pending (#186, item 2).
+  - **The mismatch is detected by leaf count.** `replace` compares `delivered.len()`, the kernel's
+    tree's leaves (`topology::parts_per_leaf`), with the graph's. When they differ, the numbering
+    may be shifted, so no box maps: all are dropped and counted, and the status line says
+    "…; the kernel's tree has N parts: M placeholders dropped" (#186, item 1). A tree that differs
+    with the same leaf count isn't caught. Meshes still arrive only with `Done` until the M slices.
+  - The fixture is `tests/data/multifile-nested/`: the bracket inline, beside a part whose file,
+    `pins.stp`, is itself an assembly of two pins. The graph sees 4 leaves (3 boxes), OCCT 5.
+    OCCT's multi-file writer never writes such a file (it keeps every assembly in the main file),
+    so `fixture-gen` overwrites `pins.stp` after the write.
+  - `OutlineArtifact::boxes` comes from the same `view::placeholder::load` as the placeholders:
+    the viewer's graph thread hands its boxes to the run, and a CLI run of a STEP file with the
+    cache on reads the graph on a thread beside the kernel. A complete run stores them with
+    `bbox`, when every leaf has a box and the leaf counts agree.
 - **G5's realised CLI and query view** (#137):
   - **Native filters, not `ValT`.** jaq 3's `ValT::values` and `key_values` return `'static`
     iterators, so an `Entity(Node)` variant would have to own the graph (an `Arc<Graph>` in every
