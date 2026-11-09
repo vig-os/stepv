@@ -7,6 +7,7 @@
 //! local corpus.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -311,20 +312,39 @@ fn tests_data_equal_the_outline() {
     }
 }
 
-/// The local corpus, when `STEPV_CORPUS` names it: every STEP file's tree
-/// against the outline. The outline reads only the given file, as the graph
-/// does, so the multi-file assemblies are compared too.
-#[test]
-fn the_corpus_equals_the_outline() {
+/// The STEP files `STEPV_CORPUS` names (paths, `:`-separated, files or
+/// directories). Unset, the corpus tests skip, and say so on the real stderr,
+/// which the test harness doesn't capture. Set but naming no file, they fail:
+/// a mistyped path in CI must not pass as zero files compared.
+fn corpus_files(test: &str) -> Option<Vec<PathBuf>> {
     let Some(roots) = std::env::var_os("STEPV_CORPUS") else {
-        eprintln!("skipped: set STEPV_CORPUS to the corpus");
-        return;
+        let _ = writeln!(
+            std::io::stderr(),
+            "{test}: SKIPPED, nothing compared: STEPV_CORPUS is unset"
+        );
+        return None;
     };
     let mut files = Vec::new();
     for root in std::env::split_paths(&roots) {
         collect(&root, &mut files);
     }
+    assert!(
+        !files.is_empty(),
+        "STEPV_CORPUS={roots:?} names no STEP file"
+    );
     files.sort();
+    Some(files)
+}
+
+/// The local corpus, when `STEPV_CORPUS` names it: every STEP file's tree
+/// against the outline. The outline reads only the given file, as the graph
+/// does, so the multi-file assemblies are compared too. CI runs it on
+/// `tests/fixtures/nist-pmi` (`.github/workflows/kernel.yml`).
+#[test]
+fn the_corpus_equals_the_outline() {
+    let Some(files) = corpus_files("the_corpus_equals_the_outline") else {
+        return;
+    };
     let (mut ok, mut bad) = (0, Vec::new());
     for f in &files {
         match check(f) {
