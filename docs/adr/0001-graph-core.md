@@ -447,7 +447,12 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - `Product::name` is what STEPCAF names it by (the product's name, else its id) and `id` the
     product's id, both `Option<TextRef>`, since either may be absent. `Instance::name` is
     likewise the chosen label (description, else name, else id). `Product::color` comes with G7.
-  - `Instance::nauo` is a `Node`: every DAG edge is a NAUO.
+  - `Instance::nauo` is a `Node`: every DAG edge is a NAUO. A `MAPPED_ITEM` places geometry
+    inside a representation, not a product, so it is `mapped_placement(g, item, rep)`, which G4
+    calls as it walks a body.
+  - `Occurrence::placement` is a `Placement`: an unplaced instance leaves everything under it
+    unplaced. `Placement::Unplaced` carries `Reason(&'static str)`; the mesh's richer `Reason`
+    is M4a's.
   - `Path`'s pairs are `(product, slot)`: the slot indexes `roots` at the first level and the
     parent's `children` below, so a root leaf has a path too.
   - `Product::bodies` are the representations the transfer starts from (its shape definitions',

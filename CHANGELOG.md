@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G3b: placements in mm** ([#135](https://github.com/vig-os/stepv/issues/135), ADR-0001 §2.2):
+  - Each instance's `placement` follows OCCT's change of coordinates,
+    `S_mm(item_child)⁻¹ · S_mm(item_parent)`, with each item scaled to mm by its own
+    representation's unit, swapped items corrected, and the inverse when the relationship reverses
+    the NAUO; `occurrences` compose them into model placements. `mapped_placement` does the same
+    for a `MAPPED_ITEM`. Anything else is `Unplaced` with a reason, never the identity
+  - Every leaf's placement equals `--topology`'s `PlacedPart::transform` within 1e-9 on the corpus
+    files with instances and on Ultimaker 3, and on fixtures of an inch sub-assembly in a mm
+    assembly, a reversed relationship and a non-commuting pair
 - **The graph core, G3a: the product structure as a DAG** ([#135](https://github.com/vig-os/stepv/issues/135), ADR-0001 §2.2, §2.4):
   - `graph::structure` resolves products and their instances (NAUOs) into a DAG in
     O(products + instances), without OCCT: OCCT's roots, children and order, which products are

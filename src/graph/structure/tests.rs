@@ -217,6 +217,108 @@ fn a_cycle_names_a_product_on_it() {
     );
 }
 
+const UNITS: &str = "
+#1=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
+#2=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#1);
+#3=(CONVERSION_BASED_UNIT('INCH',#2) LENGTH_UNIT() NAMED_UNIT(#4));
+#4=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);
+#5=SI_UNIT(*,$,.METRE.);
+#6=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(0.0254),#5);
+#7=(CONVERSION_BASED_UNIT('INCH',#6) LENGTH_UNIT() NAMED_UNIT(#4));
+#8=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.));
+#9=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));
+#11=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#1,#9)) REPRESENTATION_CONTEXT('',''));
+#12=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#3,#9)) REPRESENTATION_CONTEXT('',''));
+#13=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#7)) REPRESENTATION_CONTEXT('',''));
+#14=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#8)) REPRESENTATION_CONTEXT('',''));
+#15=GEOMETRIC_REPRESENTATION_CONTEXT('','',3);
+#21=SHAPE_REPRESENTATION('',(),#11);
+#22=SHAPE_REPRESENTATION('',(),#12);
+#23=SHAPE_REPRESENTATION('',(),#13);
+#24=SHAPE_REPRESENTATION('',(),#14);
+#25=SHAPE_REPRESENTATION('',(),#15);
+";
+
+#[test]
+fn units_scale_to_mm_as_occt_reads_them() {
+    let g = graph(UNITS);
+    let mm = |id| mm_per_unit(&g, g.node(StepId(id)).unwrap());
+    // mm; an inch over mm; an inch over a simple metre; a metre; no units.
+    let got = [mm(21), mm(22), mm(23), mm(24), mm(25)];
+    assert!(
+        got.iter()
+            .zip([1., 25.4, 25.4, 1000., 1.])
+            .all(|(a, b)| (a - b).abs() < 1e-12),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn frames_pick_occts_x_direction() {
+    // No reference direction: gp_Ax2's pick; one parallel to the axis is
+    // ignored the same way; an oblique one is made orthogonal.
+    assert_eq!(default_x([0., 0., 1.]), [1., 0., 0.]);
+    assert_eq!(default_x([1., 0., 0.]), [0., 0., 1.]);
+    assert_eq!(default_x([0., 1., 0.]), [0., 0., 1.]);
+    let g = graph(
+        "#1=CARTESIAN_POINT('',(1.,2.,3.));#2=DIRECTION('',(1.,0.,0.));#3=DIRECTION('',(2.,0.,0.));#4=DIRECTION('',(1.,1.,0.));
+         #5=AXIS2_PLACEMENT_3D('',#1,#2,#3);#6=AXIS2_PLACEMENT_3D('',#1,$,#4);#7=AXIS2_PLACEMENT_3D('',#1,#2,$);",
+    );
+    let f = |id| frame(&g, g.node(StepId(id)).unwrap(), 10.).unwrap();
+    assert_eq!(f(5), f(7));
+    assert_eq!(f(7), [0., 0., 1., 10., 0., -1., 0., 20., 1., 0., 0., 30.]);
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let x = f(6);
+    assert!(
+        [x[0], x[4], x[8]]
+            .iter()
+            .zip([h, h, 0.])
+            .all(|(a, b)| (a - b).abs() < 1e-15),
+        "{x:?}"
+    );
+}
+
+#[test]
+fn instances_without_a_trusted_placement_say_why() {
+    let data = [
+        product(10, "top", "T", true),
+        product(20, "a", "A", true),
+        product(30, "b", "B", true),
+        product(40, "c", "C", true),
+        // a: no placement relationship at all.
+        nauo(100, "a", "", "$", 10, 20),
+        // b: a cartesian transformation operator.
+        nauo(110, "b", "", "$", 10, 30),
+        "#111=PRODUCT_DEFINITION_SHAPE('','',#110);#112=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#113,#111);
+         #113=(REPRESENTATION_RELATIONSHIP('','',#34,#14) REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#114) SHAPE_REPRESENTATION_RELATIONSHIP());
+         #114=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,#115,$,$,$,$);#115=CARTESIAN_POINT('',(0.,0.,0.));\n"
+            .to_owned(),
+        // c: a relationship without a transformation sits at the identity.
+        nauo(120, "c", "", "$", 10, 40),
+        "#121=PRODUCT_DEFINITION_SHAPE('','',#120);#122=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#123,#121);
+         #123=SHAPE_REPRESENTATION_RELATIONSHIP('','',#44,#14);\n"
+            .to_owned(),
+    ]
+    .concat();
+    let g = graph(&data);
+    let s = structure(&g).unwrap();
+    let p: Vec<Placement> = s.products[0].children.iter().map(|c| c.placement).collect();
+    assert_eq!(
+        p,
+        [
+            Placement::Unplaced(Reason("no context-dependent shape representation")),
+            Placement::Unplaced(Reason("cartesian transformation operator")),
+            Placement::Placed(IDENTITY),
+        ]
+    );
+    // Unplaced along a path stays unplaced in the model.
+    let o: Vec<Placement> = s
+        .occurrences(Expand::default())
+        .map(|o| o.unwrap().placement)
+        .collect();
+    assert_eq!(o[1], p[0]);
+}
+
 #[test]
 fn text_refs_resolve_without_a_borrow() {
     let g = graph("#1=PRODUCT('it''s','\\X2\\00E4\\X0\\','',());");
