@@ -117,6 +117,14 @@ jobs:
       - name: CLI contract sweep
         run: nix develop --command just cli-sweep tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
 
+      # The graph's structure against the kernel (ADR-0001 G3), on the fetched
+      # corpus: the test fails when STEPV_CORPUS names no file. The harness
+      # above built the kernel it calls.
+      - name: Graph structure against the kernel (nist-pmi)
+        env:
+          STEPV_CORPUS: tests/fixtures/nist-pmi
+        run: nix develop --command cargo test --test graph_structure -- --nocapture
+
       - name: macOS app (Quick Look extensions) and its headless checks
         if: runner.os == 'macOS'
         # The Quick Look round trip (--quicklook) needs a logged-in session to

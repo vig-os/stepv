@@ -52,7 +52,16 @@ impl<'a> std::ops::Deref for Args<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Untrusted<'a>(&'a [u8]);
 
-impl Untrusted<'_> {
+impl<'a> Untrusted<'a> {
+    pub(super) fn new(raw: &'a [u8]) -> Self {
+        Self(raw)
+    }
+
+    /// The bytes as the file writes them, between the quotes.
+    pub(super) fn raw(&self) -> &'a [u8] {
+        self.0
+    }
+
     /// The string's value: `''` collapsed, CR/LF stripped, then the Part 21
     /// escapes decoded ([`header::decode_string`], as the header path does).
     #[must_use]
