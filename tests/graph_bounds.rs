@@ -379,6 +379,69 @@ fn tests_data_boxes_contain_the_kernels() {
     .map(|f| data.join(f)));
 }
 
+/// A one-part file whose shape representation lists `items`, written by
+/// `records` (ids from #50 up), in mm.
+fn part_file(name: &str, items: &str, records: &str) -> PathBuf {
+    let path = std::env::temp_dir()
+        .join(format!("stepv-graph-bounds-{}", std::process::id()))
+        .join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let text = format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\nFILE_NAME('{name}','2026-11-09T00:00:00',(''),(''),'','','');\n\
+         FILE_SCHEMA(('AUTOMOTIVE_DESIGN {{ 1 0 10303 214 1 1 1 1 }}'));\nENDSEC;\nDATA;\n\
+         #1=APPLICATION_CONTEXT('mechanical design');\n\
+         #2=APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#1);\n\
+         #3=PRODUCT_CONTEXT('',#1,'mechanical');\n#4=PRODUCT('p','p','',(#3));\n\
+         #5=PRODUCT_DEFINITION_FORMATION('','',#4);\n#6=PRODUCT_DEFINITION_CONTEXT('part definition',#1,'design');\n\
+         #7=PRODUCT_DEFINITION('design','',#5,#6);\n#8=PRODUCT_DEFINITION_SHAPE('','',#7);\n\
+         #9=SHAPE_DEFINITION_REPRESENTATION(#8,#10);\n#10=SHAPE_REPRESENTATION('',({items}),#20);\n\
+         #11=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));\n\
+         #12=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));\n\
+         #13=(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT());\n\
+         #14=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#11,'distance_accuracy_value','');\n\
+         #20=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#14)) \
+         GLOBAL_UNIT_ASSIGNED_CONTEXT((#11,#12,#13)) REPRESENTATION_CONTEXT('',''));\n\
+         {records}ENDSEC;\nEND-ISO-10303-21;\n"
+    );
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// A triangle (0,0,0), (10,0,0), (0,10,0) as a surface model: item #79.
+const TRIANGLE: &str = "\
+#50=CARTESIAN_POINT('',(0.,0.,0.));#51=CARTESIAN_POINT('',(10.,0.,0.));#52=CARTESIAN_POINT('',(0.,10.,0.));
+#53=VERTEX_POINT('',#50);#54=VERTEX_POINT('',#51);#55=VERTEX_POINT('',#52);
+#56=DIRECTION('',(1.,0.,0.));#57=VECTOR('',#56,1.);#58=LINE('',#50,#57);
+#59=DIRECTION('',(-0.70710678118654746,0.70710678118654746,0.));#60=VECTOR('',#59,1.);#61=LINE('',#51,#60);
+#62=DIRECTION('',(0.,-1.,0.));#63=VECTOR('',#62,1.);#64=LINE('',#52,#63);
+#65=EDGE_CURVE('',#53,#54,#58,.T.);#66=EDGE_CURVE('',#54,#55,#61,.T.);#67=EDGE_CURVE('',#55,#53,#64,.T.);
+#68=ORIENTED_EDGE('',*,*,#65,.T.);#69=ORIENTED_EDGE('',*,*,#66,.T.);#70=ORIENTED_EDGE('',*,*,#67,.T.);
+#71=EDGE_LOOP('',(#68,#69,#70));#72=FACE_OUTER_BOUND('',#71,.T.);
+#73=DIRECTION('',(0.,0.,1.));#74=AXIS2_PLACEMENT_3D('',#50,#73,#56);#75=PLANE('',#74);
+#76=ADVANCED_FACE('',(#72),#75,.T.);#77=OPEN_SHELL('',(#76));#79=SHELL_BASED_SURFACE_MODEL('',(#77));
+";
+
+/// A `GEOMETRIC_SET` (item #90) of a bilinear B-spline surface reaching
+/// z = 30, far off the triangle, and a circle, which is wireframe.
+const SET: &str = "\
+#80=CARTESIAN_POINT('',(0.,0.,20.));#81=CARTESIAN_POINT('',(0.,5.,25.));
+#82=CARTESIAN_POINT('',(5.,0.,20.));#83=CARTESIAN_POINT('',(5.,5.,30.));
+#84=B_SPLINE_SURFACE_WITH_KNOTS('',1,1,((#80,#81),(#82,#83)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);
+#85=CARTESIAN_POINT('',(0.,0.,-50.));#86=DIRECTION('',(0.,0.,1.));#87=DIRECTION('',(1.,0.,0.));
+#88=AXIS2_PLACEMENT_3D('',#85,#86,#87);#89=CIRCLE('',#88,100.);
+#90=GEOMETRIC_SET('',(#84,#89));
+";
+
+/// A geometric set's surfaces are faces in OCCT's transfer, so they are in
+/// the box; its curves and points are wireframe and are not (ADR §2.3).
+#[test]
+fn a_geometric_sets_surfaces_are_in_the_box() {
+    run(&[
+        part_file("brep-and-set.step", "#79,#90", &format!("{TRIANGLE}{SET}")),
+        part_file("set-alone.step", "#90", SET),
+    ]);
+}
+
 /// The STEP files `STEPV_CORPUS` names (paths, `:`-separated, files or
 /// directories). Unset, the corpus test skips, and says so on the real
 /// stderr, which the test harness doesn't capture. Set but naming no file,

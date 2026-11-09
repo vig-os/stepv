@@ -590,3 +590,31 @@ fn a_mapped_item_moves_its_representation() {
     f.part(&[item, target], false);
     assert_box(f.bounds().1.product(0), [0., 0., -3.], [1., 1., -3.]);
 }
+
+#[test]
+fn a_geometric_sets_surfaces_count_and_its_curves_do_not() {
+    // A B-spline surface and a far-off circle: the box is the surface's.
+    let mut f = F::new();
+    let sf = spline_surface(&mut f, None);
+    let ax = f.ax([100.; 3], Z, X);
+    let circle = f.add(&format!("CIRCLE('',#{ax},50.)"));
+    let set = f.add(&format!("GEOMETRIC_SET('',(#{sf},#{circle}))"));
+    let t = triangle(&mut f, [[0., 0., -1.], [1., 0., -1.], [0., 1., -1.]]);
+    f.part(&[set], false);
+    f.part(&[t, set], false);
+    let (_, b) = f.bounds();
+    assert_box(b.product(0), [0.; 3], [3., 3., 2.]);
+    assert_box(b.product(1), [0., 0., -1.], [3., 3., 2.]);
+    // Curves alone are wireframe; a plane, unbounded, has no row.
+    let mut f = F::new();
+    let ax = f.ax([0.; 3], Z, X);
+    let circle = f.add(&format!("CIRCLE('',#{ax},5.)"));
+    let wire = f.add(&format!("GEOMETRIC_CURVE_SET('',(#{circle}))"));
+    let plane = f.add(&format!("PLANE('',#{ax})"));
+    let open = f.add(&format!("GEOMETRIC_SET('',(#{circle},#{plane}))"));
+    f.part(&[wire], false);
+    f.part(&[open], false);
+    let (_, b) = f.bounds();
+    assert_eq!(b.product(0), Bound::Unknown(Reason("no B-rep geometry")));
+    unknown(b.product(1), "unsupported surface");
+}

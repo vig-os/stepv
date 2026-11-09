@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     without OCCT. Boxes follow §2.3's per-type table, the 8-corner rule for every change of frame,
     and one post-order pass over the product DAG. A box contains the exact geometry, or it is
     `Unknown` with a reason: an unsupported type, a non-positive B-spline weight, or a non-finite
-    coordinate, radius, unit or placement. A node above an `Unknown` child is `Unknown` too
+    coordinate, radius, unit or placement. A node above an `Unknown` child is `Unknown` too. A
+    `GEOMETRIC_SET`'s surfaces count, since OCCT makes them faces; its curves and points, like
+    other wireframe, don't
   - Checked against the exact geometry as the kernel triangulates it: on the local corpus (390
     files with Ultimaker 3), every mesh node, face edge polyline point and B-rep vertex of 2,787
     products (9.66 M points) lies inside its product's box. CI runs the check on nist-pmi and

@@ -346,8 +346,13 @@ the node's box is `Unknown(reason)`. It is never a guess.
   - **Faces with no edges** (a closed sphere bounded by a vertex loop, or a full torus) work: the
     table doesn't need edges for those surfaces. A bounded plane without edges can't exist in valid
     AP203/214.
-  - **Geometry outside the B-rep:** wireframe, `GEOMETRIC_CURVE_SET` and PMI aren't in a product's
-    box.
+  - **Geometry outside the B-rep:** these aren't in a product's box: wireframe (an
+    `EDGE_BASED_WIREFRAME_MODEL`, a `GEOMETRIC_CURVE_SET`, the curve and point elements of a
+    `GEOMETRIC_SET`), bare points and axis placements among a representation's items, and PMI.
+    - A `GEOMETRIC_SET`'s *surface* elements are in the box. OCCT's transfer makes them faces
+      (bounded, curve-bounded and rectangular composite surfaces), so each is boxed by the table,
+      or is `Unknown` when its type has no row (an unbounded plane, a trimmed or composite
+      surface).
 - **Checked against the exact geometry, as OCCT triangulates it** (G4): on every corpus file, every
   node of the kernel's mesh of a product's prototype, every point of its face edges' polylines
   (`--edges`) and every B-rep vertex of those edges lies inside the product's graph box, and, placed,

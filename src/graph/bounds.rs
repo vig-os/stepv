@@ -27,7 +27,8 @@
 //! → representation → product, in its own mm, → instance → assembly → model.
 //! Each product's box is computed once, however often it is instanced.
 //! Lengths are scaled to mm by their representation's unit, as placements
-//! are. Wireframe, `GEOMETRIC_CURVE_SET` and PMI lie outside the B-rep and
+//! are. Wireframe (curves and points, `GEOMETRIC_CURVE_SET`, a
+//! `GEOMETRIC_SET`'s curves and points) and PMI lie outside the B-rep and
 //! outside the box.
 
 use std::collections::HashMap;
@@ -246,15 +247,35 @@ fn ref_list(v: Option<&Value<'_>>, out: &mut Vec<Node>) {
     }
 }
 
-const SKIPPED: [&str; 7] = [
+const SKIPPED: [&str; 5] = [
     "AXIS1_PLACEMENT",
     "AXIS2_PLACEMENT_2D",
     "AXIS2_PLACEMENT_3D",
     "CARTESIAN_POINT",
-    "GEOMETRIC_CURVE_SET",
-    "GEOMETRIC_SET",
     "EDGE_BASED_WIREFRAME_MODEL",
 ];
+
+/// A curve or a point: wireframe, outside the B-rep and the box. Anything
+/// else in a geometric set is taken for a surface.
+fn wire(g: &Graph, n: Node) -> bool {
+    const NAMED: [&str; 8] = [
+        "CURVE",
+        "LINE",
+        "CIRCLE",
+        "ELLIPSE",
+        "HYPERBOLA",
+        "PARABOLA",
+        "POLYLINE",
+        "PCURVE",
+    ];
+    g.parts(n).any(|p| {
+        p.ends_with("_CURVE")
+            || p.ends_with("PCURVE")
+            || p.ends_with("POINT")
+            || p.starts_with("POINT_")
+            || NAMED.contains(&p)
+    })
+}
 
 /// Solids, shells and face sets: the union of what they reference.
 const CONTAINERS: [&str; 11] = [
@@ -379,7 +400,25 @@ impl Walk<'_> {
         if self.any(item, &SKIPPED) {
             return Acc::Empty;
         }
+        if self.any(item, &["GEOMETRIC_SET", "GEOMETRIC_CURVE_SET"]) {
+            return self.geometric_set(item, s);
+        }
         self.topo(item, s, 0)
+    }
+
+    /// A geometric set's surfaces, which OCCT's transfer makes faces, each
+    /// by the table (`Unknown` without a row); its curves and points are
+    /// wireframe and left out.
+    fn geometric_set(&mut self, set: Node, s: f64) -> Acc {
+        let mut elements = Vec::new();
+        match fields(self.g, set, "GEOMETRIC_SET") {
+            Ok(a) => ref_list(a.get(1), &mut elements),
+            Err(_) => return why("malformed geometric set"),
+        }
+        elements
+            .into_iter()
+            .filter(|&e| !wire(self.g, e))
+            .fold(Acc::Empty, |a, e| a.union(self.surface(e, s, 0)))
     }
 
     /// `f`'s box for `n`, memoised: a surface or curve shared by several
