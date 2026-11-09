@@ -1,7 +1,8 @@
 //! The Part 21 scanner (ADR-0001 §2.1): one pass over the file's bytes that
 //! finds every entity instance's `#id`, its type (or, for a complex instance,
-//! its part types) and the byte span of its parameters. Parameters are not
-//! parsed here: that is [`super::Graph`]'s lazy layer (G2).
+//! its part types), the byte span of its parameters and the `#n` references
+//! in them, in record order. Parameters are not otherwise parsed here: that
+//! is [`super::Graph`]'s lazy layer.
 //!
 //! The grammar handled: the `ISO-10303-21;` banner, the `HEADER` section,
 //! edition 3's `ANCHOR` and `SIGNATURE` sections (skipped) and parameterised
@@ -21,6 +22,8 @@ pub(crate) struct Record<'r, 'a> {
     /// The parameters' byte span, parentheses included: `(…)` after the type
     /// of a simple instance, the whole `(A(…) B(…))` of a complex one.
     pub args: (usize, usize),
+    /// The ids of the `#n` references in the parameters, in record order.
+    pub refs: &'r [u32],
 }
 
 /// What the scan found besides the records.
@@ -35,7 +38,7 @@ pub(crate) struct Sections {
 const SPECIAL: [bool; 256] = {
     let mut t = [false; 256];
     let mut i = 0;
-    let s = b"'\"/()@<;";
+    let s = b"'\"/()@<;#";
     while i < s.len() {
         t[s[i] as usize] = true;
         i += 1;
@@ -48,7 +51,11 @@ pub(crate) fn scan<'a>(
     b: &'a [u8],
     mut on: impl FnMut(&Record<'_, 'a>) -> Result<(), GraphError>,
 ) -> Result<Sections, GraphError> {
-    let mut s = Scanner { b, i: 0 };
+    let mut s = Scanner {
+        b,
+        i: 0,
+        refs: Vec::new(),
+    };
     let mut sections = Sections::default();
     let mut parts: Vec<&'a [u8]> = Vec::new();
     s.ws()?;
@@ -102,6 +109,8 @@ pub(crate) fn scan<'a>(
 struct Scanner<'a> {
     b: &'a [u8],
     i: usize,
+    /// The current record's references, as [`Scanner::group`] finds them.
+    refs: Vec<u32>,
 }
 
 impl<'a> Scanner<'a> {
@@ -204,21 +213,8 @@ impl<'a> Scanner<'a> {
         on: &mut impl FnMut(&Record<'_, 'a>) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
         let at = self.i;
-        self.i += 1;
-        let digits = self.b[self.i..]
-            .iter()
-            .take_while(|c| c.is_ascii_digit())
-            .count();
-        if digits == 0 {
-            return Err(self.err(ErrorKind::Syntax("expected an entity id after '#'")));
-        }
-        let id = self.b[self.i..self.i + digits]
-            .iter()
-            .try_fold(0u32, |n, &d| {
-                n.checked_mul(10)?.checked_add(u32::from(d - b'0'))
-            })
-            .ok_or(GraphError::at(at, ErrorKind::IdOverflow))?;
-        self.i += digits;
+        let id = self.id()?;
+        self.refs.clear();
         self.ws()?;
         if self.peek() != Some(b'=') {
             return Err(self.err(ErrorKind::Syntax("expected '='")));
@@ -257,7 +253,29 @@ impl<'a> Scanner<'a> {
             parts,
             complex,
             args,
+            refs: &self.refs,
         })
+    }
+
+    /// `#n` at its `#`: the `n`.
+    fn id(&mut self) -> Result<u32, GraphError> {
+        let at = self.i;
+        self.i += 1;
+        let digits = self.b[self.i..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return Err(self.err(ErrorKind::Syntax("expected an entity id after '#'")));
+        }
+        let id = self.b[self.i..self.i + digits]
+            .iter()
+            .try_fold(0u32, |n, &d| {
+                n.checked_mul(10)?.checked_add(u32::from(d - b'0'))
+            })
+            .ok_or(GraphError::at(at, ErrorKind::IdOverflow))?;
+        self.i += digits;
+        Ok(id)
     }
 
     fn type_name(&mut self) -> Result<&'a [u8], GraphError> {
@@ -272,7 +290,7 @@ impl<'a> Scanner<'a> {
     /// its matching `)`; returns the offset after it. With `statement` true:
     /// everything through the next `;` outside strings and comments (a
     /// header or anchor statement). `record` is where a truncation is
-    /// reported.
+    /// reported. A group's `#n` references are appended to `self.refs`.
     fn group(&mut self, record: usize, statement: bool) -> Result<usize, GraphError> {
         if !statement && self.peek() != Some(b'(') {
             return Err(self.err(ErrorKind::Syntax("expected '('")));
@@ -283,6 +301,11 @@ impl<'a> Scanner<'a> {
                 self.i += 1;
             }
             let at = self.i;
+            if self.peek() == Some(b'#') && !statement {
+                let id = self.id()?;
+                self.refs.push(id);
+                continue;
+            }
             let Some(c) = self.peek() else {
                 return Err(GraphError::at(
                     record,

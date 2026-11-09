@@ -374,6 +374,15 @@ fn duplicate_ids_resolve_as_occt_does() {
         assert_eq!(g.duplicate_ids(), 1);
         let referrer = g.node(StepId(6)).unwrap();
         let def = g.resolve(StepId(7), referrer).unwrap();
+        // The forward CSR resolves the reference the same way (#149).
+        assert_eq!(
+            g.refs(referrer)
+                .iter()
+                .filter(|&&r| g.id(r) == StepId(7))
+                .collect::<Vec<_>>(),
+            [&def],
+            "{name}"
+        );
         let args = String::from_utf8_lossy(g.arg_bytes(def)).into_owned();
         assert!(
             args.starts_with(&format!("('{occt_name}'")),
@@ -381,4 +390,305 @@ fn duplicate_ids_resolve_as_occt_does() {
         );
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The `#n` ids in a parameter span, by regex, outside strings, binaries
+/// and comments: the round trip's oracle.
+fn span_ids(span: &[u8]) -> Vec<u32> {
+    let quoted = Regex::new(r#"(?s)'(?:[^']|'')*'|"[^"]*"|/\*.*?\*/"#).unwrap();
+    let id = Regex::new(r"#(\d+)").unwrap();
+    let bare = quoted.replace_all(span, &b""[..]);
+    id.captures_iter(&bare)
+        .map(|c| std::str::from_utf8(&c[1]).unwrap().parse().unwrap())
+        .collect()
+}
+
+/// Every reference in `v`, depth first, in order.
+fn value_refs(v: &[Value], out: &mut Vec<Node>) {
+    for v in v {
+        match v {
+            Value::Ref(n) => out.push(*n),
+            Value::List(l) => value_refs(l, out),
+            Value::Typed(_, v) => value_refs(std::slice::from_ref(&**v), out),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn refs_round_trip_and_args_parse_on_tests_data() {
+    let mut files = Vec::new();
+    step_files(&data_dir(), &mut files);
+    assert!(!files.is_empty());
+    let (mut simple, mut parts) = (0, 0);
+    for f in files {
+        let g = Graph::open(&f).unwrap();
+        for n in g.nodes() {
+            let ids: Vec<u32> = g.refs(n).iter().map(|&r| g.id(r).0).collect();
+            assert_eq!(
+                ids,
+                span_ids(g.arg_bytes(n)),
+                "{}: {:?}",
+                f.display(),
+                g.id(n)
+            );
+            let mut from_args = Vec::new();
+            if let TypeName::Simple(_) = g.type_name(n) {
+                value_refs(&g.args(n).unwrap(), &mut from_args);
+                simple += 1;
+            } else {
+                for p in g.parts(n) {
+                    value_refs(&g.args_of(n, p).unwrap().unwrap(), &mut from_args);
+                    parts += 1;
+                }
+                // Parts come sorted, references in record order.
+                from_args.sort_unstable();
+            }
+            let mut want = g.refs(n).to_vec();
+            if matches!(g.type_name(n), TypeName::Complex(_)) {
+                want.sort_unstable();
+            }
+            assert_eq!(from_args, want, "{}: {:?}", f.display(), g.id(n));
+        }
+    }
+    assert!(
+        simple > 1000 && parts > 10,
+        "{simple} entities, {parts} parts"
+    );
+}
+
+#[test]
+fn csr_resolves_duplicated_ids_per_reference() {
+    // #5 is defined at nodes 1 and 3 (#149).
+    let g = graph(&file("#1=R(#5);#5=A();#2=R(#5,#1);#5=B();#3=R(#5);")).unwrap();
+    assert_eq!(g.refs(Node(0)), [Node(1)]);
+    assert_eq!(g.refs(Node(2)), [Node(1), Node(0)]);
+    assert_eq!(g.refs(Node(4)), [Node(3)]);
+    assert_eq!(g.args(Node(4)).unwrap()[0], Value::Ref(Node(3)));
+    assert_eq!(g.referrers(Node(1)), [Node(0), Node(2)]);
+    assert_eq!(g.referrers(Node(3)), [Node(4)]);
+}
+
+#[test]
+fn dangling_references_are_listed_not_fatal() {
+    let g = graph(&file("#1=R(#9,#2);#2=A('#7');")).unwrap();
+    assert_eq!(g.refs(Node(0)), [Node(1)]);
+    assert_eq!(g.refs(Node(1)), []);
+    assert_eq!(g.dangling(), [(Node(0), StepId(9))]);
+    assert!(matches!(
+        g.args(Node(0)),
+        Err(ArgError::Dangling { id: StepId(9), .. })
+    ));
+    assert_eq!(g.census().dangling, 1);
+}
+
+#[test]
+fn referrers_are_the_reverse_csr() {
+    let g = graph(&file("#1=A();#2=R(#1,#1,#3);#3=R(#1);#4=R((#3),#2);")).unwrap();
+    assert_eq!(g.referrers(Node(0)), [Node(1), Node(1), Node(2)]);
+    assert_eq!(g.referrers(Node(1)), [Node(3)]);
+    assert_eq!(g.referrers(Node(2)), [Node(1), Node(3)]);
+    assert_eq!(g.referrers(Node(3)), []);
+}
+
+#[test]
+fn args_parse_every_kind_of_value() {
+    let g = graph(&file(
+        "#1=X(#2, 3 ,-4.5E-1,'it''s',.T.,\"0F\",(1,(2.)),LENGTH_MEASURE (25.4),$,*,(),/* c */1.);#2=Y();",
+    ))
+    .unwrap();
+    let a = g.args(Node(0)).unwrap();
+    let Value::Str(s) = &a[3] else { panic!() };
+    assert_eq!(s.decode(), "it's");
+    assert_eq!(format!("{s:?}"), "Untrusted(5 bytes)");
+    assert_eq!(
+        a[..],
+        [
+            Value::Ref(Node(1)),
+            Value::Int(3),
+            Value::Real(-0.45),
+            a[3].clone(),
+            Value::Enum("T"),
+            Value::Binary(b"0F"),
+            Value::List(vec![Value::Int(1), Value::List(vec![Value::Real(2.)])]),
+            Value::Typed("LENGTH_MEASURE", Box::new(Value::Real(25.4))),
+            Value::Null,
+            Value::Derived,
+            Value::List(vec![]),
+            Value::Real(1.),
+        ]
+    );
+    assert_eq!(g.args(Node(1)).unwrap()[..], []);
+}
+
+#[test]
+fn args_nesting_is_capped() {
+    let nest = |k: usize| format!("#1=X({}1{});", "(".repeat(k - 1), ")".repeat(k - 1));
+    let g = graph(&file(&nest(MAX_DEPTH))).unwrap();
+    assert!(g.args(Node(0)).is_ok());
+    let g = graph(&file(&nest(MAX_DEPTH + 1))).unwrap();
+    assert!(matches!(g.args(Node(0)), Err(ArgError::Depth { .. })));
+    // Far deeper: an error, not a stack overflow.
+    let g = graph(&file(&nest(100_000))).unwrap();
+    assert!(matches!(g.args(Node(0)), Err(ArgError::Depth { .. })));
+}
+
+#[test]
+fn args_errors_name_the_byte_offset() {
+    let text = file("#1=X(1 2);#2=X(.T);#3=X(99999999999999999999);#4=X(A(1,2));");
+    let g = graph(&text).unwrap();
+    for (n, at) in [(0, "2);#2"), (1, ".T);"), (2, "999"), (3, "A(1,2)")] {
+        let Err(ArgError::Syntax { offset, .. }) = g.args(Node(n)) else {
+            panic!("{n}: {:?}", g.args(Node(n)))
+        };
+        assert_eq!(offset, text.find(at).unwrap() as u64, "{n}");
+    }
+}
+
+/// The complex-entity cases ADR §2.4 says the MVP relies on.
+const WALKTHROUGHS: &str = "\
+#1=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
+#2=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));
+#3=(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT());
+#4=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),#1,'distance_accuracy_value','');
+#5=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#4)) GLOBAL_UNIT_ASSIGNED_CONTEXT((#1,#2,#3)) REPRESENTATION_CONTEXT('',''));
+#6=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);
+#7=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(25.4),#1);
+#8=(CONVERSION_BASED_UNIT('INCH',#7) LENGTH_UNIT() NAMED_UNIT(#6));
+#10=SHAPE_REPRESENTATION('r1',(),#5);
+#11=SHAPE_REPRESENTATION('r2',(),#5);
+#12=ITEM_DEFINED_TRANSFORMATION('','',#13,#13);
+#13=AXIS2_PLACEMENT_3D('',#14,$,$);
+#14=CARTESIAN_POINT('',(0.,0.,0.));
+#15=(REPRESENTATION_RELATIONSHIP('','',#10,#11) REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#12) SHAPE_REPRESENTATION_RELATIONSHIP());
+#20=(BOUNDED_SURFACE() B_SPLINE_SURFACE(1,1,((#14,#14),(#14,#14)),.UNSPECIFIED.,.F.,.F.,.F.) B_SPLINE_SURFACE_WITH_KNOTS((2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.) GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(((1.,0.5),(0.5,1.))) REPRESENTATION_ITEM('') SURFACE());
+#21=(BOUNDED_CURVE() B_SPLINE_CURVE(1,(#14,#14),.UNSPECIFIED.,.F.,.F.) B_SPLINE_CURVE_WITH_KNOTS((2,2),(0.,1.),.UNSPECIFIED.) CURVE() GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,2.)) REPRESENTATION_ITEM(''));
+";
+
+fn part<'g>(g: &'g Graph, id: u32, part: &str) -> Args<'g> {
+    g.args_of(g.node(StepId(id)).unwrap(), part)
+        .unwrap()
+        .unwrap()
+}
+
+fn node(g: &Graph, id: u32) -> Value<'static> {
+    Value::Ref(g.node(StepId(id)).unwrap())
+}
+
+#[test]
+fn walkthrough_units() {
+    let g = graph(&file(WALKTHROUGHS)).unwrap();
+    let mm = g.node(StepId(1)).unwrap();
+    assert!(g.is_a(mm, "SI_UNIT") && g.is_a(mm, "LENGTH_UNIT") && !g.is_a(mm, "SI"));
+    assert_eq!(
+        g.parts(mm).collect::<Vec<_>>(),
+        ["LENGTH_UNIT", "NAMED_UNIT", "SI_UNIT"]
+    );
+    assert_eq!(g.args(mm), Err(ArgError::Complex));
+    assert_eq!(
+        part(&g, 1, "SI_UNIT")[..],
+        [Value::Enum("MILLI"), Value::Enum("METRE")]
+    );
+    assert_eq!(part(&g, 1, "NAMED_UNIT")[..], [Value::Derived]);
+    assert_eq!(part(&g, 1, "LENGTH_UNIT")[..], []);
+    assert!(g.args_of(mm, "CONVERSION_BASED_UNIT").is_none());
+    // of_type finds complex units by part.
+    let si: Vec<u32> = g.of_type("SI_UNIT").map(|n| g.id(n).0).collect();
+    assert_eq!(si, [1, 2, 3]);
+    // The inch: the factor through CONVERSION_BASED_UNIT's second attribute.
+    let inch = part(&g, 8, "CONVERSION_BASED_UNIT");
+    let Value::Str(name) = &inch[0] else { panic!() };
+    assert_eq!(name.decode(), "INCH");
+    assert_eq!(inch[1], node(&g, 7));
+    let Value::Ref(m) = inch[1] else { panic!() };
+    assert_eq!(
+        g.args(m).unwrap()[..],
+        [
+            Value::Typed("LENGTH_MEASURE", Box::new(Value::Real(25.4))),
+            node(&g, 1)
+        ]
+    );
+    assert_eq!(part(&g, 8, "NAMED_UNIT")[..], [node(&g, 6)]);
+}
+
+#[test]
+fn walkthrough_context() {
+    let g = graph(&file(WALKTHROUGHS)).unwrap();
+    let units = part(&g, 5, "GLOBAL_UNIT_ASSIGNED_CONTEXT");
+    assert_eq!(
+        units[..],
+        [Value::List(vec![node(&g, 1), node(&g, 2), node(&g, 3)])]
+    );
+    let unc = part(&g, 5, "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT");
+    assert_eq!(unc[..], [Value::List(vec![node(&g, 4)])]);
+    assert_eq!(
+        part(&g, 5, "GEOMETRIC_REPRESENTATION_CONTEXT")[..],
+        [Value::Int(3)]
+    );
+    let ctx = g.node(StepId(5)).unwrap();
+    // refs: every part's references, in record order.
+    let ids: Vec<u32> = g.refs(ctx).iter().map(|&r| g.id(r).0).collect();
+    assert_eq!(ids, [4, 1, 2, 3]);
+    assert!(g.of_type("REPRESENTATION_CONTEXT").any(|n| n == ctx));
+}
+
+#[test]
+fn walkthrough_relationship() {
+    let g = graph(&file(WALKTHROUGHS)).unwrap();
+    let rr = part(&g, 15, "REPRESENTATION_RELATIONSHIP");
+    assert_eq!(rr[2..], [node(&g, 10), node(&g, 11)]);
+    let t = part(&g, 15, "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION");
+    assert_eq!(t[..], [node(&g, 12)]);
+    assert_eq!(part(&g, 15, "SHAPE_REPRESENTATION_RELATIONSHIP")[..], []);
+    let rel = g.node(StepId(15)).unwrap();
+    assert_eq!(g.referrers(g.node(StepId(10)).unwrap()), [rel]);
+    assert_eq!(g.referrers(g.node(StepId(12)).unwrap()), [rel]);
+}
+
+#[test]
+fn walkthrough_rational_b_splines() {
+    let g = graph(&file(WALKTHROUGHS)).unwrap();
+    let p = node(&g, 14);
+    let bs = part(&g, 20, "B_SPLINE_SURFACE");
+    assert_eq!(bs[..2], [Value::Int(1), Value::Int(1)]);
+    assert_eq!(
+        bs[2],
+        Value::List(vec![
+            Value::List(vec![p.clone(), p.clone()]),
+            Value::List(vec![p.clone(), p.clone()])
+        ])
+    );
+    let knots = part(&g, 20, "B_SPLINE_SURFACE_WITH_KNOTS");
+    assert_eq!(
+        knots[2],
+        Value::List(vec![Value::Real(0.), Value::Real(1.)])
+    );
+    let w = part(&g, 20, "RATIONAL_B_SPLINE_SURFACE");
+    let row = |a: f64, b: f64| Value::List(vec![Value::Real(a), Value::Real(b)]);
+    assert_eq!(w[..], [Value::List(vec![row(1., 0.5), row(0.5, 1.)])]);
+    assert_eq!(part(&g, 21, "RATIONAL_B_SPLINE_CURVE")[..], [row(1., 2.)]);
+    assert_eq!(
+        part(&g, 21, "B_SPLINE_CURVE")[1],
+        Value::List(vec![p.clone(), p])
+    );
+    let curves: Vec<u32> = g
+        .of_type("B_SPLINE_CURVE_WITH_KNOTS")
+        .map(|n| g.id(n).0)
+        .collect();
+    assert_eq!(curves, [21]);
+}
+
+#[test]
+fn census_counts_by_type_and_by_part() {
+    let c = graph(&file(WALKTHROUGHS)).unwrap().census();
+    assert_eq!(
+        (c.entities, c.complex, c.duplicate_ids, c.dangling),
+        (16, 8, 0, 0)
+    );
+    assert_eq!(c.types["SHAPE_REPRESENTATION"], 2);
+    assert_eq!(c.types["(LENGTH_UNIT NAMED_UNIT SI_UNIT)"], 1);
+    assert_eq!(c.parts["SI_UNIT"], 3);
+    assert_eq!(c.parts["NAMED_UNIT"], 4);
+    assert_eq!(c.parts["SHAPE_REPRESENTATION"], 2);
+    assert_eq!(c.parts.values().sum::<u64>(), 8 + 3 * 5 + 4 + 7 * 2);
 }
