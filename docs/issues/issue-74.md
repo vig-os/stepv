@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-12T16:23:37Z
-updated: 2026-10-12T19:47:51Z
+updated: 2026-11-08T16:55:16Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/74
-comments: 1
+comments: 2
 labels: feature, priority:medium, needs-human
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-13T09:11:35.924Z
+synced: 2026-11-09T09:29:54.830Z
 ---
 
 # [Issue 74]: [OCCT patch: FixSelfIntersectWire is O(n³) in edges per wire (#51)](https://github.com/vig-os/stepv/issues/74)
@@ -73,4 +73,16 @@ _Posted on October 12, 2026 at 07:47 PM_
 - The build used clang -O2, not OCCT's own flags.
 
 **Next:** carry the corrected patch on OCCT 7.9.3 in the flake, run the corpus with zero differences, and measure Ultimaker. Then send the corrected version upstream, describing the segment branch.
+
+---
+
+# [Comment #2]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 04:55 PM_
+
+Done:
+- The patch is carried on OCCT 7.9.3 in stepv's flake, with correctness, scaling and provenance checks in CI: #81 (2015956).
+- It is reported upstream as Open-Cascade-SAS/OCCT#1722.
+
+Remove the patch from the flake once OCCT ships the fix.
 

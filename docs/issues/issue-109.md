@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-13T09:37:20Z
-updated: 2026-10-13T12:54:05Z
+updated: 2026-11-08T15:22:13Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/109
-comments: 2
+comments: 3
 labels: chore, priority:medium
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-14T07:21:26.740Z
+synced: 2026-11-09T09:29:52.982Z
 ---
 
 # [Issue 109]: [macOS supervisor admission: follow-ups from #108's review (timing-bound handover test, silent override parse, untested cancel race, docs)](https://github.com/vig-os/stepv/issues/109)
@@ -55,4 +55,14 @@ Follow-ups from the round-3 review of #113 (c71e629), not fixed there:
 - **The 'handover' name.** The case no longer exercises a handover between two runs: it holds a single run between its admission and its start. It should be renamed.
 - **A hardcoded `run #1`.** The live-sweep case (4b) awaits `run #1` of the live probe's service. That holds because each probe process starts a fresh instance, but it should come from the run's own `accepted` number.
 - **`slowBeside` only at L ≥ 2.** The deadline kill beside a running run is tested only where two kernels can run at once; at L = 1 (CI) only the kill on its own is covered.
+
+---
+
+# [Comment #3]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 03:22 PM_
+
+Two more nits, from the final review of #113 (both predate it):
+- `scripts/ql-e2e/ql-e2e.sh:44-48` judges as soon as the first result line for a path appears, so a failure line logged later for the same path is never judged.
+- `scripts/ql-e2e/supervisor.sh:186-187`: when no kernel is found, `kpid=0` and the script still runs `kill -9` and `ps -p 0`. It should fail at that point instead.
 

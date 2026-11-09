@@ -1,19 +1,19 @@
 ---
 type: issue
-state: open
+state: closed
 created: 2026-10-12T20:42:48Z
-updated: 2026-10-13T00:07:11Z
+updated: 2026-11-08T19:18:44Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/79
-comments: 3
+comments: 4
 labels: feature
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-13T09:11:33.845Z
+synced: 2026-11-09T09:29:54.401Z
 ---
 
 # [Issue 79]: [spike(macos): a real Quick Look appex spawns a bundled sandboxed helper (#64 step 1)](https://github.com/vig-os/stepv/issues/79)
@@ -120,4 +120,12 @@ _Posted on October 13, 2026 at 12:07 AM_
 - **`realpath`:** `run()` `realpath`s the input; it must accept `/dev/fd/N` or skip that step on the fd path.
 - **Still open:** multi-file assemblies. The siblings aren't reachable through one fd, and opening by path is denied.
 
+
+---
+
+# [Comment #4]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 07:18 PM_
+
+Spike done: a real Quick Look appex spawning a bundled sandboxed helper was proven, and the design shipped in #98 and #107 (#64 closed). The spike branch had no unmerged commits, its worktree is removed, and no spike app is still registered with pluginkit (only /Applications/stepv.app).
 

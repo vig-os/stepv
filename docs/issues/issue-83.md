@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-10-12T21:34:42Z
-updated: 2026-10-13T00:41:30Z
+updated: 2026-11-08T19:52:42Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/83
-comments: 4
+comments: 5
 labels: feature, priority:high
 assignees: none
 milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-10-13T09:11:32.337Z
+synced: 2026-11-09T09:29:53.976Z
 ---
 
 # [Issue 83]: [ci: profiling gates — peak memory and time budgets for the kernel, tests and the corpus](https://github.com/vig-os/stepv/issues/83)
@@ -88,4 +88,31 @@ Data point (2026-10-13): during #91, a stepv delegate's own memory guard stopped
 _Posted on October 13, 2026 at 12:41 AM_
 
 Budget data from #91's corpus run (2026-10-13): corpus-diff with stock parallelism went past **8 GB twice**. Run one kernel at a time under a 4 GB per-kernel cap, two ABC files (`00000046…`, `00000048…`) hit the cap on **both** main's kernel and the branch's. They're the corpus's memory outliers and the first entries for the budget file.
+
+---
+
+# [Comment #5]() by [gerchowl]()
+
+_Posted on November 8, 2026 at 07:52 PM_
+
+## Decided (owner, 2026-11-08)
+
+1. **Cap mechanism: one shared wrapper.** The CLI's existing footprint sampler in `src/occt.rs`, which polls every 5 ms and kills over the cap (deliberately not `RLIMIT_AS`, see the doc comment there), moves into a small `stepv-cap` wrapper.
+   - It is used on both OSes, so the cap means the same thing everywhere.
+   - The harness, `corpus-diff.py`, `occt-patch-check`, the tests and the nix checks all launch the kernel through it.
+   - A CI check rejects any uncapped kernel launch.
+2. **Margins: hybrid.**
+   - A hard ceiling per file from the checked-in budget file: absolute peak RSS and time, plus headroom.
+   - A regression check that runs main and the PR head **in the same CI job on the same runner** and compares them as a ratio.
+3. **Heavy reference (Ultimaker, 143 MB): nightly + pinned fetch.**
+   - A nightly/main-only job fetches the file hash-pinned and cached, and opens an issue on a regression.
+   - The PR gate runs the in-repo corpus plus the two ABC memory outliers (`00000046…`, `00000048…`).
+
+## Split, in landing order (each one PR)
+- **83a:** the `stepv-cap` wrapper, extracted from the CLI's sampler (the CLI then uses it too, with no behaviour change). Every kernel launch is routed through it, the CI check rejects uncapped launches, and the per-test cap reports the culprit. Balloon proof on macOS and Linux CI.
+- **83b:** the budget file, the CI kernel gate (ceiling + same-job ratio vs main) and the PR table.
+- **83c:** the nightly heavy-file job: pinned fetch, cache, issue on regression.
+
+The generic part stays on vig-os/devkit#1875; stepv keeps its budget file and kernel runner.
+
 
