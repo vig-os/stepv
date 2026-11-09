@@ -13,7 +13,10 @@ use stepv::measure::{Query, Server};
 use stepv::occt::{self, Limits, Outcome};
 use stepv::render::{self, Camera};
 use stepv::topology::Topology;
-use stepv::view::gpu::{Headless, Layout, Pick, View, clip_matrix, require_gpu};
+use stepv::view::gpu::{
+    Draw, Geometry, Headless, Layout, Pick, Pipeline, Renderer, View, clip_matrix, require_gpu,
+};
+use stepv::view::placeholder;
 use stepv::{Deflection, Scene};
 
 const FILES: [&str; 5] = [
@@ -472,6 +475,170 @@ fn per_face_colours_reach_the_gpu() {
         hues.insert(((r * 4 / max), (g * 4 / max), (b * 4 / max)));
     }
     assert!(hues.len() >= 2, "one colour only: {hues:?}");
+}
+
+/// #138: the graph's view of the bracket, read in-process: three leaves
+/// (the plate, and the pin instanced twice), each with a box.
+fn bracket_graph() -> placeholder::GraphView {
+    let g = placeholder::load(&data("assembly.step")).expect("the graph reads the bracket");
+    assert_eq!(g.leaves, 3);
+    let leaves: Vec<u64> = g.placeholders.boxes.iter().map(|b| b.0).collect();
+    assert_eq!(leaves, [0, 1, 2]);
+    assert_eq!(g.placeholders.status(), "graph: 3 parts");
+    g
+}
+
+/// #138's acceptance: the loading frame, before the kernel is done, draws
+/// the graph's boxes, and only through the placeholder pipelines.
+#[test]
+fn the_first_frame_has_placeholders_before_done() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let graph = bracket_graph();
+    let ph = g.upload_placeholders(graph.placeholders.boxes.iter().map(|b| b.1));
+    let view = View::new(Camera::default());
+    // No scene yet: the window's loading stage.
+    assert_eq!(
+        Renderer::plan(None, Some(&ph), &view),
+        [
+            Draw {
+                pipeline: Pipeline::PlaceholderFill,
+                geometry: Geometry::Placeholders
+            },
+            Draw {
+                pipeline: Pipeline::PlaceholderWire,
+                geometry: Geometry::Placeholders
+            },
+        ]
+    );
+    let img = g.render_with(None, Some(&ph), &view, 256, 192);
+    let alpha: Vec<u8> = img.rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let drawn = alpha.iter().filter(|&&a| a > 0).count();
+    assert!(drawn > 256 * 192 / 20, "the boxes cover {drawn} pixels");
+    // Translucent: the fill shows what is behind it.
+    let see_through = alpha.iter().filter(|&&a| a > 0 && a < 128).count();
+    assert!(
+        see_through > drawn / 2,
+        "{see_through} of {drawn} translucent"
+    );
+}
+
+/// #138's acceptance: in a frame with both the kernel's scene and the
+/// graph's boxes left over, the shaded pipeline draws the scene alone and
+/// every placeholder draw goes through a placeholder pipeline.
+#[test]
+fn no_placeholder_is_drawn_with_the_shaded_pipeline() {
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    let (scene, topo) = load_with_topology("assembly.step");
+    let mut p = bracket_graph().placeholders;
+    // The second pin's mesh not yet delivered: its box stays.
+    let mut delivered = stepv::topology::parts_per_leaf(&topo.tree);
+    delivered[2].clear();
+    p.replace(&delivered);
+    let ph = g.upload_placeholders(p.boxes.iter().map(|b| b.1));
+    let gs = g.upload(&scene);
+    let view = View::new(Camera::for_scene(&scene));
+    let plan = Renderer::plan(Some(&gs), Some(&ph), &view);
+    let by = |geometry| -> Vec<Pipeline> {
+        plan.iter()
+            .filter(|d| d.geometry == geometry)
+            .map(|d| d.pipeline)
+            .collect()
+    };
+    assert_eq!(
+        by(Geometry::Placeholders),
+        [Pipeline::PlaceholderFill, Pipeline::PlaceholderWire]
+    );
+    let scene_draws = by(Geometry::Scene);
+    assert!(scene_draws.contains(&Pipeline::Shaded), "{plan:?}");
+    assert!(
+        !scene_draws
+            .iter()
+            .any(|p| matches!(p, Pipeline::PlaceholderFill | Pipeline::PlaceholderWire)),
+        "{plan:?}"
+    );
+    // And the frame encodes as planned: the GPU accepts every draw.
+    let img = g.render_with(Some(&gs), Some(&ph), &view, 256, 192);
+    assert!(img.rgba.chunks_exact(4).any(|p| p[3] == 255));
+}
+
+/// #138: each placeholder is replaced by its own leaf's mesh, joined by
+/// leaf number: every vertex of a leaf's mesh parts lies in that leaf's box
+/// (the pin's two instances have boxes of their own), and a leaf whose mesh
+/// has come loses its box while the others keep theirs.
+#[test]
+fn placeholders_are_replaced_by_leaf_number() {
+    let (scene, topo) = load_with_topology("assembly.step");
+    let p = bracket_graph().placeholders;
+    let per_leaf = stepv::topology::parts_per_leaf(&topo.tree);
+    assert_eq!(per_leaf.len(), 3);
+    assert_ne!(p.boxes[1].1, p.boxes[2].1, "the pins' boxes are placed");
+    for (leaf, parts) in per_leaf.iter().enumerate() {
+        let b = p.boxes[leaf].1;
+        assert!(!parts.is_empty(), "leaf {leaf} has no mesh");
+        for &part in parts {
+            for v in scene.parts[part].mesh.positions.chunks_exact(3) {
+                let inside = (0..3).all(|k| {
+                    let x = f64::from(v[k]);
+                    x >= b.min[k] - 1e-3 && x <= b.max[k] + 1e-3
+                });
+                assert!(inside, "leaf {leaf} part {part}: {v:?} outside {b:?}");
+            }
+        }
+    }
+    for gone in 0..3 {
+        let mut delivered = per_leaf.clone();
+        delivered[gone].clear();
+        let mut left = p.clone();
+        left.replace(&delivered);
+        let leaves: Vec<u64> = left.boxes.iter().map(|b| b.0).collect();
+        assert_eq!(leaves, [gone as u64], "only leaf {gone} is undelivered");
+    }
+    let mut all = p.clone();
+    all.replace(&per_leaf);
+    assert!(all.boxes.is_empty());
+}
+
+/// #138's acceptance: a file the graph refuses (here a `REFERENCE` section,
+/// which OCCT skips) has no placeholders, says why, and the kernel's run
+/// is as before.
+#[test]
+fn a_refused_graph_leaves_the_kernels_view_and_says_why() {
+    let dir = std::env::temp_dir().join(format!("stepv-view-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("reference.step");
+    std::fs::write(&input, refused_bracket()).unwrap();
+    let why = placeholder::load(&input).expect_err("the graph refuses a REFERENCE section");
+    assert!(
+        why.starts_with("graph refused: byte ") && why.ends_with(": a REFERENCE section"),
+        "{why}"
+    );
+    let mesh = dir.join("reference.msh");
+    let run = occt::run(
+        &occt::kernel_path(),
+        &input,
+        Deflection::PREVIEW,
+        Limits::DEFAULT,
+        Some(&mesh),
+        None,
+        true,
+    )
+    .expect("start the kernel");
+    assert_eq!(run.outcome, Outcome::Ok, "{:?}", run.summary);
+    let scene = occt::read_mesh(&std::fs::read(&mesh).unwrap()).unwrap();
+    assert_eq!(scene.parts.len(), load("assembly.step").parts.len());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The bracket with an empty `REFERENCE` section after its data: Part 21
+/// edition 3 allows it, the graph refuses it, OCCT reads past it.
+fn refused_bracket() -> String {
+    let s = std::fs::read_to_string(data("assembly.step")).unwrap();
+    let end = s.rfind("ENDSEC;").unwrap() + "ENDSEC;".len();
+    format!("{}\nREFERENCE;\nENDSEC;{}", &s[..end], &s[end..])
 }
 
 /// #28's acceptance: the stress assembly (1.77M triangles) draws at display

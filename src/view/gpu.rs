@@ -907,7 +907,63 @@ struct EdgeOut {
     default: { return encode(SKETCH); }
   }
 }
+
+// Placeholders (#138): unlit, flat, translucent; never the mesh's shading.
+@vertex fn vs_placeholder(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
+  return u.clip * vec4(p, 1.0);
+}
+@fragment fn fs_placeholder_fill() -> @location(0) vec4<f32> {
+  return vec4(encode(PLACEHOLDER).rgb, 0.12);
+}
+@fragment fn fs_placeholder_wire() -> @location(0) vec4<f32> {
+  return vec4(encode(PLACEHOLDER).rgb, 0.8);
+}
 ";
+
+/// The placeholders' colour, linear (#138, ADR-0001 §2.8): a cool
+/// blue-grey, drawn as a translucent fill and a wireframe, so a box never
+/// reads as a part's shaded geometry.
+const PLACEHOLDER_COLOR: [f32; 3] = [0.18, 0.30, 0.55];
+
+/// A pipeline of a frame ([`Draw`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pipeline {
+    /// The lit, opaque mesh pipeline: the kernel's parts.
+    Shaded,
+    /// The picked face, over its shaded self.
+    Highlight,
+    /// The section cap: the stencil parity passes and the cap, or the exact
+    /// caps.
+    Cap,
+    /// The B-rep edges, as fat lines.
+    Edges,
+    /// Sketch and construction curves.
+    Lines,
+    /// The placeholders' translucent faces.
+    PlaceholderFill,
+    /// The placeholders' wireframe.
+    PlaceholderWire,
+}
+
+/// What a draw draws: the kernel's scene, or the graph's placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Geometry {
+    /// The kernel's parts ([`GpuScene`]).
+    Scene,
+    /// The graph's boxes ([`GpuPlaceholders`]).
+    Placeholders,
+}
+
+/// One draw of a frame: a pipeline over a geometry's buffers.
+/// [`Renderer::plan`] lists a frame's draws and the renderer encodes exactly
+/// those, so the list says which pipeline draws which geometry (#138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Draw {
+    /// The pipeline drawing.
+    pub pipeline: Pipeline,
+    /// Whose buffers it draws.
+    pub geometry: Geometry,
+}
 
 /// The pipelines, built once per device.
 pub struct Renderer {
@@ -928,6 +984,9 @@ pub struct Renderer {
     /// Exact caps (#43), when the scene has them for the plane drawn.
     exact: wgpu::RenderPipeline,
     id_exact: wgpu::RenderPipeline,
+    /// The graph's placeholders (#138): their own pipelines, never `mesh`.
+    placeholder_fill: wgpu::RenderPipeline,
+    placeholder_wire: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -962,7 +1021,7 @@ impl Renderer {
             "const MISSING = {};\nconst CONSTRUCTION = {};\nconst SKETCH = {};\nconst EDGE_PULL = {:?};\n\
              const APPROX = {};\nconst APPROX_DARK = {};\nconst OVERLAY_STRIPES = {}u;\n\
              const EDGE = {};\nconst EDGE_BIT = {}u;\nconst CAP = {};\nconst CAP_HATCH = {};\n\
-             const CAP_STEP = {:?};\n",
+             const CAP_STEP = {:?};\nconst PLACEHOLDER = {};\n",
             rgb(render::MISSING),
             rgb(render::CONSTRUCTION),
             rgb(render::SKETCH),
@@ -974,7 +1033,8 @@ impl Renderer {
             Pick::EDGE_BIT,
             rgb(CAP_COLOR),
             rgb(CAP_HATCH),
-            CAP_STEP
+            CAP_STEP,
+            rgb(PLACEHOLDER_COLOR)
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stepv view"),
@@ -1292,7 +1352,36 @@ impl Renderer {
                 ..Output::shaded()
             },
         );
+        // Translucent over the scene: depth-tested against the parts, never
+        // written, so a box hides nothing behind it.
+        let see_through = || Output {
+            target: wgpu::ColorTargetState {
+                format: COLOR,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            },
+            depth_write: false,
+            ..Output::shaded()
+        };
+        let placeholder_fill = pipeline(
+            "stepv placeholder fill",
+            "vs_placeholder",
+            "fs_placeholder_fill",
+            &[vec3(0)],
+            wgpu::PrimitiveTopology::TriangleList,
+            see_through(),
+        );
+        let placeholder_wire = pipeline(
+            "stepv placeholder wire",
+            "vs_placeholder",
+            "fs_placeholder_wire",
+            &[vec3(0)],
+            wgpu::PrimitiveTopology::LineList,
+            see_through(),
+        );
         Self {
+            placeholder_fill,
+            placeholder_wire,
             mesh,
             lines,
             highlight,
@@ -1319,14 +1408,71 @@ impl Renderer {
         target: &Target,
         view: &View,
     ) -> wgpu::CommandBuffer {
-        queue.write_buffer(
-            &scene.uniforms,
-            0,
-            bytemuck::bytes_of(&uniforms(scene, view, target.width, target.height)),
-        );
-        if let Some(plane) = view.section {
-            let quad = cap_quad(plane, &scene.fit(view.show_construction));
-            queue.write_buffer(&scene.cap, 0, bytemuck::cast_slice(&quad));
+        self.render_with(device, queue, Some(scene), None, target, view)
+    }
+
+    /// The draws of a frame of `scene` and `placeholders`, in order: the
+    /// scene's, then the placeholders' over it.
+    #[must_use]
+    pub fn plan(
+        scene: Option<&GpuScene>,
+        placeholders: Option<&GpuPlaceholders>,
+        view: &View,
+    ) -> Vec<Draw> {
+        let mut draws = Vec::new();
+        let mut add = |pipeline, geometry| draws.push(Draw { pipeline, geometry });
+        if let Some(s) = scene {
+            if s.has_mesh {
+                add(Pipeline::Shaded, Geometry::Scene);
+                if view.picked.is_some() {
+                    add(Pipeline::Highlight, Geometry::Scene);
+                }
+                if view.section.is_some() && view.cap {
+                    add(Pipeline::Cap, Geometry::Scene);
+                }
+            }
+            if s.has_edges {
+                add(Pipeline::Edges, Geometry::Scene);
+            }
+            if s.has_lines {
+                add(Pipeline::Lines, Geometry::Scene);
+            }
+        }
+        if placeholders.is_some_and(|p| p.fill_vertices > 0) {
+            add(Pipeline::PlaceholderFill, Geometry::Placeholders);
+            add(Pipeline::PlaceholderWire, Geometry::Placeholders);
+        }
+        draws
+    }
+
+    /// Encodes one frame of `scene` and `placeholders` (the graph's boxes,
+    /// #138), either or both, into `target`: [`Renderer::plan`]'s draws.
+    /// Without a scene, the placeholders frame themselves.
+    #[must_use]
+    pub fn render_with(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: Option<&GpuScene>,
+        placeholders: Option<&GpuPlaceholders>,
+        target: &Target,
+        view: &View,
+    ) -> wgpu::CommandBuffer {
+        let fit = match (scene, placeholders) {
+            (Some(s), _) => s.fit(view.show_construction),
+            (None, Some(p)) => p.fit,
+            (None, None) => GpuScene::NO_FIT,
+        };
+        let u = uniforms(fit, view, target.width, target.height);
+        for buffer in scene
+            .map(|s| &s.uniforms)
+            .into_iter()
+            .chain(placeholders.map(|p| &p.uniforms))
+        {
+            queue.write_buffer(buffer, 0, bytemuck::bytes_of(&u));
+        }
+        if let (Some(s), Some(plane)) = (scene, view.section) {
+            queue.write_buffer(&s.cap, 0, bytemuck::cast_slice(&cap_quad(plane, &fit)));
         }
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("stepv frame"),
@@ -1357,26 +1503,60 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            pass.set_bind_group(0, &scene.bind, &[]);
-            if scene.has_mesh {
-                pass.set_pipeline(&self.mesh);
-                draw_mesh(&mut pass, scene, None);
-                if let Some(pick) = view.picked {
-                    pass.set_pipeline(&self.highlight);
-                    draw_mesh(&mut pass, scene, Some(pick.part as usize));
-                }
-                if let Some(plane) = view.section.filter(|_| view.cap) {
-                    match scene.exact_caps(plane) {
-                        Some(caps) => draw_exact(&mut pass, caps, &self.exact),
-                        None => draw_cap(&mut pass, scene, &self.stencil, &self.cap),
+            for d in Self::plan(scene, placeholders, view) {
+                match (d.geometry, scene, placeholders) {
+                    (Geometry::Scene, Some(s), _) => {
+                        self.draw_scene(&mut pass, s, d.pipeline, view)
                     }
+                    (Geometry::Placeholders, _, Some(p)) => {
+                        let (pipeline, vertices, count) = match d.pipeline {
+                            Pipeline::PlaceholderFill => {
+                                (&self.placeholder_fill, &p.fill, p.fill_vertices)
+                            }
+                            Pipeline::PlaceholderWire => {
+                                (&self.placeholder_wire, &p.wire, p.wire_vertices)
+                            }
+                            other => unreachable!("{other:?} never draws placeholders"),
+                        };
+                        pass.set_bind_group(0, &p.bind, &[]);
+                        pass.set_pipeline(pipeline);
+                        pass.set_vertex_buffer(0, vertices.slice(..));
+                        pass.draw(0..count, 0..1);
+                    }
+                    _ => unreachable!("the plan draws only the geometry it was given"),
                 }
             }
-            if scene.has_edges {
-                pass.set_pipeline(&self.edges);
-                draw_edges(&mut pass, scene);
+        }
+        enc.finish()
+    }
+
+    /// One of the scene's draws.
+    fn draw_scene(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        scene: &GpuScene,
+        pipeline: Pipeline,
+        view: &View,
+    ) {
+        pass.set_bind_group(0, &scene.bind, &[]);
+        match pipeline {
+            Pipeline::Shaded => {
+                pass.set_pipeline(&self.mesh);
+                draw_mesh(pass, scene, None);
             }
-            if scene.has_lines {
+            Pipeline::Highlight => {
+                pass.set_pipeline(&self.highlight);
+                draw_mesh(pass, scene, view.picked.map(|p| p.part as usize));
+            }
+            Pipeline::Cap => match view.section.and_then(|plane| scene.exact_caps(plane)) {
+                Some(caps) => draw_exact(pass, caps, &self.exact),
+                None => draw_cap(pass, scene, &self.stencil, &self.cap),
+            },
+            Pipeline::Edges => {
+                pass.set_pipeline(&self.edges);
+                draw_edges(pass, scene);
+            }
+            Pipeline::Lines => {
                 pass.set_pipeline(&self.lines);
                 pass.set_vertex_buffer(0, scene.line_positions.slice(..));
                 pass.set_vertex_buffer(1, scene.line_kinds.slice(..));
@@ -1384,8 +1564,8 @@ impl Renderer {
                 // Hidden parts discard in the fragment shader (shown()).
                 pass.draw(0..6, 0..scene.line_segments);
             }
+            other => unreachable!("{other:?} never draws the scene"),
         }
-        enc.finish()
     }
 }
 
@@ -1408,7 +1588,12 @@ impl Renderer {
         queue.write_buffer(
             &scene.uniforms,
             0,
-            bytemuck::bytes_of(&uniforms(scene, view, target.width, target.height)),
+            bytemuck::bytes_of(&uniforms(
+                scene.fit(view.show_construction),
+                view,
+                target.width,
+                target.height,
+            )),
         );
         if let Some(plane) = view.section {
             let quad = cap_quad(plane, &scene.fit(view.show_construction));
@@ -1512,8 +1697,7 @@ impl Renderer {
 }
 
 /// The uniforms for drawing `scene` as `view` into a `w` x `h` target.
-fn uniforms(scene: &GpuScene, view: &View, w: u32, h: u32) -> Uniforms {
-    let fit = scene.fit(view.show_construction);
+fn uniforms(fit: Fit, view: &View, w: u32, h: u32) -> Uniforms {
     let r = rotation(&view.camera);
     let rot = transpose([
         [r[0][0], r[0][1], r[0][2], 0.0],
@@ -1769,6 +1953,88 @@ pub struct GpuScene {
     pub bounds: Option<([f32; 3], [f32; 3])>,
     /// The CPU mirror of the GPU bitset: hidden parts are not drawn at all.
     visibility: Visibility,
+}
+
+/// The graph's placeholder boxes on the GPU (#138): each box's 12
+/// triangles and 12 edges, in model mm, with their own uniforms, so they
+/// draw before any scene exists.
+pub struct GpuPlaceholders {
+    fill: wgpu::Buffer,
+    wire: wgpu::Buffer,
+    fill_vertices: u32,
+    wire_vertices: u32,
+    uniforms: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// What a frame of the placeholders alone frames.
+    pub fit: Fit,
+}
+
+impl GpuPlaceholders {
+    /// Uploads `boxes`' (min, max) corners.
+    #[must_use]
+    pub fn upload(
+        device: &wgpu::Device,
+        renderer: &Renderer,
+        boxes: impl Iterator<Item = crate::BBox>,
+    ) -> Self {
+        let (mut fill, mut wire) = (Vec::<[f32; 3]>::new(), Vec::<[f32; 3]>::new());
+        for b in boxes {
+            // Corner k takes axis a's max where bit a of k is set.
+            let c: [[f32; 3]; 8] = std::array::from_fn(|k| {
+                std::array::from_fn(|a| (if k >> a & 1 == 1 { b.max[a] } else { b.min[a] }) as f32)
+            });
+            for a in 0..3 {
+                // The edges along axis a, and the two faces across it.
+                let (u, v) = (1 << ((a + 1) % 3), 1 << ((a + 2) % 3));
+                for k in (0..8).filter(|k| k >> a & 1 == 0) {
+                    wire.extend([c[k], c[k | 1 << a]]);
+                }
+                for side in [0, 1 << a] {
+                    let q = [side, side | u, side | u | v, side | v].map(|k| c[k]);
+                    fill.extend([0, 1, 2, 0, 2, 3].map(|i| q[i]));
+                }
+            }
+        }
+        let buf = |label, v: &[[f32; 3]]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                // wgpu refuses zero-sized buffers; one zero vertex stands in.
+                contents: bytemuck::cast_slice(if v.is_empty() { &[[0.0; 3]] } else { v }),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        // The scene's bind group layout: the placeholders' shader reads the
+        // uniforms alone, so one zeroed word stands in for each storage.
+        let unused = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("placeholder unused"),
+            contents: &[0u8; 16],
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("placeholder uniforms"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let entries = [&uniforms, &unused, &unused, &unused];
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stepv placeholders"),
+            layout: &renderer.layout,
+            entries: &std::array::from_fn::<_, 4, _>(|i| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: entries[i].as_entire_binding(),
+            }),
+        });
+        Self {
+            fit: Fit::of(wire.iter().copied()).unwrap_or(GpuScene::NO_FIT),
+            fill: buf("placeholder fill", &fill),
+            wire: buf("placeholder wire", &wire),
+            fill_vertices: fill.len() as u32,
+            wire_vertices: wire.len() as u32,
+            uniforms,
+            bind,
+        }
+    }
 }
 
 /// The exact caps' depth ranks (#43): a cap is drawn one step in front of
@@ -2041,15 +2307,18 @@ impl GpuScene {
         self.exact.as_ref().filter(|e| e.plane == plane)
     }
 
+    /// The fit of nothing to draw.
+    const NO_FIT: Fit = Fit {
+        mid: [0.0; 3],
+        radius: 1.0,
+    };
+
     /// The sphere a view frames: without, or with, construction curves.
     #[must_use]
     pub fn fit(&self, show_construction: bool) -> Fit {
         self.fits[usize::from(show_construction)]
             .or(self.fits[1])
-            .unwrap_or(Fit {
-                mid: [0.0; 3],
-                radius: 1.0,
-            })
+            .unwrap_or(Self::NO_FIT)
     }
 
     #[must_use]
@@ -2199,10 +2468,35 @@ impl Headless {
     /// Renders `scene` at `width` × `height` and reads it back.
     #[must_use]
     pub fn render(&self, scene: &GpuScene, view: &View, width: u32, height: u32) -> render::Image {
+        self.render_with(Some(scene), None, view, width, height)
+    }
+
+    /// Uploads placeholder boxes (#138).
+    #[must_use]
+    pub fn upload_placeholders(&self, boxes: impl Iterator<Item = crate::BBox>) -> GpuPlaceholders {
+        GpuPlaceholders::upload(&self.device, &self.renderer, boxes)
+    }
+
+    /// Renders `scene` and `placeholders` ([`Renderer::render_with`]) and
+    /// reads the frame back.
+    #[must_use]
+    pub fn render_with(
+        &self,
+        scene: Option<&GpuScene>,
+        placeholders: Option<&GpuPlaceholders>,
+        view: &View,
+        width: u32,
+        height: u32,
+    ) -> render::Image {
         let target = Target::new(&self.device, width, height);
-        let frame = self
-            .renderer
-            .render(&self.device, &self.queue, scene, &target, view);
+        let frame = self.renderer.render_with(
+            &self.device,
+            &self.queue,
+            scene,
+            placeholders,
+            &target,
+            view,
+        );
         self.queue.submit([frame]);
         read_back(&self.device, &self.queue, &target)
     }

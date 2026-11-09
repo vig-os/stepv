@@ -936,6 +936,68 @@ fn the_viewer_shows_the_tree_before_the_geometry() {
     assert!(tree < scene, "{err}");
 }
 
+/// #138: the window draws the graph's boxes, one per leaf, while the kernel
+/// is still running, and the scene replaces them on Done.
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn the_viewer_draws_placeholders_before_the_geometry() {
+    kernel();
+    let h = Home::new("viewplaceholders");
+    let (code, j, err) = h.view_within(
+        &data("assembly.step"),
+        &[],
+        &[("STEPV_OCCT_TEST_STALL_MS", "8000")],
+        VIEW_DEADLINE,
+    );
+    assert_eq!((code, j["status"].as_str()), (0, Some("ok")), "{j}");
+    let boxes = err
+        .find("stepv: STEPV_VIEW_SCREENSHOT placeholders: 3 boxes, ")
+        .expect("no placeholder frame");
+    let scene = err
+        .find("stepv: STEPV_VIEW_SCREENSHOT scene: 3 parts")
+        .expect("no scene");
+    assert!(boxes < scene, "{err}");
+    assert!(
+        err.contains("stepv: STEPV_VIEW_SCREENSHOT status: graph: 3 parts"),
+        "{err}"
+    );
+}
+
+/// #138: a file the graph refuses opens as before, on the kernel's tree and
+/// scene, with the graph's reason in the status line.
+#[test]
+#[ignore = "needs a window session; run by just view-test"]
+fn a_refused_graph_opens_as_before_with_the_reason() {
+    kernel();
+    let h = Home::new("viewrefused");
+    let input = h.0.join("reference.step");
+    let s = std::fs::read_to_string(data("assembly.step")).unwrap();
+    let end = s.rfind("ENDSEC;").unwrap() + "ENDSEC;".len();
+    std::fs::write(
+        &input,
+        format!("{}\nREFERENCE;\nENDSEC;{}", &s[..end], &s[end..]),
+    )
+    .unwrap();
+    let (code, j, err) = h.view_within(&input, &[], &[], VIEW_DEADLINE);
+    assert_eq!((code, j["status"].as_str()), (0, Some("ok")), "{j}");
+    assert!(
+        err.contains("stepv: STEPV_VIEW_SCREENSHOT scene: 3 parts"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("STEPV_VIEW_SCREENSHOT placeholders:"),
+        "{err}"
+    );
+    let status = err
+        .lines()
+        .find_map(|l| l.strip_prefix("stepv: STEPV_VIEW_SCREENSHOT status: "))
+        .expect("no status line");
+    assert!(
+        status.starts_with("graph refused: byte ") && status.ends_with(": a REFERENCE section"),
+        "{status}"
+    );
+}
+
 #[test]
 #[ignore = "needs a window session; run by just view-test"]
 fn a_cached_outline_shows_the_tree_before_any_kernel_event() {

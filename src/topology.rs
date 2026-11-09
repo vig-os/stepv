@@ -154,12 +154,6 @@ impl std::error::Error for TopologyError {}
 /// [`crate::occt::Outline`] promises to equal.
 #[must_use]
 pub fn products(tree: &[Node]) -> Vec<Node> {
-    fn unnamed(n: &Node) -> bool {
-        match n {
-            Node::Part { name, .. } => name.is_empty(),
-            Node::Assembly { name, children } => name.is_empty() && children.iter().all(unnamed),
-        }
-    }
     fn go(n: &Node, next: &mut usize) -> Node {
         let leaf = |name: &str, next: &mut usize| {
             *next += 1;
@@ -183,6 +177,46 @@ pub fn products(tree: &[Node]) -> Vec<Node> {
     }
     let mut next = 0;
     tree.iter().map(|n| go(n, &mut next)).collect()
+}
+
+/// Whether nothing is named anywhere in `n`: [`products`] folds such a
+/// subtree into its parent's leaf.
+fn unnamed(n: &Node) -> bool {
+    match n {
+        Node::Part { name, .. } => name.is_empty(),
+        Node::Assembly { name, children } => name.is_empty() && children.iter().all(unnamed),
+    }
+}
+
+/// Per leaf of [`products`]`(tree)` (the outline's and the graph's leaf
+/// numbering), the mesh parts `tree` holds under it: the join between a
+/// graph leaf and the kernel's parts (#138). A leaf the transfer split into
+/// unnamed bodies has several; one with no geometry, none.
+#[must_use]
+pub fn parts_per_leaf(tree: &[Node]) -> Vec<Vec<usize>> {
+    fn all(n: &Node, out: &mut Vec<usize>) {
+        match n {
+            Node::Part { part, .. } => out.push(*part),
+            Node::Assembly { children, .. } => children.iter().for_each(|c| all(c, out)),
+        }
+    }
+    fn go(n: &Node, out: &mut Vec<Vec<usize>>) {
+        match n {
+            Node::Assembly { children, .. }
+                if children.is_empty() || !children.iter().all(unnamed) =>
+            {
+                children.iter().for_each(|c| go(c, out));
+            }
+            _ => {
+                let mut v = Vec::new();
+                all(n, &mut v);
+                out.push(v);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    tree.iter().for_each(|n| go(n, &mut out));
+    out
 }
 
 impl Topology {
