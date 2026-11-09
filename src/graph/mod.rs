@@ -1,7 +1,7 @@
 //! stepv's own graph of a STEP file (ADR-0001, `docs/adr/0001-graph-core.md`).
 //!
 //! This is the entity layer, slice G1: the file is memory-mapped and scanned
-//! once ([`lex`]) into an entity table, one row per entity instance in file
+//! once (`lex.rs`) into an entity table, one row per entity instance in file
 //! order, holding its `#id`, its interned type and the byte span of its
 //! parameters, plus an id → node lookup. No OCCT is involved. References in
 //! CSR form and lazily parsed arguments come with G2.
