@@ -10,6 +10,7 @@ use serde_json::Value;
 use stepv::graph::Graph;
 use stepv::graph::json::{self, TreeOptions, View};
 
+/// `stepv graph --help`.
 pub const USAGE: &str = "\
 stepv graph — the file's own graph, without the kernel
 
@@ -28,17 +29,22 @@ SUBCOMMANDS:
               is the next page's --offset, or null
     query     A jq filter (jaq). `.` is null; the view is the filters
               summary, census, products, tree, entity($id), refs($id) and
-              referrers($id), $id being a step id (the n of #n)
+              referrers($id), $id being a step id (the n of #n). Nothing
+              bounds a filter's work yet (#187): deep recursion aborts the
+              process, and collecting a walk over a reference cycle never
+              ends
 
 OPTIONS:
     --depth <n>    tree: list occurrences down to depth n (roots are 0)
     --offset <n>   tree: skip n listed occurrences (default 0)
-    --limit <n>    tree: rows per page; query: outputs kept (default 1000)
+    --limit <n>    tree: rows per page; query: outputs kept (default 1000,
+                   at least 1)
     --timings      Each phase's time on stderr
 
 OUTPUT:
     One JSON value on stdout. Text from the file (names, header fields,
-    type names) is always {\"untrusted\": \"…\"}, never a bare string or key.
+    type names) is always {\"untrusted\": \"…\"} in summary, census and
+    tree; query emits it so too, unless the filter unwraps it on purpose.
     Boxes are conservative, in mm, with \"tier\": \"proxy\".
 
 EXIT CODES:
@@ -106,6 +112,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     a.input = PathBuf::from(positional.pop().expect("checked"));
     a.filter = positional.pop().unwrap_or_default();
+    if a.limit == 0 {
+        return Err("--limit must be at least 1".into());
+    }
     a.tree.limit = a.limit;
     Ok(a)
 }
@@ -141,9 +150,11 @@ pub fn main(argv: &[String]) -> u8 {
     let code = match out {
         Ok(v) => {
             let mut stdout = std::io::stdout().lock();
-            let _ = serde_json::to_writer(&mut stdout, &v);
-            let _ = writeln!(stdout);
-            0
+            match serde_json::to_writer(&mut stdout, &v).map(|()| writeln!(stdout)) {
+                Ok(Ok(())) => 0,
+                Ok(Err(e)) => fail(EXIT_FAILED, &format!("cannot write stdout: {e}")),
+                Err(e) => fail(EXIT_FAILED, &format!("cannot write stdout: {e}")),
+            }
         }
         Err((code, e)) => fail(code, &e),
     };

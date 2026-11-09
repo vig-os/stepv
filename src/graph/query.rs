@@ -10,9 +10,17 @@
 //!   parsed then;
 //! - `refs($id)`, `referrers($id)`: step ids.
 //!
-//! The input `.` is null. File text arrives as `{"untrusted": "…"}`. A filter
-//! sees nothing of the host and can't end the process: `env`, `halt` and the
-//! logging natives raise an error instead, and there is no `input`.
+//! The input `.` is null. File text arrives as `{"untrusted": "…"}`; the
+//! filter's author may unwrap it on purpose (`.untrusted`, `error`, object
+//! keys), so screening what a query emits is the tool boundary's job (#124).
+//! A filter sees nothing of the host: `env`, `halt` and the logging natives
+//! raise an error instead, and there is no `input`.
+//!
+//! **Limits (#187):** nothing bounds a filter's work. jaq has no recursion
+//! guard, so `def f: f+1; f` overflows the stack and aborts the process
+//! (SIGABRT, no exit code of ours, no JSON). A walk over a file's reference
+//! cycle, `recurse(refs(.)[])`, never ends: streamed, `limit` stops it;
+//! collected (`[…] | length`), it runs until killed.
 
 use std::fmt;
 
@@ -124,7 +132,7 @@ pub fn query(view: &View<'_>, filter: &str, limit: usize) -> Result<Answer, Quer
             Ok(e) => QueryError::Runtime(e.to_string()),
             Err(_) => QueryError::Runtime("halted".into()),
         })?;
-        results.push(to_json(&v));
+        results.push(to_json(&v).map_err(QueryError::Runtime)?);
     }
     let more = out.next().is_some();
     Ok(Answer { results, more })
@@ -218,7 +226,9 @@ fn to_val(j: &Json) -> Val {
     Val::deserialize(j).expect("serde_json values are JSON")
 }
 
-/// A jaq value as JSON, through jaq's own JSON text.
-fn to_json(v: &Val) -> Json {
-    serde_json::from_str(&v.to_string()).unwrap_or_else(|_| Json::String(v.to_string()))
+/// A jaq value as JSON, through jaq's own JSON text: an error for what JSON
+/// can't hold, such as an object key that isn't a string.
+fn to_json(v: &Val) -> Result<Json, String> {
+    serde_json::from_str(&v.to_string())
+        .map_err(|_| "an output isn't JSON (an object key that isn't a string?)".into())
 }

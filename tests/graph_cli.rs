@@ -154,6 +154,7 @@ fn an_injected_name_is_only_ever_a_data_field() {
     let path = injected(&dir);
     let f = path.to_str().unwrap();
     let seen = [
+        (vec!["graph", "census", f], 0),
         (vec!["graph", "summary", f], 1),
         (vec!["graph", "tree", f], 1),
         (vec!["graph", "query", "products", f], 3),
@@ -161,9 +162,12 @@ fn an_injected_name_is_only_ever_a_data_field() {
         (vec!["graph", "query", "entity(37), entity(464)", f], 3),
         (vec!["graph", "query", "summary.header.name", f], 1),
     ];
-    for (args, want) in seen {
+    for (mut args, want) in seen {
+        args.push("--timings");
         let v = ok_json(&args);
         assert_eq!(only_as_data(&v, None), want, "{args:?}: {v}");
+        let stderr = String::from_utf8(stepv(&args).stderr).unwrap();
+        assert!(!stderr.contains("ignore previous"), "{args:?}: {stderr}");
     }
     let _ = std::fs::remove_file(&path);
 }
@@ -220,6 +224,91 @@ fn a_malformed_filter_is_a_clean_error() {
     let out = stepv(&["graph", "query", "env", f.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(3), "env is refused at run time");
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn outputs_json_can_t_hold_and_empty_pages_are_refused() {
+    let f = data("assembly.step");
+    let f = f.to_str().unwrap();
+    let out = stepv(&["graph", "query", "{(entity(37).type): 1}", f]);
+    assert_eq!(out.status.code(), Some(3), "a non-string key is an error");
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("isn't JSON"));
+    for args in [&["graph", "tree", f][..], &["graph", "query", "1", f]] {
+        let mut args = args.to_vec();
+        args.extend(["--limit", "0"]);
+        let out = stepv(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: a page of 0 never ends"
+        );
+        assert!(out.stdout.is_empty());
+    }
+}
+
+/// Runs stepv with a deadline, killing it past `secs`.
+fn stepv_within(args: &[&str], secs: u64) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stepv"))
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn stepv");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("stepv {args:?} still running after {secs} s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// What ADR §2.4 documents until #187: nothing bounds a filter's work.
+/// Unbounded recursion overflows jaq's stack and aborts the process, with no
+/// JSON; a walk over a file's reference cycle ends only at `--limit`.
+#[test]
+fn a_filter_s_work_is_unbounded_as_documented() {
+    let f = data("assembly.step");
+    let out = stepv_within(
+        &["graph", "query", "def f: f+1; f", f.to_str().unwrap()],
+        120,
+    );
+    assert!(!out.status.success(), "recursion can't succeed");
+    assert!(out.stdout.is_empty(), "no JSON from an aborted run");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(out.status.signal(), Some(6), "SIGABRT: {:?}", out.status);
+    }
+    let cycle = std::env::temp_dir().join(format!("cycle-{}.step", std::process::id()));
+    std::fs::write(
+        &cycle,
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n\
+         FILE_NAME('c','',(''),(''),'','','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n\
+         ENDSEC;\nDATA;\n#1=X(#2);\n#2=X(#1);\nENDSEC;\nEND-ISO-10303-21;\n",
+    )
+    .unwrap();
+    let c = cycle.to_str().unwrap();
+    let out = stepv_within(
+        &[
+            "graph",
+            "query",
+            "1 | recurse(refs(.)[])",
+            c,
+            "--limit",
+            "4",
+        ],
+        60,
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("streamed: JSON");
+    assert_eq!(
+        v,
+        serde_json::json!({ "results": [1, 2, 1, 2], "more": true })
+    );
+    let _ = std::fs::remove_file(&cycle);
 }
 
 #[test]

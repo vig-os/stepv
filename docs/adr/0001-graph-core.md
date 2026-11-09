@@ -511,10 +511,20 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     the `View`, so a filter that only reads entities never builds the structure or the boxes.
   - The filters are `summary`, `census`, `products`, `tree`, `entity($id)`, `refs($id)` and
     `referrers($id)`, `$id` a step id; `.` is null. `env`, `halt` and the logging natives raise an
-    error, so a filter can't read the host or end the process.
+    error, so a filter can't read the host.
+  - **Nothing bounds a filter's work yet (#187), measured on the release build under `stepv-cap`
+    at 4 GiB:**
+    - jaq 3.1.2 has no recursion guard: `def f: f+1; f` overflows the stack and the process
+      aborts (SIGABRT, exit status 134, Rust's "stack overflow" on stderr, nothing on stdout);
+    - on a file with a reference cycle (`#1=X(#2); #2=X(#1);`), `1 | recurse(refs(.)[])` streams
+      forever: `--limit` stops it (exit 0, `"more": true`), but collected
+      (`[1 | recurse(refs(.)[])] | length`) it never ends, and only a timeout killed it.
+    - Crash isolation (a child process) and a work budget are #187's.
   - **Untrusted text:** every string from the file (header fields, names, type names, enumerations,
-    string arguments) is `{"untrusted": "…"}`, never a bare string or an object key, so the census
-    is a list of `{"type", "count"}`.
+    string arguments) is `{"untrusted": "…"}`. `summary`, `census` and `tree` always wrap it, so the
+    census is a list of `{"type", "count"}` and file text is never a bare string or an object key.
+    `query` emits it wrapped too, but a filter's author can unwrap it on purpose (`.untrusted`,
+    `error`, object keys); re-wrapping or screening what a query emits is the MCP slice's (#124).
   - `--timings` prints the phases (`scan`, then `structure`, `bounds`, `expand` as they ran, then
     `answer`) on stderr. Ultimaker 3, release build: `summary` scan 0.56 s (cold), structure
     0.035 s, bounds 0.69 s, total 1.29 s; `census` 0.22 s; `tree` 0.26 s.

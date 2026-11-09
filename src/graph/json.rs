@@ -73,7 +73,8 @@ pub struct TreeOptions {
     pub depth: u32,
     /// Listed occurrences to skip.
     pub offset: u64,
-    /// The most to list.
+    /// The most to list: at least 1, since a page of 0 names its own offset
+    /// as the next.
     pub limit: u64,
     /// The expansion's caps, the outline's by default.
     pub expand: super::Expand,
