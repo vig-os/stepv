@@ -111,10 +111,10 @@ fn parts_per_leaf(tree: &[topology::Node]) -> Vec<Vec<usize>> {
 }
 
 /// Each leaf's placement against the kernel's parts under it, within 1e-9
-/// relative; the mismatches, described.
-fn placement_mismatches(s: &Structure, topo: &Topology) -> Vec<String> {
+/// relative: how many were compared, and the mismatches, described.
+fn placement_mismatches(s: &Structure, topo: &Topology) -> (usize, Vec<String>) {
     let per_leaf = parts_per_leaf(&topo.tree);
-    let mut bad = Vec::new();
+    let (mut compared, mut bad) = (0, Vec::new());
     for o in s.occurrences(Expand::default()) {
         let o = o.unwrap();
         let Some(leaf) = o.leaf else { continue };
@@ -123,6 +123,7 @@ fn placement_mismatches(s: &Structure, topo: &Topology) -> Vec<String> {
             continue;
         };
         for &p in parts {
+            compared += 1;
             let want = topo.parts[p].transform;
             match o.placement {
                 Placement::Placed(got) if close(&got, &want) => {}
@@ -130,7 +131,7 @@ fn placement_mismatches(s: &Structure, topo: &Topology) -> Vec<String> {
             }
         }
     }
-    bad
+    (compared, bad)
 }
 
 fn close(a: &[f64; 12], b: &[f64; 12]) -> bool {
@@ -141,6 +142,11 @@ fn close(a: &[f64; 12], b: &[f64; 12]) -> bool {
 /// The graph's tree against the outline's, and when `placements`, every
 /// leaf's placement against the kernel's.
 fn check(input: &Path, placements: bool) -> Result<Structure, String> {
+    check_counted(input, placements).map(|(s, _)| s)
+}
+
+/// [`check`], with how many placements it compared.
+fn check_counted(input: &Path, placements: bool) -> Result<(Structure, usize), String> {
     let g = Graph::open(input).map_err(|e| format!("graph: {e}"))?;
     let s = graph::structure(&g).map_err(|e| format!("structure: {e}"))?;
     let tree = s.tree(&g, Expand::default()).map_err(|e| e.to_string());
@@ -160,13 +166,15 @@ fn check(input: &Path, placements: bool) -> Result<Structure, String> {
             }
         }
     }
+    let mut compared = 0;
     if placements && tree.is_ok() {
-        let bad = placement_mismatches(&s, &topology_of(input));
+        let bad;
+        (compared, bad) = placement_mismatches(&s, &topology_of(input));
         if !bad.is_empty() {
             return Err(format!("placements: {bad:#?}"));
         }
     }
-    Ok(s)
+    Ok((s, compared))
 }
 
 fn count_leaves(t: &[topology::Node]) -> usize {
@@ -567,30 +575,36 @@ fn corpus_files(test: &str) -> Option<Vec<PathBuf>> {
 /// the graph, reads only the given file), and the placements of those with
 /// instances against the topology. The two multi-file assemblies' top files
 /// differ from the topology by design (their parts live in other files), so
-/// only their trees are checked. CI runs it on `tests/fixtures/nist-pmi`
+/// only their trees are checked. Set, it fails when it compared no placement:
+/// a corpus without assemblies would otherwise pass the placement half
+/// unseen. CI runs it on `tests/fixtures/nist-pmi` and `occt-import-js`
 /// (`.github/workflows/kernel.yml`).
 #[test]
 fn the_corpus_equals_the_outline_and_the_topology() {
     let Some(files) = corpus_files("the_corpus_equals_the_outline_and_the_topology") else {
         return;
     };
-    let (mut ok, mut placing, mut bad) = (0, 0, Vec::new());
+    let (mut ok, mut placing, mut placements, mut bad) = (0, 0, 0, Vec::new());
     for f in &files {
         let stem = f.file_stem().unwrap_or_default();
         let multi = stem == "s1-c5-214" || stem == "s1_pe_214";
         let bytes = std::fs::read(f).unwrap();
         let instances = !multi && find(&bytes, b"NEXT_ASSEMBLY_USAGE_OCCURRENCE");
         placing += usize::from(instances);
-        match check(f, instances) {
-            Ok(_) => ok += 1,
+        match check_counted(f, instances) {
+            Ok((_, n)) => {
+                ok += 1;
+                placements += n;
+            }
             Err(e) => bad.push(format!("{}: {e}", f.display())),
         }
     }
     eprintln!(
-        "corpus: {} files, {ok} equal, placements checked on {placing}",
+        "corpus: {} files, {ok} equal; {placements} placements compared in {placing} files with instances",
         files.len()
     );
     assert!(bad.is_empty(), "{} differ:\n{}", bad.len(), bad.join("\n"));
+    assert!(placements > 0, "STEPV_CORPUS has no placement to compare");
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> bool {

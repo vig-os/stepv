@@ -109,7 +109,7 @@ jobs:
         run: nix develop --command cargo deny check advisories
 
       - name: Fetch the redistributable corpus
-        run: nix develop --command just fixtures nist-pmi malformed
+        run: nix develop --command just fixtures nist-pmi malformed occt-import-js
 
       - name: Robustness gate (harness --strict)
         run: nix develop --command just harness --strict --outline --min-pass 95 tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
@@ -118,11 +118,13 @@ jobs:
         run: nix develop --command just cli-sweep tests/fixtures/nist-pmi tests/fixtures/malformed tests/data
 
       # The graph's structure against the kernel (ADR-0001 G3), on the fetched
-      # corpus: the test fails when STEPV_CORPUS names no file. The harness
-      # above built the kernel it calls.
-      - name: Graph structure against the kernel (nist-pmi)
+      # corpus: trees against --outline, and placements against --topology on
+      # occt-import-js's CAx-IF assemblies (nist-pmi has none; 3 MB, sparse).
+      # The test fails when STEPV_CORPUS names no file or no placement. The
+      # harness above built the kernel it calls.
+      - name: Graph structure against the kernel (nist-pmi, occt-import-js)
         env:
-          STEPV_CORPUS: tests/fixtures/nist-pmi
+          STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
         run: nix develop --command cargo test --test graph_structure -- --nocapture
 
       - name: macOS app (Quick Look extensions) and its headless checks
