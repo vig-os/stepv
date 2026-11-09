@@ -289,12 +289,26 @@ fn run(args: &Args) -> (u8, Value) {
     }
 
     let topology_tmp = args.topology.as_ref().map(|_| temp_path("json"));
+    // The artifact's per-leaf boxes come from the graph, read beside the run.
+    let boxes = (outline.is_some() && report["info"]["format"] == "step").then(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let input = args.input.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(
+                graph_load(&input)
+                    .ok()
+                    .and_then(|g| g.placeholders.leaf_boxes()),
+            );
+        });
+        rx
+    });
     let result = tessellate(
         args,
         &mut report,
         cache_path.as_deref(),
         topology_tmp.as_deref(),
         outline,
+        boxes,
         None,
     );
     let topology = topology_tmp.as_ref().map(|t| topology_bytes(&report, t));
@@ -458,27 +472,27 @@ fn run_view(
     let cancel = AtomicBool::new(false);
     let step = report["info"]["format"] == "step";
     let (ran, loaded) = std::thread::scope(|s| {
+        let mut boxes = None;
         if step {
             let tx = tx.clone();
+            let (btx, brx) = std::sync::mpsc::channel();
+            boxes = Some(brx);
             s.spawn(move || {
-                // A graph bug is a refusal, never the viewer's end: the
-                // kernel's tree and scene come as they did before it.
-                let graph = std::panic::catch_unwind(|| view::placeholder::load(&args.input))
-                    .unwrap_or_else(|p| {
-                        let why = p
-                            .downcast_ref::<&str>()
-                            .map(|s| (*s).to_owned())
-                            .or_else(|| p.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "unknown".into());
-                        Err(format!("graph refused: internal error: {why}"))
-                    });
+                let graph = graph_load(&args.input);
+                // The artifact's boxes (#139), from the same read.
+                let _ = btx.send(
+                    graph
+                        .as_ref()
+                        .ok()
+                        .and_then(|g| g.placeholders.leaf_boxes()),
+                );
                 let _ = tx.send(view::Load::Graph(graph.map(Box::new)));
             });
         }
         let (report, cancel) = (&mut report, &cancel);
         // The loader owns the sender: however it ends, a panic included,
         // the channel closes with it, and the window never waits on it.
-        let loader = s.spawn(move || load_view(args, report, outline, tx, cancel));
+        let loader = s.spawn(move || load_view(args, report, outline, boxes, tx, cancel));
         let ran = view::run(rx, &format!("stepv — {name}"), &opts);
         // The window is closed: a run still going is for nobody.
         cancel.store(true, Ordering::Relaxed);
@@ -512,6 +526,7 @@ fn load_view(
     args: &Args,
     report: &mut Value,
     outline: Option<(PathBuf, header::Info)>,
+    boxes: Option<std::sync::mpsc::Receiver<Option<Vec<[f64; 6]>>>>,
     tx: std::sync::mpsc::Sender<view::Load>,
     cancel: &AtomicBool,
 ) -> Result<(), u8> {
@@ -523,6 +538,7 @@ fn load_view(
         None,
         Some(&topo_tmp),
         outline,
+        boxes,
         Some((&tx, cancel)),
     );
     let topo_bytes = topology_bytes(report, &topo_tmp);
@@ -608,7 +624,9 @@ fn topology_bytes(report: &Value, tmp: &Path) -> std::io::Result<Vec<u8>> {
 ///
 /// With `outline` (the artifact's path and the file's header), the run is
 /// streamed and leaves a [`cache::OutlineArtifact`] once the outline arrives,
-/// whether or not it then completes; a complete run adds the model's box.
+/// whether or not it then completes; a complete run adds the model's box,
+/// and the graph's per-leaf boxes from `boxes` when they are one per leaf of
+/// the kernel's tree (ADR-0001 §3, #139).
 /// With stderr a terminal, the run is streamed too, and its progress shown
 /// there ([`Progress`]).
 /// With `viewer` (#85), the run is streamed to the viewer's window too, and
@@ -619,6 +637,7 @@ fn tessellate(
     cache_path: Option<&Path>,
     topology_out: Option<&Path>,
     outline: Option<(PathBuf, header::Info)>,
+    boxes: Option<std::sync::mpsc::Receiver<Option<Vec<[f64; 6]>>>>,
     viewer: Option<(&std::sync::mpsc::Sender<view::Load>, &AtomicBool)>,
 ) -> Result<(Scene, Vec<u8>), u8> {
     // ── Kernel ──
@@ -796,9 +815,13 @@ fn tessellate(
             &format!("bad kernel output: {e}"),
         )
     })?;
-    // Complete: the box goes in only now.
+    // Complete: the box goes in only now, and the graph's boxes when every
+    // leaf has one and the kernel's tree has the graph's leaf count.
     if let (Some((path, _)), Some(mut a)) = (outline, artifact) {
         a.bbox = run.summary.as_ref().and_then(|s| s.bbox);
+        a.boxes = boxes
+            .and_then(|rx| rx.recv().ok().flatten())
+            .filter(|b| b.len() == a.leaves);
         store_outline(&path, &a);
     }
     Ok(scene)
@@ -892,6 +915,20 @@ fn cache_path(args: &Args, format: Format, file: &cache::FileId) -> Option<PathB
         variant,
     });
     Some(dir.join(format!("{key}.{ext}")))
+}
+
+/// The graph's view of `input` ([`view::placeholder::load`]). A graph bug
+/// is a refusal, never the run's end: the kernel's tree and scene come as
+/// they did before it.
+fn graph_load(input: &Path) -> Result<view::placeholder::GraphView, String> {
+    std::panic::catch_unwind(|| view::placeholder::load(input)).unwrap_or_else(|p| {
+        let why = p
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown".into());
+        Err(format!("graph refused: internal error: {why}"))
+    })
 }
 
 /// Writes the outline artifact; a failure costs the next run its head

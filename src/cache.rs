@@ -281,8 +281,11 @@ pub struct OutlineArtifact {
     /// The model's box, `[xmin, ymin, zmin, xmax, ymax, zmax]`: present once a
     /// run of the file has completed.
     pub bbox: Option<[f64; 6]>,
-    /// One box per leaf. Always absent for now: the kernel does not report
-    /// per-part boxes yet (#66).
+    /// One box per leaf, in leaf order, `[xmin, ymin, zmin, xmax, ymax,
+    /// zmax]`: the graph's conservative leaf boxes (ADR-0001 §3, #139),
+    /// stored with `bbox` by a complete run of a STEP file. Absent when any
+    /// leaf's box is `Unknown`, when the kernel's tree has another leaf
+    /// count than the graph's, or when the graph refused the file.
     pub boxes: Option<Vec<[f64; 6]>>,
 }
 
