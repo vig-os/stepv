@@ -7,7 +7,8 @@
 # 2. promote: publish (undraft) GitHub Release
 # 3. merge: merge release/X.Y.Z PR to main
 # 4. cleanup (best-effort): delete RC draft pre-releases for X.Y.Z, then remote git RC tags
-#    matching X.Y.Z-rc* with no (remaining) GitHub Release
+#    matching the CONFIGURED pre-release format (release-version --list-pattern) with no
+#    (remaining) GitHub Release
 #
 # See docs/DOWNSTREAM_RELEASE.md. No GHCR/cosign/smoke-test gate (project-specific).
 name: Promote Release
@@ -31,14 +32,19 @@ permissions:
 jobs:
   resolve-toolchain:
     name: Resolve toolchain
-    runs-on: ubuntu-26.04
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-26.04') || vars.CI_RUNNER_SMALL || vars.DEVKIT_CI_RESOLVE_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 2
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
       image: ${{ steps.resolve.outputs.image }}
       image-tag: ${{ steps.resolve.outputs.image-tag }}
+      runners: ${{ steps.resolve.outputs.runners }}
+      runner-sources: ${{ steps.resolve.outputs.runner-sources }}
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
       tag-prefix: ${{ steps.resolve.outputs.tag-prefix }}
       floating-tags: ${{ steps.resolve.outputs.floating-tags }}
+      release-required-approvals: ${{ steps.resolve.outputs.release-required-approvals }}
+      prerelease-format: ${{ steps.resolve.outputs.prerelease-format }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -47,18 +53,26 @@ jobs:
             .vig-os
             .github/actions/resolve-toolchain
           sparse-checkout-cone-mode: false
+          # Own path: on a persistent runner the sparse clone must not occupy the
+          # shared workspace root later jobs reuse (#1860).
+          path: .devkit-resolve
 
       - name: Resolve toolchain
         id: resolve
-        uses: ./.github/actions/resolve-toolchain
+        uses: ./.devkit-resolve/.github/actions/resolve-toolchain
         with:
+          runner-small: ${{ vars.CI_RUNNER_SMALL }}
+          runner-large: ${{ vars.CI_RUNNER_LARGE }}
+          runner-xlarge: ${{ vars.CI_RUNNER_XLARGE }}
+          legacy-resolve-runner: ${{ vars.DEVKIT_CI_RESOLVE_RUNNER }}
+          working-directory: .devkit-resolve
           registry-token: ${{ secrets.GHCR_PULL_TOKEN || github.token }}
           registry-username: ${{ github.actor }}
 
   validate:
     name: Validate promote prerequisites
     needs: [resolve-toolchain]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
@@ -213,6 +227,7 @@ jobs:
 
       - name: Find and verify release PR
         env:
+          DEVKIT_RELEASE_REQUIRED_APPROVALS: ${{ needs.resolve-toolchain.outputs.release-required-approvals }}
           VERSION: ${{ steps.vars.outputs.version }}
           GH_TOKEN: ${{ steps.release_app_token.outputs.token }}
         run: |
@@ -220,7 +235,7 @@ jobs:
           PR_JSON=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh pr list \
             --head "release/$VERSION" \
             --base main \
-            --json number,isDraft,reviewDecision,statusCheckRollup \
+            --json number,isDraft,reviewDecision,statusCheckRollup,headRefOid,author \
             --limit 1)
 
           PR_COUNT=$(echo "$PR_JSON" | jq 'length')
@@ -247,20 +262,15 @@ jobs:
           # rulesets only, not classic branch protection — a classic-protection
           # repo skips here and degrades to the platform's own merge-time
           # refusal (fail-late, never fail-open).
-          REQUIRED_APPROVALS=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh api \
-            "repos/${GITHUB_REPOSITORY}/rules/branches/main" \
-            | jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count // 0] | max // 0')
+          source .github/scripts/release-required-approvals.sh
           if [ "$REQUIRED_APPROVALS" -eq 0 ]; then
             echo "Base branch requires no approving reviews — approval gate skipped (#1506)"
           elif [ "$REVIEW_DECISION" = "APPROVED" ]; then
             echo "PR #$PR_NUMBER is approved"
           elif [ "$REVIEW_DECISION" = "null" ] || [ -z "$REVIEW_DECISION" ]; then
-            APPROVED_COUNT=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh api \
-              --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-              | jq 'add | map(select(.state == "APPROVED")) | length')
-            if [ "$APPROVED_COUNT" -eq 0 ]; then
-              echo "ERROR: PR #$PR_NUMBER is not approved (reviewDecision: $REVIEW_DECISION, approved reviews: 0)"
+            APPROVED_COUNT=$(count_release_approvals)
+            if [ "$APPROVED_COUNT" -lt "$REQUIRED_APPROVALS" ]; then
+              echo "ERROR: PR #$PR_NUMBER is not approved (reviewDecision: $REVIEW_DECISION, approved reviews: $APPROVED_COUNT, required: $REQUIRED_APPROVALS)"
               exit 1
             fi
             echo "reviewDecision='$REVIEW_DECISION' but $APPROVED_COUNT approved review(s) found"
@@ -352,7 +362,7 @@ jobs:
   promote:
     name: Publish GitHub Release
     needs: [resolve-toolchain, validate]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
@@ -407,7 +417,7 @@ jobs:
   merge:
     name: Merge release PR to main
     needs: [resolve-toolchain, validate, promote]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
@@ -444,6 +454,7 @@ jobs:
       - name: Find and verify release PR
         id: pr
         env:
+          DEVKIT_RELEASE_REQUIRED_APPROVALS: ${{ needs.resolve-toolchain.outputs.release-required-approvals }}
           VERSION: ${{ needs.validate.outputs.version }}
           GH_TOKEN: ${{ steps.release_app_token.outputs.token }}
         run: |
@@ -453,7 +464,7 @@ jobs:
           PR_JSON=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh pr list \
             --head "$RELEASE_BRANCH" \
             --base main \
-            --json number,isDraft,reviewDecision,statusCheckRollup \
+            --json number,isDraft,reviewDecision,statusCheckRollup,headRefOid,author \
             --limit 1)
 
           PR_COUNT=$(echo "$PR_JSON" | jq 'length')
@@ -481,19 +492,14 @@ jobs:
 
           # Protection-aware approval gate (#1506) — same skip as validate;
           # PR state can change between the jobs, so the merge copy re-checks.
-          REQUIRED_APPROVALS=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh api \
-            "repos/${GITHUB_REPOSITORY}/rules/branches/main" \
-            | jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count // 0] | max // 0')
+          source .github/scripts/release-required-approvals.sh
           if [ "$REQUIRED_APPROVALS" -eq 0 ]; then
             echo "Base branch requires no approving reviews — approval gate skipped (#1506)"
           elif [ "$REVIEW_DECISION" = "APPROVED" ]; then
             echo "PR #$PR_NUMBER is approved"
           elif [ "$REVIEW_DECISION" = "null" ] || [ -z "$REVIEW_DECISION" ]; then
-            APPROVED_COUNT=$(retry --retries 3 --backoff 5 --max-backoff 30 -- gh api \
-              --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-              | jq 'add | map(select(.state == "APPROVED")) | length')
-            if [ "$APPROVED_COUNT" -eq 0 ]; then
+            APPROVED_COUNT=$(count_release_approvals)
+            if [ "$APPROVED_COUNT" -lt "$REQUIRED_APPROVALS" ]; then
               echo "ERROR: PR #$PR_NUMBER does not have approvals"
               exit 1
             fi
@@ -558,7 +564,7 @@ jobs:
   cleanup:
     name: Cleanup git RC tags
     needs: [resolve-toolchain, validate, promote, merge]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
@@ -596,12 +602,21 @@ jobs:
           GH_TOKEN: ${{ steps.release_app_token.outputs.token }}
           VERSION: ${{ needs.validate.outputs.version }}
           TAG_PREFIX: ${{ needs.resolve-toolchain.outputs.tag-prefix }}
+          PRERELEASE_FORMAT: ${{ needs.resolve-toolchain.outputs.prerelease-format }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # RC tags carry the prefix (#1044): <prefix>X.Y.Z-rcN. Empty prefix
-          # reproduces the bare X.Y.Z-rc* pattern (today's behavior).
+          # Candidate tags carry the prefix (#1044): <prefix>X.Y.Z-<pre-release>.
+          # PATTERN is the anchored regex for tags of the CURRENTLY CONFIGURED
+          # pre-release format only (#1749, release-version --list-pattern). A
+          # tag from a PREVIOUSLY configured format (mid-series switch) is
+          # intentionally left alone — guessing at a retired format risks
+          # deleting something a human cut on purpose.
           RC_BASE="${TAG_PREFIX}${VERSION}"
+          PATTERN=$(release-version --list-pattern \
+            --version "$VERSION" \
+            --format "$PRERELEASE_FORMAT" \
+            --tag-prefix "$TAG_PREFIX")
           TMP=$(mktemp)
           trap 'rm -f "$TMP"' EXIT
 
@@ -611,10 +626,9 @@ jobs:
           # releases — not git tags — reclaims drafts whose RC tag was already
           # removed by an earlier partial run.
           select_rc_draft_releases() {
-            jq -r -s --arg base "$RC_BASE" '
-              ( "^" + ($base | gsub("\\.";"\\.")) + "-rc[0-9]+$" ) as $rc
-              | (add // [])[]
-              | select(.draft == true and .prerelease == true and (.tag_name | test($rc)))
+            jq -r -s --arg pat "$PATTERN" '
+              (add // [])[]
+              | select(.draft == true and .prerelease == true and (.tag_name | test($pat)))
               | "\(.id)\t\(.tag_name)"
             ' "$TMP"
           }
@@ -640,10 +654,12 @@ jobs:
 
           # Pass 2: delete leftover git RC tags for the base version, but keep any
           # tag that still has a GitHub Release attached — a published pre-release,
-          # or a draft whose deletion failed above so it stays discoverable.
+          # or a draft whose deletion failed above so it stays discoverable. The
+          # remote glob lists every pre-release of the base version (git has no
+          # regex match); PATTERN then narrows it to the configured format.
           TAGS=$(retry --retries 3 --backoff 5 --max-backoff 30 -- \
-            git ls-remote --tags --refs "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${RC_BASE}-rc*" \
-            | awk '{print $2}' | sed 's#refs/tags/##' || true)
+            git ls-remote --tags --refs "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${RC_BASE}-*" \
+            | awk '{print $2}' | sed 's#refs/tags/##' | grep -E "$PATTERN" || true)
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             HAS_RELEASE=$(printf '%s' "$RELEASES_AFTER" | jq -r --arg t "$tag" 'any(.[]; .tag_name == $t)')
@@ -679,7 +695,7 @@ jobs:
     # update/delete to everyone but the RELEASE_APP, making moves app-exclusive.
     name: Move floating tags
     needs: [resolve-toolchain, validate, promote, merge]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
