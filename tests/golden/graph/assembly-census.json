@@ -1,0 +1,688 @@
+{
+  "complex": 51,
+  "dangling": 0,
+  "duplicate_ids": 0,
+  "entities": 613,
+  "parts": [
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "ADVANCED_BREP_SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 10,
+      "type": {
+        "untrusted": "ADVANCED_FACE"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "APPLICATION_CONTEXT"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "APPLICATION_PROTOCOL_DEFINITION"
+      }
+    },
+    {
+      "count": 4,
+      "type": {
+        "untrusted": "AXIS2_PLACEMENT_2D"
+      }
+    },
+    {
+      "count": 18,
+      "type": {
+        "untrusted": "AXIS2_PLACEMENT_3D"
+      }
+    },
+    {
+      "count": 80,
+      "type": {
+        "untrusted": "CARTESIAN_POINT"
+      }
+    },
+    {
+      "count": 8,
+      "type": {
+        "untrusted": "CIRCLE"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "CLOSED_SHELL"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "COLOUR_RGB"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "CYLINDRICAL_SURFACE"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "DEFINITIONAL_REPRESENTATION"
+      }
+    },
+    {
+      "count": 86,
+      "type": {
+        "untrusted": "DIRECTION"
+      }
+    },
+    {
+      "count": 18,
+      "type": {
+        "untrusted": "EDGE_CURVE"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "EDGE_LOOP"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "FACE_BOUND"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "FILL_AREA_STYLE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "FILL_AREA_STYLE_COLOUR"
+      }
+    },
+    {
+      "count": 39,
+      "type": {
+        "untrusted": "GEOMETRIC_REPRESENTATION_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "GLOBAL_UNIT_ASSIGNED_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "ITEM_DEFINED_TRANSFORMATION"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "LENGTH_UNIT"
+      }
+    },
+    {
+      "count": 46,
+      "type": {
+        "untrusted": "LINE"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "MANIFOLD_SOLID_BREP"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
+      }
+    },
+    {
+      "count": 9,
+      "type": {
+        "untrusted": "NAMED_UNIT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "NEXT_ASSEMBLY_USAGE_OCCURRENCE"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "ORIENTED_EDGE"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "OVER_RIDING_STYLED_ITEM"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "PARAMETRIC_REPRESENTATION_CONTEXT"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "PCURVE"
+      }
+    },
+    {
+      "count": 8,
+      "type": {
+        "untrusted": "PLANE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PLANE_ANGLE_UNIT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRESENTATION_STYLE_ASSIGNMENT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_FORMATION"
+      }
+    },
+    {
+      "count": 6,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_SHAPE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_RELATED_PRODUCT_CATEGORY"
+      }
+    },
+    {
+      "count": 39,
+      "type": {
+        "untrusted": "REPRESENTATION_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "REPRESENTATION_RELATIONSHIP"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "SEAM_CURVE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SHAPE_DEFINITION_REPRESENTATION"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SHAPE_REPRESENTATION_RELATIONSHIP"
+      }
+    },
+    {
+      "count": 9,
+      "type": {
+        "untrusted": "SI_UNIT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SOLID_ANGLE_UNIT"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "STYLED_ITEM"
+      }
+    },
+    {
+      "count": 16,
+      "type": {
+        "untrusted": "SURFACE_CURVE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_SIDE_STYLE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_STYLE_FILL_AREA"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_STYLE_USAGE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "UNCERTAINTY_MEASURE_WITH_UNIT"
+      }
+    },
+    {
+      "count": 46,
+      "type": {
+        "untrusted": "VECTOR"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "VERTEX_POINT"
+      }
+    }
+  ],
+  "types": [
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "(GEOMETRIC_REPRESENTATION_CONTEXT GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT GLOBAL_UNIT_ASSIGNED_CONTEXT REPRESENTATION_CONTEXT)"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "(GEOMETRIC_REPRESENTATION_CONTEXT PARAMETRIC_REPRESENTATION_CONTEXT REPRESENTATION_CONTEXT)"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "(LENGTH_UNIT NAMED_UNIT SI_UNIT)"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "(NAMED_UNIT PLANE_ANGLE_UNIT SI_UNIT)"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "(NAMED_UNIT SI_UNIT SOLID_ANGLE_UNIT)"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "(REPRESENTATION_RELATIONSHIP REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION SHAPE_REPRESENTATION_RELATIONSHIP)"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "ADVANCED_BREP_SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 10,
+      "type": {
+        "untrusted": "ADVANCED_FACE"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "APPLICATION_CONTEXT"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "APPLICATION_PROTOCOL_DEFINITION"
+      }
+    },
+    {
+      "count": 4,
+      "type": {
+        "untrusted": "AXIS2_PLACEMENT_2D"
+      }
+    },
+    {
+      "count": 18,
+      "type": {
+        "untrusted": "AXIS2_PLACEMENT_3D"
+      }
+    },
+    {
+      "count": 80,
+      "type": {
+        "untrusted": "CARTESIAN_POINT"
+      }
+    },
+    {
+      "count": 8,
+      "type": {
+        "untrusted": "CIRCLE"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "CLOSED_SHELL"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "COLOUR_RGB"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "CYLINDRICAL_SURFACE"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "DEFINITIONAL_REPRESENTATION"
+      }
+    },
+    {
+      "count": 86,
+      "type": {
+        "untrusted": "DIRECTION"
+      }
+    },
+    {
+      "count": 18,
+      "type": {
+        "untrusted": "EDGE_CURVE"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "EDGE_LOOP"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "FACE_BOUND"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "FILL_AREA_STYLE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "FILL_AREA_STYLE_COLOUR"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "ITEM_DEFINED_TRANSFORMATION"
+      }
+    },
+    {
+      "count": 46,
+      "type": {
+        "untrusted": "LINE"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "MANIFOLD_SOLID_BREP"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "NEXT_ASSEMBLY_USAGE_OCCURRENCE"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "ORIENTED_EDGE"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "OVER_RIDING_STYLED_ITEM"
+      }
+    },
+    {
+      "count": 36,
+      "type": {
+        "untrusted": "PCURVE"
+      }
+    },
+    {
+      "count": 8,
+      "type": {
+        "untrusted": "PLANE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRESENTATION_STYLE_ASSIGNMENT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_CONTEXT"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_FORMATION"
+      }
+    },
+    {
+      "count": 6,
+      "type": {
+        "untrusted": "PRODUCT_DEFINITION_SHAPE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "PRODUCT_RELATED_PRODUCT_CATEGORY"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "SEAM_CURVE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SHAPE_DEFINITION_REPRESENTATION"
+      }
+    },
+    {
+      "count": 1,
+      "type": {
+        "untrusted": "SHAPE_REPRESENTATION"
+      }
+    },
+    {
+      "count": 2,
+      "type": {
+        "untrusted": "STYLED_ITEM"
+      }
+    },
+    {
+      "count": 16,
+      "type": {
+        "untrusted": "SURFACE_CURVE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_SIDE_STYLE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_STYLE_FILL_AREA"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "SURFACE_STYLE_USAGE"
+      }
+    },
+    {
+      "count": 3,
+      "type": {
+        "untrusted": "UNCERTAINTY_MEASURE_WITH_UNIT"
+      }
+    },
+    {
+      "count": 46,
+      "type": {
+        "untrusted": "VECTOR"
+      }
+    },
+    {
+      "count": 12,
+      "type": {
+        "untrusted": "VERTEX_POINT"
+      }
+    }
+  ]
+}

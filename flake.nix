@@ -198,12 +198,14 @@
             "stepv-capi"
           ];
 
-          # The harness corpus manifest, the committed CLI-test corpus and the
-          # OCCT patch's reference output live outside the cargo source
-          # filter; without this, crane drops them.
+          # The harness corpus manifest, the committed CLI-test corpus, the
+          # golden JSON of `stepv graph` and the OCCT patch's reference output
+          # live outside the cargo source filter; without this, crane drops
+          # them.
           extraSrcFiles = [
             "tests/fixtures"
             "tests/data"
+            "tests/golden"
             "tests/occt-patch"
           ];
 

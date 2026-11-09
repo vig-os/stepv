@@ -1,0 +1,74 @@
+{
+  "census": {
+    "complex": 51,
+    "dangling": 0,
+    "duplicate_ids": 0,
+    "entities": 613,
+    "types": 53
+  },
+  "header": {
+    "author": [
+      {
+        "untrusted": "Author"
+      }
+    ],
+    "authorization": {
+      "untrusted": "Unknown"
+    },
+    "description": [
+      {
+        "untrusted": "Open CASCADE Model"
+      }
+    ],
+    "file_size": 28030,
+    "format": "step",
+    "header_error": null,
+    "name": {
+      "untrusted": "Open CASCADE Shape Model"
+    },
+    "organization": [
+      {
+        "untrusted": "Open CASCADE"
+      }
+    ],
+    "originating_system": {
+      "untrusted": "Open CASCADE 7.9"
+    },
+    "preprocessor": {
+      "untrusted": "Open CASCADE STEP processor 7.9"
+    },
+    "protocol": "AP214",
+    "schema": [
+      {
+        "untrusted": "AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }"
+      }
+    ],
+    "timestamp": {
+      "untrusted": "2026-10-04T17:04:01"
+    }
+  },
+  "model_box": {
+    "max": [
+      40.0,
+      30.0,
+      15.0
+    ],
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "tier": "proxy"
+  },
+  "structure": {
+    "leaves": 3,
+    "products": 3,
+    "roots": 1
+  },
+  "units": [
+    {
+      "mm_per_unit": 1.0,
+      "products": 3
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "next": null,
+  "offset": 0,
+  "rows": [
+    {
+      "depth": 0,
+      "leaf": null,
+      "name": {
+        "untrusted": "bracket-assy"
+      },
+      "path": [
+        [
+          0,
+          0
+        ]
+      ],
+      "placement": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    }
+  ]
+}

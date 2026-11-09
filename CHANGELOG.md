@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G5: `stepv graph`** ([#137](https://github.com/vig-os/stepv/issues/137), ADR-0001 §2.4):
+  - `stepv graph summary|census|tree|query <input>` prints the file's own graph as one JSON value,
+    without the kernel: the header, units, census and model box; the census by type and part; a
+    page of the occurrence tree (`--depth`, `--offset`, `--limit`, `"next"`); and jq filters
+    (`jaq`) over a lazy view (`summary`, `census`, `products`, `tree`, `entity($id)`, `refs($id)`,
+    `referrers($id)`)
+  - Text from the file is `{"untrusted": "…"}`: always in `summary`, `census` and `tree`, and in
+    `query`'s output unless the filter unwraps it on purpose
+  - `--timings` reports each phase on stderr. A filter that doesn't parse exits 2 with the
+    position on stderr; `env` and `halt` are refused
+  - Nothing bounds a filter's work yet (#187): deep recursion aborts the process (SIGABRT), and
+    collecting a walk over a file's reference cycle never ends
 - **The graph core, G6a: the viewer opens on the graph** ([#138](https://github.com/vig-os/stepv/issues/138), ADR-0001 §2.7, §2.8):
   - `stepv view` reads a STEP file's graph in-process, beside the kernel's run, and shows its
     tree and a box placeholder per leaf before the mesh arrives. On Ultimaker 3 the first frame of
