@@ -267,7 +267,7 @@ pub fn structure(g: &Graph) -> Result<Structure, StructureError> {
 
 /// The children in post-order, by an iterative three-colour DFS, so a deep or
 /// cyclic file can't overflow the stack.
-fn post_order(products: &[Product]) -> Result<Vec<usize>, StructureError> {
+pub(super) fn post_order(products: &[Product]) -> Result<Vec<usize>, StructureError> {
     let mut colour = vec![0u8; products.len()]; // white, grey, black
     let mut order = Vec::with_capacity(products.len());
     let mut stack: Vec<(usize, usize)> = Vec::new();
@@ -674,7 +674,7 @@ fn change_of_coordinates(
 
 /// `S_mm`: an `AXIS2_PLACEMENT_3D` as a frame (its local coordinates to its
 /// representation's, in mm), built as OCCT builds a `gp_Ax2`.
-fn frame(g: &Graph, item: Node, mm: f64) -> Result<[f64; 12], Reason> {
+pub(super) fn frame(g: &Graph, item: Node, mm: f64) -> Result<[f64; 12], Reason> {
     let bad = Reason("placement is not a 3-D axis placement");
     if !g.is_a(item, "AXIS2_PLACEMENT_3D") {
         return Err(bad);
@@ -714,7 +714,7 @@ fn frame(g: &Graph, item: Node, mm: f64) -> Result<[f64; 12], Reason> {
 }
 
 /// The X direction `gp_Ax2(P, V)` picks for a main direction alone.
-fn default_x(v: [f64; 3]) -> [f64; 3] {
+pub(super) fn default_x(v: [f64; 3]) -> [f64; 3] {
     let [a, b, c] = v;
     let (aa, ba, ca) = (a.abs(), b.abs(), c.abs());
     normalize(if ba <= aa && ba <= ca {
@@ -732,7 +732,7 @@ fn default_x(v: [f64; 3]) -> [f64; 3] {
 /// (`STEPConstruct_UnitContext::ComputeFactors`): the last length unit wins;
 /// an `SI_UNIT` is its prefix's metres; a `CONVERSION_BASED_UNIT` its factor's
 /// value times its SI target's prefix; anything else, or none, is 1.
-fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
+pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
     let ctx = fields(g, rep, "REPRESENTATION")
         .ok()
         .and_then(|a| refers(&a, 2));
@@ -906,7 +906,7 @@ fn product_names(
 }
 
 /// `n`'s arguments: a simple entity's, or a complex one's part `part`.
-fn fields<'g>(g: &'g Graph, n: Node, part: &str) -> Result<Args<'g>, StructureError> {
+pub(super) fn fields<'g>(g: &'g Graph, n: Node, part: &str) -> Result<Args<'g>, StructureError> {
     let a = match g.type_name(n) {
         super::TypeName::Simple(_) => g.args(n),
         super::TypeName::Complex(_) => g.args_of(n, part).unwrap_or(Err(ArgError::Complex)),
@@ -914,7 +914,7 @@ fn fields<'g>(g: &'g Graph, n: Node, part: &str) -> Result<Args<'g>, StructureEr
     a.map_err(|e| StructureError::Malformed(n, e))
 }
 
-fn refers(a: &Args<'_>, k: usize) -> Option<Node> {
+pub(super) fn refers(a: &Args<'_>, k: usize) -> Option<Node> {
     match a.get(k)? {
         Value::Ref(n) => Some(*n),
         _ => None,
@@ -939,7 +939,7 @@ fn usable(g: &Graph, n: Node, a: &Args<'_>, k: usize) -> Option<TextRef> {
         .then_some(t)
 }
 
-fn real(v: &Value<'_>) -> Option<f64> {
+pub(super) fn real(v: &Value<'_>) -> Option<f64> {
     match v {
         Value::Real(x) => Some(*x),
         Value::Int(i) => Some(*i as f64),
@@ -966,7 +966,7 @@ fn normalize(v: [f64; 3]) -> [f64; 3] {
 }
 
 /// `a · b`: `b` applied first.
-fn compose_raw(a: [f64; 12], b: [f64; 12]) -> [f64; 12] {
+pub(super) fn compose_raw(a: [f64; 12], b: [f64; 12]) -> [f64; 12] {
     let mut m = [0.; 12];
     for r in 0..3 {
         for c in 0..4 {

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G4: conservative boxes** ([#136](https://github.com/vig-os/stepv/issues/136), ADR-0001 §2.3):
+  - `graph::bounds` gives a box in mm for every face, shell, solid, product, leaf and the model,
+    without OCCT. Boxes follow §2.3's per-type table, the 8-corner rule for every change of frame,
+    and one post-order pass over the product DAG. A box contains the exact geometry, or it is
+    `Unknown` with a reason: an unsupported type, a non-positive B-spline weight, or a non-finite
+    coordinate, radius, unit or placement. A node above an `Unknown` child is `Unknown` too. A
+    `GEOMETRIC_SET`'s surfaces count, since OCCT makes them faces; its curves and points, like
+    other wireframe, don't
+  - Checked against the exact geometry as the kernel triangulates it: on the local corpus (390
+    files with Ultimaker 3), every mesh node, face edge polyline point and B-rep vertex of 2,787
+    products (9.66 M points) lies inside its product's box. CI runs the check on nist-pmi and
+    occt-import-js. OCCT's own box is reported, not gated: its `BndLib` boxes conic arcs at
+    `r / cos(π/8)`, about 8.2% past the exact shape
+  - Structure + boxes take 0.76 s on Ultimaker, against §2.7's 0.5 s (#177); the stress assembly
+    takes 0.25 s
 - **The graph core, G3b: placements in mm** ([#135](https://github.com/vig-os/stepv/issues/135), ADR-0001 §2.2):
   - Each instance's `placement` follows OCCT's change of coordinates,
     `S_mm(item_child)⁻¹ · S_mm(item_parent)`, with each item scaled to mm by its own
