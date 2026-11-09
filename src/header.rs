@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// How many bytes of the file head are parsed for the header. Real headers
 /// are a few hundred bytes; 64 KiB tolerates absurd author lists.
-const HEAD_BYTES: usize = 64 * 1024;
+pub(crate) const HEAD_BYTES: usize = 64 * 1024;
 
 /// What a file says about itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,13 +337,27 @@ impl Parser<'_> {
                     raw.push(b'\'');
                     self.i += 1;
                 } else {
-                    return Some(decode_part21(&raw));
+                    return Some(decode_string(&raw));
                 }
             } else {
                 raw.push(c);
             }
         }
     }
+}
+
+/// A Part 21 string's value, from the bytes between its quotes (`''`
+/// already collapsed): line breaks (CR, LF) are not part of the value, so
+/// they are dropped, then [`decode_part21`]. The graph's strings decode
+/// through this too (ADR-0001 §2.1), so the two paths can't disagree.
+#[must_use]
+pub fn decode_string(raw: &[u8]) -> String {
+    let joined: Vec<u8> = raw
+        .iter()
+        .copied()
+        .filter(|c| !matches!(c, b'\r' | b'\n'))
+        .collect();
+    decode_part21(&joined)
 }
 
 /// Decodes ISO 10303-21 string escapes into UTF-8. Unknown or broken escapes
@@ -623,6 +637,15 @@ mod tests {
         assert_eq!(decode_part21(b"\\S\\d"), "ä");
         // Broken escapes stay literal rather than vanishing.
         assert_eq!(decode_part21(b"\\X2\\00C\\X0\\"), "\\X2\\00C\\X0\\");
+    }
+
+    #[test]
+    fn line_breaks_inside_a_string_are_not_its_value() {
+        let i = step(
+            "ISO-10303-21;HEADER;FILE_NAME('long\r\nname.step','',('Ada\nLin'),(''),'','','');FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));ENDSEC;",
+        );
+        assert_eq!(i.name.as_deref(), Some("longname.step"));
+        assert_eq!(i.author, ["AdaLin"]);
     }
 
     #[test]

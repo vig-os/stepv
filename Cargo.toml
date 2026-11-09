@@ -64,6 +64,12 @@ serde_json = "1"
 # cxad uses for its node store, so a future shared cache needs no migration.
 blake3 = "1"
 
+# The graph core (ADR-0001 §2.1): the STEP file is memory-mapped and scanned
+# in place, so the entity table points into the file instead of copying it.
+# Already locked at this version through the viewer's windowing (winit);
+# MIT/Apache-2.0, no dependencies beyond libc.
+memmap2 = "0.9.11"
+
 # PNG encoding for `--png` (the rasteriser itself is src/render.rs).
 png = "0.18"
 
@@ -106,6 +112,9 @@ viewer = ["dep:minifb", "dep:eframe", "dep:egui-phosphor", "dep:bytemuck", "dep:
 libc = "0.2"
 
 [dev-dependencies]
+# The graph's test oracle (src/graph/tests.rs): ids and types from a regex
+# pass, independent of the scanner.
+regex = "1"
 # Validates `--glb` output against the glTF 2.0 schema in tests.
 gltf = "1"
 # tests/cache.rs: dlopen the kernel's C library to call it with arguments
