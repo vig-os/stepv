@@ -455,7 +455,14 @@ fn run_view(
                 // A graph bug is a refusal, never the viewer's end: the
                 // kernel's tree and scene come as they did before it.
                 let graph = std::panic::catch_unwind(|| view::placeholder::load(&args.input))
-                    .unwrap_or_else(|_| Err("graph refused: internal error".into()));
+                    .unwrap_or_else(|p| {
+                        let why = p
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_owned())
+                            .or_else(|| p.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown".into());
+                        Err(format!("graph refused: internal error: {why}"))
+                    });
                 let _ = tx.send(view::Load::Graph(graph.map(Box::new)));
             });
         }

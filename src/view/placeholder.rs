@@ -19,8 +19,53 @@ use crate::topology;
 pub struct GraphView {
     /// The outline's tree, leaf numbers included ([`graph::Structure::tree`]).
     pub tree: Vec<topology::Node>,
+    /// The tree's leaf count.
     pub leaves: usize,
+    /// A box per leaf that has one.
     pub placeholders: Placeholders,
+}
+
+/// What the window keeps of the graph, whichever of the graph and the
+/// kernel's scene arrives first (#138). The status line always gets the
+/// graph's word; its boxes are drawn only while the scene is still to come.
+#[derive(Debug, Default)]
+pub struct GraphState {
+    /// The status line: the graph's counts, or why it refused the file.
+    pub status: Option<String>,
+    /// The boxes still drawn: set only before the scene.
+    pub placeholders: Option<Placeholders>,
+    scene: bool,
+}
+
+impl GraphState {
+    /// The graph's load arrived: records its status, and hands back its
+    /// view (tree and boxes) to show when the scene hasn't come yet.
+    pub fn graph(&mut self, g: Result<Box<GraphView>, String>) -> Option<Box<GraphView>> {
+        match g {
+            Err(why) => {
+                self.status = Some(why);
+                None
+            }
+            Ok(g) => {
+                self.status = Some(g.placeholders.status());
+                if self.scene {
+                    return None;
+                }
+                self.placeholders = Some(g.placeholders.clone());
+                Some(g)
+            }
+        }
+    }
+
+    /// The kernel's scene arrived, with its topology's tree: the boxes left
+    /// once each leaf's mesh replaced its own ([`Placeholders::replace`]).
+    /// Without the tree there is no join, and the scene replaces them all.
+    pub fn scene(&mut self, tree: Option<&[topology::Node]>) -> Option<Placeholders> {
+        self.scene = true;
+        let mut p = self.placeholders.take()?;
+        p.replace(&topology::parts_per_leaf(tree?));
+        (!p.boxes.is_empty()).then_some(p)
+    }
 }
 
 /// The leaves still drawn as boxes, and what the graph said of the rest.
@@ -131,6 +176,68 @@ mod tests {
             Placeholders { unknown: 0, ..p }.status(),
             "graph: 1,234 parts"
         );
+    }
+
+    /// #138 review: the graph's status reaches the status line whether the
+    /// graph or the scene arrives first; its boxes only when it is first.
+    #[test]
+    fn the_graph_is_heard_in_either_order() {
+        let view = || {
+            let b = BBox {
+                min: [0.0; 3],
+                max: [1.0; 3],
+            };
+            Ok(Box::new(GraphView {
+                tree: vec![topology::Node::Part {
+                    name: "p".into(),
+                    part: 0,
+                }],
+                leaves: 2,
+                placeholders: Placeholders {
+                    boxes: vec![(0, b), (1, b)],
+                    leaves: 2,
+                    unknown: 0,
+                },
+            }))
+        };
+        let tree = [
+            topology::Node::Part {
+                name: "a".into(),
+                part: 0,
+            },
+            topology::Node::Part {
+                name: "b".into(),
+                part: 1,
+            },
+        ];
+        // The graph first: its boxes show, then the meshes replace them.
+        let mut s = GraphState::default();
+        assert!(s.graph(view()).is_some());
+        assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
+        assert_eq!(s.scene(Some(&tree[..1])).map(|p| p.boxes.len()), Some(1));
+        assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
+        // The scene first (a mesh-cache hit): no boxes, the status still.
+        let mut s = GraphState::default();
+        assert!(s.scene(Some(&tree)).is_none());
+        assert!(s.graph(view()).is_none());
+        assert!(s.placeholders.is_none());
+        assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
+        // A refusal, either side of the scene.
+        let why = || Err("graph refused: byte 9: a REFERENCE section".to_owned());
+        for scene_first in [false, true] {
+            let mut s = GraphState::default();
+            if scene_first {
+                s.scene(None);
+            }
+            assert!(s.graph(why()).is_none());
+            if !scene_first {
+                assert!(s.scene(None).is_none());
+            }
+            assert_eq!(
+                s.status.as_deref(),
+                Some("graph refused: byte 9: a REFERENCE section")
+            );
+        }
     }
 
     #[test]

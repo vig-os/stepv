@@ -930,21 +930,27 @@ const PLACEHOLDER_COLOR: [f32; 3] = [0.18, 0.30, 0.55];
 pub enum Pipeline {
     /// The lit, opaque mesh pipeline: the kernel's parts.
     Shaded,
+    /// The picked face, over its shaded self.
     Highlight,
     /// The section cap: the stencil parity passes and the cap, or the exact
     /// caps.
     Cap,
+    /// The B-rep edges, as fat lines.
     Edges,
+    /// Sketch and construction curves.
     Lines,
-    /// The placeholders' translucent faces, and their wireframe.
+    /// The placeholders' translucent faces.
     PlaceholderFill,
+    /// The placeholders' wireframe.
     PlaceholderWire,
 }
 
 /// What a draw draws: the kernel's scene, or the graph's placeholders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Geometry {
+    /// The kernel's parts ([`GpuScene`]).
     Scene,
+    /// The graph's boxes ([`GpuPlaceholders`]).
     Placeholders,
 }
 
@@ -953,7 +959,9 @@ pub enum Geometry {
 /// those, so the list says which pipeline draws which geometry (#138).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Draw {
+    /// The pipeline drawing.
     pub pipeline: Pipeline,
+    /// Whose buffers it draws.
     pub geometry: Geometry,
 }
 

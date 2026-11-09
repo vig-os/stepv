@@ -22,7 +22,7 @@ use super::gpu::{
     GpuPlaceholders, GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View,
 };
 use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
-use super::placeholder::Placeholders;
+use super::placeholder::GraphState;
 use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, FrameStats, Load, Loaded, Options, Ran, ThemePref, theme};
@@ -1248,10 +1248,10 @@ struct Window {
     opts: Options,
     error: Arc<Mutex<Option<String>>>,
     measured: Arc<Mutex<Option<FrameStats>>>,
-    /// The graph's placeholders (#138), until the scene replaces them, and
-    /// its status line: its counts, or why it refused the file.
-    placeholders: Option<(Placeholders, GpuPlaceholders)>,
-    graph: Option<String>,
+    /// The graph (#138): its status line and boxes, in whichever order it
+    /// and the scene arrive, and the boxes on the GPU until the scene.
+    graph: GraphState,
+    placeholders: Option<GpuPlaceholders>,
     /// The loading viewport's target and texture, and the size last drawn.
     canvas: (Option<Target>, Option<egui::TextureId>),
     drawn: Option<[u32; 2]>,
@@ -1261,23 +1261,20 @@ impl Window {
     /// Takes what the loader sent since the last frame.
     fn take(&mut self, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
         while let Ok(l) = self.load.try_recv() {
+            // The graph is heard in any stage: after the scene (a cached
+            // mesh beats it) its status still reaches the status line.
+            let l = match l {
+                Load::Graph(g) => {
+                    self.graph_arrived(g, rs);
+                    continue;
+                }
+                l => l,
+            };
             let Stage::Loading { tree, progress, .. } = &mut self.stage else {
                 return;
             };
             match l {
-                Load::Graph(Ok(g)) => {
-                    self.graph = Some(g.placeholders.status());
-                    // The kernel's tree replaces it when it comes.
-                    if tree.is_none() {
-                        *tree = Some(Box::new(Tree::from_nodes(&g.tree, g.leaves)));
-                    }
-                    if let Some(r) = &self.renderer {
-                        let boxes = g.placeholders.boxes.iter().map(|b| b.1);
-                        let gpu = GpuPlaceholders::upload(&rs.device, r, boxes);
-                        self.placeholders = Some((g.placeholders, gpu));
-                    }
-                }
-                Load::Graph(Err(why)) => self.graph = Some(why),
+                Load::Graph(_) => unreachable!("handled above"),
                 Load::Tree(nodes, leaves) => {
                     *tree = Some(Box::new(Tree::from_nodes(&nodes, leaves)));
                 }
@@ -1293,19 +1290,16 @@ impl Window {
                     let Some(r) = self.renderer.take() else {
                         return;
                     };
-                    // Each leaf's mesh replaces its box, joined by leaf
-                    // number; without the kernel's tree there is no join,
-                    // and the scene replaces them all.
-                    let placeholders = self.placeholders.take().and_then(|(mut p, _)| {
-                        p.replace(&crate::topology::parts_per_leaf(&l.topology.as_ref()?.tree));
-                        let boxes = p.boxes.iter().map(|b| b.1);
-                        (!p.boxes.is_empty())
-                            .then(|| GpuPlaceholders::upload(&rs.device, &r, boxes))
+                    // Each leaf's mesh replaces its box, by leaf number.
+                    self.placeholders = None;
+                    let left = self.graph.scene(l.topology.as_ref().map(|t| &t.tree[..]));
+                    let placeholders = left.map(|p| {
+                        GpuPlaceholders::upload(&rs.device, &r, p.boxes.iter().map(|b| b.1))
                     });
                     match Viewer::new(rs, r, &l.scene, l.topology.take(), &opts, e, m) {
                         Ok(mut v) => {
                             v.placeholders = placeholders;
-                            v.graph = self.graph.take();
+                            v.graph = self.graph.status.clone();
                             ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
                             if self.opts.screenshot.is_some() {
                                 let n = l.scene.parts.len();
@@ -1324,6 +1318,35 @@ impl Window {
                             ctx.send_viewport_cmd(ViewportCommand::Close);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// The graph's load, in either stage ([`GraphState`]): its status, and
+    /// before the scene its tree and boxes.
+    fn graph_arrived(
+        &mut self,
+        g: Result<Box<super::placeholder::GraphView>, String>,
+        rs: &egui_wgpu::RenderState,
+    ) {
+        let shown = self.graph.graph(g);
+        match &mut self.stage {
+            Stage::Ready(v) => {
+                v.graph = self.graph.status.clone();
+                if let (Some(graph), Some(_)) = (&v.graph, &self.opts.screenshot) {
+                    eprintln!("stepv: STEPV_VIEW_SCREENSHOT status: {graph}");
+                }
+            }
+            Stage::Loading { tree, .. } => {
+                let Some(g) = shown else { return };
+                // The kernel's tree replaces it when it comes.
+                if tree.is_none() {
+                    *tree = Some(Box::new(Tree::from_nodes(&g.tree, g.leaves)));
+                }
+                if let Some(r) = &self.renderer {
+                    let boxes = g.placeholders.boxes.iter().map(|b| b.1);
+                    self.placeholders = Some(GpuPlaceholders::upload(&rs.device, r, boxes));
                 }
             }
         }
@@ -1395,7 +1418,7 @@ impl Window {
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(graph) = &self.graph {
+                    if let Some(graph) = &self.graph.status {
                         ui.label(egui::RichText::new(graph).size(theme::size::SMALL));
                     }
                     if boxes.is_some() {
@@ -1404,7 +1427,7 @@ impl Window {
                     }
                 });
             });
-        if let Some((((_, gpu), r), rs)) = boxes {
+        if let Some(((gpu, r), rs)) = boxes {
             // The boxes alone, framed by themselves, until the scene comes.
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(t.viewport))
@@ -1427,7 +1450,7 @@ impl Window {
                             let ms = self.opts.opened.map_or(0, |o| o.elapsed().as_millis());
                             eprintln!(
                                 "stepv: STEPV_VIEW_SCREENSHOT placeholders: {} boxes, {ms} ms from open",
-                                self.placeholders.as_ref().map_or(0, |p| p.0.boxes.len())
+                                self.graph.placeholders.as_ref().map_or(0, |p| p.boxes.len())
                             );
                         }
                         self.drawn = Some(size);
@@ -1629,8 +1652,8 @@ pub(super) fn run(
                 opts: opts2,
                 error: error2,
                 measured: measured2,
+                graph: GraphState::default(),
                 placeholders: None,
-                graph: None,
                 canvas: (None, None),
                 drawn: None,
             }) as Box<dyn eframe::App>)
