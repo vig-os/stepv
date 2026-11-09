@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G1: a Part 21 scanner and entity table** ([#133](https://github.com/vig-os/stepv/issues/133), ADR-0001 §2.1):
+  - `stepv::graph::Graph` maps a STEP file and scans it once, without OCCT, into one row per
+    entity instance: its `#id`, its interned type (a complex instance as its sorted part types)
+    and its parameters' byte span, with a dense or sorted `#id` lookup. References and parsed
+    arguments come with G2
+  - A file it can't read (a truncation, an unterminated string or record, a missing `ENDSEC`,
+    not Part 21, or edition 3's `REFERENCE`, `@n` and `<…>`) is refused with the byte offset.
+    Edition 3's `ANCHOR` and `SIGNATURE` sections are skipped and `DATA` parameters recorded
+  - A duplicated `#id` keeps every record, and `Graph::resolve` names the definition OCCT's
+    reader does: the nearest before the referring record, else the nearest after it
+  - Ultimaker 3 scans in 0.19 s and the 221 MB stress assembly in 0.32 s (warm), at 22 B of
+    heap per entity. `examples/graph_scan.rs` measures it
+- **Header strings drop line breaks** ([#133](https://github.com/vig-os/stepv/issues/133)): a
+  CR or LF inside a Part 21 string isn't part of its value, so `--info` no longer shows one
 - **`stepv-cap`: the kernel memory cap for launches outside the CLI** ([#83](https://github.com/vig-os/stepv/issues/83), 83a part i):
   - `stepv-cap --memory-mb N [--label NAME] [--report-json PATH] -- CMD...` runs `CMD` in its
     own process group, held to the CLI's cap: the footprint of `CMD` and its descendants by
