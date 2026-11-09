@@ -11,7 +11,7 @@ on:  # yamllint disable-line rule:truthy
         required: true
         type: string
       release-kind:
-        description: "Release mode: candidate publishes X.Y.Z-rcN, final publishes X.Y.Z"
+        description: "Release mode: candidate publishes X.Y.Z-<pre-release> (default X.Y.Z-rcN), final publishes X.Y.Z"
         required: false
         default: "candidate"
         type: string
@@ -21,7 +21,12 @@ on:  # yamllint disable-line rule:truthy
         default: false
         type: boolean
       rc-number:
-        description: "Candidate RC index (e.g. 21 for X.Y.Z-rc21). Omit to auto-increment from existing tags."
+        description: "Pin the pre-release {N} counter (e.g. 21 for X.Y.Z-rc21). Omit to auto-increment from existing tags."
+        required: false
+        default: ""
+        type: string
+      pre-release-format:
+        description: "Candidate pre-release format, e.g. alpha.{N} ({N} counter, {YYYYMMDD} date). Empty => .vig-os DEVKIT_PRERELEASE_FORMAT, else rc{N}"
         required: false
         default: ""
         type: string
@@ -45,13 +50,17 @@ jobs:
   # `image` in the host modes makes the container jobs run on the runner.
   resolve-toolchain:
     name: Resolve toolchain
-    runs-on: ubuntu-26.04
+    runs-on: ${{ (github.event.pull_request && (github.event.pull_request.head.repo.fork || github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-26.04') || vars.CI_RUNNER_SMALL || vars.DEVKIT_CI_RESOLVE_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 2
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
       image: ${{ steps.resolve.outputs.image }}
       image-tag: ${{ steps.resolve.outputs.image-tag }}
+      runners: ${{ steps.resolve.outputs.runners }}
+      runner-sources: ${{ steps.resolve.outputs.runner-sources }}
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
       tag-prefix: ${{ steps.resolve.outputs.tag-prefix }}
+      prerelease-format: ${{ steps.resolve.outputs.prerelease-format }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -60,11 +69,19 @@ jobs:
             .vig-os
             .github/actions/resolve-toolchain
           sparse-checkout-cone-mode: false
+          # Own path: on a persistent runner the sparse clone must not occupy the
+          # shared workspace root later jobs reuse (#1860).
+          path: .devkit-resolve
 
       - name: Resolve toolchain
         id: resolve
-        uses: ./.github/actions/resolve-toolchain
+        uses: ./.devkit-resolve/.github/actions/resolve-toolchain
         with:
+          runner-small: ${{ vars.CI_RUNNER_SMALL }}
+          runner-large: ${{ vars.CI_RUNNER_LARGE }}
+          runner-xlarge: ${{ vars.CI_RUNNER_XLARGE }}
+          legacy-resolve-runner: ${{ vars.DEVKIT_CI_RESOLVE_RUNNER }}
+          working-directory: .devkit-resolve
           registry-token: ${{ secrets.GHCR_PULL_TOKEN || github.token }}
           registry-username: ${{ github.actor }}
 
@@ -82,9 +99,13 @@ jobs:
       release_kind: ${{ inputs.release-kind }}
       dry_run: ${{ inputs.dry-run }}
       rc_number: ${{ inputs.rc-number || '' }}
+      # Precedence (#1746): dispatch input > .vig-os DEVKIT_PRERELEASE_FORMAT >
+      # rc{N} (release-version's default for an empty format).
+      pre_release_format: ${{ inputs.pre-release-format || needs.resolve-toolchain.outputs.prerelease-format }}
       toolchain_mode: ${{ needs.resolve-toolchain.outputs.mode }}
       toolchain_image: ${{ needs.resolve-toolchain.outputs.image }}
       devkit_version: ${{ needs.resolve-toolchain.outputs.image-tag }}
+      runners: ${{ needs.resolve-toolchain.outputs.runners }}
       tag_prefix: ${{ needs.resolve-toolchain.outputs.tag-prefix }}
     secrets: inherit
 
@@ -133,13 +154,14 @@ jobs:
       toolchain_mode: ${{ needs.resolve-toolchain.outputs.mode }}
       toolchain_image: ${{ needs.resolve-toolchain.outputs.image }}
       devkit_version: ${{ needs.resolve-toolchain.outputs.image-tag }}
+      runners: ${{ needs.resolve-toolchain.outputs.runners }}
       tag_prefix: ${{ needs.resolve-toolchain.outputs.tag-prefix }}
     secrets: inherit
 
   rollback:
     name: Rollback on Failure
     needs: [resolve-toolchain, core, extension, publish]
-    runs-on: ubuntu-26.04
+    runs-on: ${{ fromJSON(needs.resolve-toolchain.outputs.runners).small }}
     container:
       image: ${{ needs.resolve-toolchain.outputs.image }}
       credentials:
