@@ -443,6 +443,15 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     -> Result<Vec<serde_json::Value>, QueryError>;
 ```
 
+- **G3's realised structure API** (#135) differs from the sketch where the sketch couldn't hold:
+  - `Product::name` is what STEPCAF names it by (the product's name, else its id) and `id` the
+    product's id, both `Option<TextRef>`, since either may be absent. `Instance::name` is
+    likewise the chosen label (description, else name, else id). `Product::color` comes with G7.
+  - `Instance::nauo` is a `Node`: every DAG edge is a NAUO.
+  - `Path`'s pairs are `(product, slot)`: the slot indexes `roots` at the first level and the
+    parent's `children` below, so a root leaf has a path too.
+  - `Product::bodies` are the representations the transfer starts from (its shape definitions',
+    and its shape aspects' unless GD&T): an assembly's own placement representation is one.
 - **Complex entities** (`#1=(A(…) B(…) C(…));`, one record holding several entity types) are first-class:
   - Their type is the interned sorted list of part names. `TypeName::Complex` holds them as
     `&[Box<str>]`, the interned table's own slice, rather than the sketch's `&[&str]` (#152). `is_a`/`of_type` match any part, so

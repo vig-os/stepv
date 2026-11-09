@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G3a: the product structure as a DAG** ([#135](https://github.com/vig-os/stepv/issues/135), ADR-0001 §2.2, §2.4):
+  - `graph::structure` resolves products and their instances (NAUOs) into a DAG in
+    O(products + instances), without OCCT: OCCT's roots, children and order, which products are
+    shown, both naming rules, and leaf counts. A cycle refuses it. `leaf_path` and `leaf_of` map
+    leaf numbers to paths without expanding; `occurrences` and `tree` expand lazily under the
+    outline's caps (depth 60, a million nodes) and fail with its errors
+  - `TextRef` is an owned pointer to a string argument, resolved by `Graph::text`, so a
+    `Structure` holds no borrow of the graph
+  - On the local corpus (390 files with Ultimaker 3) the tree, its names and its leaf numbers equal
+    `occt::outline`'s. `structure()` takes 0.04 s on Ultimaker and on the 221 MB stress assembly.
+    Placements in mm come with G3b
 - **The graph core, G2: references, lazy arguments, complex parts and the census** ([#134](https://github.com/vig-os/stepv/issues/134), ADR-0001 §2.1, §2.4):
   - The scan builds the forward CSR: `Graph::refs` lists a node's references across all its parts
     in record order, each resolved per reference as OCCT's reader does when an `#id` is duplicated
