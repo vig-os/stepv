@@ -392,13 +392,15 @@ fn run(args: &Args) -> (u8, Value) {
 
 /// `stepv view`: the window opens at once, on the tree and the run's
 /// progress, while the kernel runs on a thread of its own, and the scene
-/// follows (#85). Closing the window first cancels the run: status
+/// follows (#85). A STEP file's graph is read in-process on another thread
+/// beside it (#138): its tree and box placeholders show first. Closing the window first cancels the run: status
 /// `cancelled`, exit 0, and a `message` (not an `error`) saying so.
 fn run_view(
     args: &Args,
     mut report: Value,
     outline: Option<(PathBuf, header::Info)>,
 ) -> (u8, Value) {
+    let opened = std::time::Instant::now();
     let name = args
         .input
         .file_name()
@@ -432,6 +434,7 @@ fn run_view(
             (a < 3 && (0.0..=1.0).contains(&o)).then_some((a, o, flip))
         }),
         close_loading: std::env::var_os("STEPV_VIEW_CLOSE_LOADING").is_some_and(|v| v == "1"),
+        opened: Some(opened),
         // The kernel's sandbox and unhealed faces come with the scene.
         ..view::Options::default()
     };
@@ -444,7 +447,18 @@ fn run_view(
         let _ = tx.send(view::Load::Tree(a.tree, a.leaves));
     }
     let cancel = AtomicBool::new(false);
+    let step = report["info"]["format"] == "step";
     let (ran, loaded) = std::thread::scope(|s| {
+        if step {
+            let tx = tx.clone();
+            s.spawn(move || {
+                // A graph bug is a refusal, never the viewer's end: the
+                // kernel's tree and scene come as they did before it.
+                let graph = std::panic::catch_unwind(|| view::placeholder::load(&args.input))
+                    .unwrap_or_else(|_| Err("graph refused: internal error".into()));
+                let _ = tx.send(view::Load::Graph(graph.map(Box::new)));
+            });
+        }
         let (report, cancel) = (&mut report, &cancel);
         // The loader owns the sender: however it ends, a panic included,
         // the channel closes with it, and the window never waits on it.

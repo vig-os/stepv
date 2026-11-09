@@ -62,42 +62,6 @@ fn kernel(input: &Path) -> Result<(Scene, Topology), String> {
     Ok((scene, t))
 }
 
-/// Per product-level leaf (the graph's numbering), the mesh parts under it:
-/// a leaf whose shape the kernel splits shows them as unnamed children.
-fn parts_per_leaf(tree: &[topology::Node]) -> Vec<Vec<usize>> {
-    fn unnamed(n: &topology::Node) -> bool {
-        match n {
-            topology::Node::Part { name, .. } => name.is_empty(),
-            topology::Node::Assembly { name, children } => {
-                name.is_empty() && children.iter().all(unnamed)
-            }
-        }
-    }
-    fn all(n: &topology::Node, out: &mut Vec<usize>) {
-        match n {
-            topology::Node::Part { part, .. } => out.push(*part),
-            topology::Node::Assembly { children, .. } => children.iter().for_each(|c| all(c, out)),
-        }
-    }
-    fn go(n: &topology::Node, out: &mut Vec<Vec<usize>>) {
-        match n {
-            topology::Node::Assembly { children, .. }
-                if children.is_empty() || !children.iter().all(unnamed) =>
-            {
-                children.iter().for_each(|c| go(c, out));
-            }
-            _ => {
-                let mut v = Vec::new();
-                all(n, &mut v);
-                out.push(v);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    tree.iter().for_each(|n| go(n, &mut out));
-    out
-}
-
 /// What the files gave.
 #[derive(Default)]
 struct Tally {
@@ -212,7 +176,7 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
     }
     let file = input.file_name().unwrap().to_string_lossy().into_owned();
     let (mut seen, mut products) = (HashSet::new(), HashSet::new());
-    for (leaf, parts) in parts_per_leaf(&topo.tree).iter().enumerate() {
+    for (leaf, parts) in topology::parts_per_leaf(&topo.tree).iter().enumerate() {
         let path = s
             .leaf_path(leaf as u64)
             .ok_or(format!("no path to leaf {leaf}"))?;

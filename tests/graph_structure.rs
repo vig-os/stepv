@@ -74,46 +74,10 @@ fn scratch(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// Per product-level leaf (`topology::products`' numbering), the mesh parts
-/// under it.
-fn parts_per_leaf(tree: &[topology::Node]) -> Vec<Vec<usize>> {
-    fn unnamed(n: &topology::Node) -> bool {
-        match n {
-            topology::Node::Part { name, .. } => name.is_empty(),
-            topology::Node::Assembly { name, children } => {
-                name.is_empty() && children.iter().all(unnamed)
-            }
-        }
-    }
-    fn all(n: &topology::Node, out: &mut Vec<usize>) {
-        match n {
-            topology::Node::Part { part, .. } => out.push(*part),
-            topology::Node::Assembly { children, .. } => children.iter().for_each(|c| all(c, out)),
-        }
-    }
-    fn go(n: &topology::Node, out: &mut Vec<Vec<usize>>) {
-        match n {
-            topology::Node::Assembly { children, .. }
-                if children.is_empty() || !children.iter().all(unnamed) =>
-            {
-                children.iter().for_each(|c| go(c, out));
-            }
-            _ => {
-                let mut v = Vec::new();
-                all(n, &mut v);
-                out.push(v);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    tree.iter().for_each(|n| go(n, &mut out));
-    out
-}
-
 /// Each leaf's placement against the kernel's parts under it, within 1e-9
 /// relative: how many were compared, and the mismatches, described.
 fn placement_mismatches(s: &Structure, topo: &Topology) -> (usize, Vec<String>) {
-    let per_leaf = parts_per_leaf(&topo.tree);
+    let per_leaf = topology::parts_per_leaf(&topo.tree);
     let (mut compared, mut bad) = (0, Vec::new());
     for o in s.occurrences(Expand::default()) {
         let o = o.unwrap();
@@ -439,7 +403,7 @@ fn a_mapped_item_places_as_the_kernel_does() {
     // the circle's one vertex, its start (5 in, 0, 0) in the mapped
     // representation, is where `t` puts it.
     let topo = topology_of(&path);
-    let part = &topo.parts[parts_per_leaf(&topo.tree)[0][0]];
+    let part = &topo.parts[topology::parts_per_leaf(&topo.tree)[0][0]];
     let want = apply(&t, [127., 0., 0.]);
     let got: Vec<[f64; 3]> = topo.prototypes[part.prototype]
         .vertices

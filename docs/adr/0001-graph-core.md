@@ -480,6 +480,19 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     adds nothing to its parents' boxes.
   - `node(n)` answers for every face, shell, solid, edge, vertex and representation the walk reached,
     in that representation's mm, else `Unknown("not reached")`.
+- **G6a's realised viewer stage** (#138):
+  - `view::Load::Graph(Result<Box<GraphView>, String>)` comes from `view::placeholder::load`, run
+    in-process on a thread of its own beside the kernel's run, for STEP input only. A refusal
+    (`GraphError`, `StructureError`, or the expansion's cap) is the status line's
+    `graph refused: <reason>`, and the window is otherwise as before.
+  - The graph's tree shows until the kernel's arrives. `Placeholders` holds `(leaf, BBox)` per
+    leaf whose `Bounds::leaf` is a box, and counts the rest (`graph: N parts, M without a box`).
+  - On `Done`, `Placeholders::replace` drops each leaf the kernel meshed, joined by
+    `topology::parts_per_leaf` over `--topology`'s tree. Without a topology there is no join, and
+    the scene replaces every box.
+  - `gpu::Renderer::plan` lists a frame's draws as `(Pipeline, Geometry)` pairs, and `render_with`
+    encodes exactly those. Placeholder boxes have their own pipelines (unlit, alpha-blended, no
+    depth write): a translucent fill and a line-list wireframe.
 - **Complex entities** (`#1=(A(…) B(…) C(…));`, one record holding several entity types) are first-class:
   - Their type is the interned sorted list of part names. `TypeName::Complex` holds them as
     `&[Box<str>]`, the interned table's own slice, rather than the sketch's `&[&str]` (#152). `is_a`/`of_type` match any part, so
@@ -734,6 +747,10 @@ cap (the 2026-10-12 incident).
     about 26%).
   - The target stands. The fix (rayon over products in the Rust path, or a file-order pass) is
     #177.
+- **First placeholder frame, measured (G6a, #138):**
+  - Ultimaker: **0.85–0.89 s** from `stepv view`'s start to the first frame of placeholders, over
+    3 runs, release build, warm cache. All 523 leaves have a box. Target: ≤ 1.5 s.
+  - The stress assembly: 0.63 s (120 boxes).
 - **The fast path's targets are measured, not promised.** M4b and M5 report, on Ultimaker, against the
   OCCT-only path (42 s today):
   - time to the first Rust-meshed product;

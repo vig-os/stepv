@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G6a: the viewer opens on the graph** ([#138](https://github.com/vig-os/stepv/issues/138), ADR-0001 §2.7, §2.8):
+  - `stepv view` reads a STEP file's graph in-process, beside the kernel's run, and shows its
+    tree and a box placeholder per leaf before the mesh arrives. On Ultimaker 3 the first frame of
+    placeholders comes 0.85–0.89 s after opening, against §2.7's 1.5 s
+  - Placeholders are translucent wireframe boxes with pipelines of their own, never the shaded
+    pipeline's. A leaf without a box gets no placeholder and is counted in the status line
+    ("graph: 1,234 parts, 12 without a box")
+  - When the scene arrives, each leaf's mesh replaces its box, joined by leaf number through the
+    kernel's topology tree (`topology::parts_per_leaf`)
+  - A file the graph refuses opens as before, with `graph refused: <reason>` in the status line
 - **The graph core, G4: conservative boxes** ([#136](https://github.com/vig-os/stepv/issues/136), ADR-0001 §2.3):
   - `graph::bounds` gives a box in mm for every face, shell, solid, product, leaf and the model,
     without OCCT. Boxes follow §2.3's per-type table, the 8-corner rule for every change of frame,

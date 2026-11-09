@@ -18,6 +18,7 @@ pub mod gpu;
 pub mod inspect;
 #[cfg(feature = "viewer")]
 pub mod measuring;
+pub mod placeholder;
 #[cfg(feature = "viewer")]
 pub mod software;
 #[cfg(feature = "viewer")]
@@ -129,6 +130,9 @@ pub struct Options {
     /// server to replay. `None`: the run did not say (an older kernel), and
     /// the server goes by its own clock.
     pub unhealed: Option<Vec<u64>>,
+    /// When the user opened the file: the screenshot hook reports the first
+    /// placeholder frame's time from it (ADR-0001 §2.7, #138).
+    pub opened: Option<std::time::Instant>,
 }
 
 /// What a `--frames` run measured: wall-clock intervals between frames,
@@ -291,6 +295,10 @@ fn has_session() -> bool {
 /// window as the run goes (#85).
 #[derive(Debug)]
 pub enum Load {
+    /// The graph's tree and placeholders (#138), read in-process beside the
+    /// kernel's run, or why the graph refused the file. The kernel's tree
+    /// and scene replace it as they come, as before.
+    Graph(Result<Box<placeholder::GraphView>, String>),
     /// The assembly tree and its leaf count: a cached outline artifact's
     /// before the kernel starts, then the run's `Event::Tree`.
     Tree(Vec<crate::topology::Node>, usize),

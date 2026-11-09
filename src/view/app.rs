@@ -18,8 +18,11 @@ use eframe::egui_wgpu::{self, wgpu};
 use egui_phosphor::regular as icon;
 
 use super::controls::{Controls, Input};
-use super::gpu::{GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View};
+use super::gpu::{
+    GpuPlaceholders, GpuScene, IdTarget, Layout, PendingPick, Pick, Renderer, Section, Target, View,
+};
 use super::measuring::{Due, ExactCut, Measurement, Measurer, Taken, sticky};
+use super::placeholder::Placeholders;
 use super::tree::Tree;
 use super::widgets::{self, Tone};
 use super::{Backend, FrameStats, Load, Loaded, Options, Ran, ThemePref, theme};
@@ -176,6 +179,10 @@ struct Viewer {
     exact: ExactCut,
     /// STEPV_VIEW_SECTION: report the caps on stderr when they land.
     report_section: bool,
+    /// The graph's placeholders whose leaves the scene has no mesh for
+    /// (#138), and the graph's status line.
+    placeholders: Option<GpuPlaceholders>,
+    graph: Option<String>,
 }
 
 impl Viewer {
@@ -271,6 +278,8 @@ impl Viewer {
             reveal: false,
             exact: ExactCut::default(),
             report_section: opts.section.is_some(),
+            placeholders: None,
+            graph: None,
             cut: opts.section.is_some(),
             cap: true,
             section: Section {
@@ -931,36 +940,17 @@ impl Viewer {
         if !needs_render(&mut self.last, key) {
             return;
         }
-        let [w, h] = key.size;
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|t| (t.width, t.height) != (w, h))
-        {
-            let target = Target::new(&rs.device, w, h);
-            let mut r = rs.renderer.write();
-            match self.texture {
-                Some(id) => r.update_egui_texture_from_wgpu_texture(
-                    &rs.device,
-                    &target.view,
-                    wgpu::FilterMode::Linear,
-                    id,
-                ),
-                None => {
-                    self.texture = Some(r.register_native_texture(
-                        &rs.device,
-                        &target.view,
-                        wgpu::FilterMode::Linear,
-                    ));
-                }
-            }
-            self.target = Some(target);
-        }
+        sized(rs, &mut self.target, &mut self.texture, key.size);
         let view = self.view(&key, key.dark);
-        let target = self.target.as_ref().expect("created above");
-        let frame = self
-            .renderer
-            .render(&rs.device, &rs.queue, &self.scene, target, &view);
+        let target = self.target.as_ref().expect("sized above");
+        let frame = self.renderer.render_with(
+            &rs.device,
+            &rs.queue,
+            Some(&self.scene),
+            self.placeholders.as_ref(),
+            target,
+            &view,
+        );
         rs.queue.submit([frame]);
     }
 
@@ -1109,6 +1099,34 @@ impl Viewer {
 /// How long the screenshot hook waits for the window's own capture.
 const SCREENSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Makes `target` `size` (physical pixels) and registers it with egui as
+/// `texture`, when it is not already.
+fn sized(
+    rs: &egui_wgpu::RenderState,
+    target: &mut Option<Target>,
+    texture: &mut Option<egui::TextureId>,
+    size: [u32; 2],
+) {
+    if target.as_ref().is_some_and(|t| [t.width, t.height] == size) {
+        return;
+    }
+    let t = Target::new(&rs.device, size[0], size[1]);
+    let mut r = rs.renderer.write();
+    match *texture {
+        Some(id) => r.update_egui_texture_from_wgpu_texture(
+            &rs.device,
+            &t.view,
+            wgpu::FilterMode::Linear,
+            id,
+        ),
+        None => {
+            *texture =
+                Some(r.register_native_texture(&rs.device, &t.view, wgpu::FilterMode::Linear));
+        }
+    }
+    *target = Some(t);
+}
+
 fn save(image: &egui::ColorImage, path: &Path) -> Result<(), String> {
     let img = crate::render::Image {
         width: image.size[0] as u32,
@@ -1147,6 +1165,9 @@ impl eframe::App for Viewer {
             .exact_size(theme::space(10))
             .show(root, |ui| self.toolbar(ui, short));
         egui::Panel::bottom("status").frame(bar(t.panel)).show(root, |ui| {
+            if let Some(graph) = &self.graph {
+                ui.label(egui::RichText::new(graph).size(theme::size::SMALL));
+            }
             ui.label(
                 egui::RichText::new(
                     "Drag to orbit · right- or shift-drag to pan · scroll to zoom · click to inspect · M measure · Esc clears · R reset · F front · T top · C construction · E edges",
@@ -1227,6 +1248,13 @@ struct Window {
     opts: Options,
     error: Arc<Mutex<Option<String>>>,
     measured: Arc<Mutex<Option<FrameStats>>>,
+    /// The graph's placeholders (#138), until the scene replaces them, and
+    /// its status line: its counts, or why it refused the file.
+    placeholders: Option<(Placeholders, GpuPlaceholders)>,
+    graph: Option<String>,
+    /// The loading viewport's target and texture, and the size last drawn.
+    canvas: (Option<Target>, Option<egui::TextureId>),
+    drawn: Option<[u32; 2]>,
 }
 
 impl Window {
@@ -1237,6 +1265,19 @@ impl Window {
                 return;
             };
             match l {
+                Load::Graph(Ok(g)) => {
+                    self.graph = Some(g.placeholders.status());
+                    // The kernel's tree replaces it when it comes.
+                    if tree.is_none() {
+                        *tree = Some(Box::new(Tree::from_nodes(&g.tree, g.leaves)));
+                    }
+                    if let Some(r) = &self.renderer {
+                        let boxes = g.placeholders.boxes.iter().map(|b| b.1);
+                        let gpu = GpuPlaceholders::upload(&rs.device, r, boxes);
+                        self.placeholders = Some((g.placeholders, gpu));
+                    }
+                }
+                Load::Graph(Err(why)) => self.graph = Some(why),
                 Load::Tree(nodes, leaves) => {
                     *tree = Some(Box::new(Tree::from_nodes(&nodes, leaves)));
                 }
@@ -1252,12 +1293,26 @@ impl Window {
                     let Some(r) = self.renderer.take() else {
                         return;
                     };
+                    // Each leaf's mesh replaces its box, joined by leaf
+                    // number; without the kernel's tree there is no join,
+                    // and the scene replaces them all.
+                    let placeholders = self.placeholders.take().and_then(|(mut p, _)| {
+                        p.replace(&crate::topology::parts_per_leaf(&l.topology.as_ref()?.tree));
+                        let boxes = p.boxes.iter().map(|b| b.1);
+                        (!p.boxes.is_empty())
+                            .then(|| GpuPlaceholders::upload(&rs.device, &r, boxes))
+                    });
                     match Viewer::new(rs, r, &l.scene, l.topology.take(), &opts, e, m) {
-                        Ok(v) => {
+                        Ok(mut v) => {
+                            v.placeholders = placeholders;
+                            v.graph = self.graph.take();
                             ctx.send_viewport_cmd(ViewportCommand::Title(l.title));
                             if self.opts.screenshot.is_some() {
                                 let n = l.scene.parts.len();
                                 eprintln!("stepv: STEPV_VIEW_SCREENSHOT scene: {n} parts");
+                                if let Some(graph) = &v.graph {
+                                    eprintln!("stepv: STEPV_VIEW_SCREENSHOT status: {graph}");
+                                }
                             }
                             // The scene is on the GPU; its CPU copy goes (#28).
                             self.stage = Stage::Ready(Box::new(v));
@@ -1274,8 +1329,9 @@ impl Window {
         }
     }
 
-    /// The loading stage: the tree, and the run's progress.
-    fn loading(&mut self, root: &mut egui::Ui) {
+    /// The loading stage: the tree, the graph's placeholders, and the run's
+    /// progress.
+    fn loading(&mut self, root: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let Stage::Loading {
             tree,
             progress,
@@ -1324,37 +1380,96 @@ impl Window {
             }
             None => ("Reading the file…".to_owned(), 0.0),
         };
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(t.viewport))
+        let boxes = self
+            .placeholders
+            .as_ref()
+            .filter(|_| failed.is_none())
+            .zip(self.renderer.as_ref())
+            .zip(rs);
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::NONE
+                    .fill(t.panel)
+                    .inner_margin(egui::Margin::same(theme::space(1) as i8))
+                    .stroke(egui::Stroke::new(1.0, t.border)),
+            )
             .show(root, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() / 2.0 - theme::space(6));
-                    ui.label(egui::RichText::new(&self.opts.file).strong());
-                    match failed {
-                        // What happened and why, and what is left of it.
-                        Some(why) => {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} The model could not be shown",
-                                    icon::WARNING
-                                ))
-                                .color(t.destructive),
-                            );
-                            ui.label(egui::RichText::new(why.as_str()).color(t.destructive));
-                            ui.label(
-                                egui::RichText::new(
-                                    "The tree is the file's outline; there is no geometry.",
-                                )
-                                .color(t.muted_foreground),
-                            );
-                        }
-                        None => {
-                            ui.label(&what);
-                            ui.add(egui::ProgressBar::new(fraction).desired_width(320.0));
-                        }
+                ui.horizontal(|ui| {
+                    if let Some(graph) = &self.graph {
+                        ui.label(egui::RichText::new(graph).size(theme::size::SMALL));
+                    }
+                    if boxes.is_some() {
+                        ui.label(egui::RichText::new(&what).size(theme::size::SMALL));
+                        ui.add(egui::ProgressBar::new(fraction).desired_width(160.0));
                     }
                 });
             });
+        if let Some((((_, gpu), r), rs)) = boxes {
+            // The boxes alone, framed by themselves, until the scene comes.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(t.viewport))
+                .show(root, |ui| {
+                    let rect = ui.available_rect_before_wrap();
+                    let max = rs.device.limits().max_texture_dimension_2d;
+                    let size = physical(rect.size(), ui.ctx().pixels_per_point()).map(|v| v.min(max));
+                    let (target, texture) = &mut self.canvas;
+                    if self.drawn != Some(size) {
+                        sized(rs, target, texture, size);
+                        let view = View {
+                            clear: t.viewport.to_normalized_gamma_f32().map(f64::from),
+                            ..View::new(Camera::default())
+                        };
+                        let target = target.as_ref().expect("sized above");
+                        let frame =
+                            r.render_with(&rs.device, &rs.queue, None, Some(gpu), target, &view);
+                        rs.queue.submit([frame]);
+                        if self.drawn.is_none() && self.opts.screenshot.is_some() {
+                            let ms = self.opts.opened.map_or(0, |o| o.elapsed().as_millis());
+                            eprintln!(
+                                "stepv: STEPV_VIEW_SCREENSHOT placeholders: {} boxes, {ms} ms from open",
+                                self.placeholders.as_ref().map_or(0, |p| p.0.boxes.len())
+                            );
+                        }
+                        self.drawn = Some(size);
+                    }
+                    if let Some(id) = *texture {
+                        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                        ui.painter().image(id, rect, uv, egui::Color32::WHITE);
+                    }
+                });
+        } else {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(t.viewport))
+                .show(root, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() / 2.0 - theme::space(6));
+                        ui.label(egui::RichText::new(&self.opts.file).strong());
+                        match failed {
+                            // What happened and why, and what is left of it.
+                            Some(why) => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} The model could not be shown",
+                                        icon::WARNING
+                                    ))
+                                    .color(t.destructive),
+                                );
+                                ui.label(egui::RichText::new(why.as_str()).color(t.destructive));
+                                ui.label(
+                                    egui::RichText::new(
+                                        "The tree is the file's outline; there is no geometry.",
+                                    )
+                                    .color(t.muted_foreground),
+                                );
+                            }
+                            None => {
+                                ui.label(&what);
+                                ui.add(egui::ProgressBar::new(fraction).desired_width(320.0));
+                            }
+                        }
+                    });
+                });
+        }
         if let Some(why) = failed {
             // Nothing more is coming: an idle window, until the user closes
             // it. The screenshot hook reports this frame and closes.
@@ -1385,12 +1500,13 @@ impl Window {
 
 impl eframe::App for Window {
     fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if let Some(rs) = frame.wgpu_render_state().cloned() {
-            self.take(&root.ctx().clone(), &rs);
+        let rs = frame.wgpu_render_state().cloned();
+        if let Some(rs) = &rs {
+            self.take(&root.ctx().clone(), rs);
         }
         match &mut self.stage {
             Stage::Ready(v) => eframe::App::ui(v.as_mut(), root, frame),
-            Stage::Loading { .. } => self.loading(root),
+            Stage::Loading { .. } => self.loading(root, rs.as_ref()),
         }
     }
 
@@ -1513,6 +1629,10 @@ pub(super) fn run(
                 opts: opts2,
                 error: error2,
                 measured: measured2,
+                placeholders: None,
+                graph: None,
+                canvas: (None, None),
+                drawn: None,
             }) as Box<dyn eframe::App>)
         }),
     );
