@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The graph core, G2: references, lazy arguments, complex parts and the census** ([#134](https://github.com/vig-os/stepv/issues/134), ADR-0001 §2.1, §2.4):
+  - The scan builds the forward CSR: `Graph::refs` lists a node's references across all its parts
+    in record order, each resolved per reference as OCCT's reader does when an `#id` is duplicated
+    ([#149](https://github.com/vig-os/stepv/issues/149)). Dangling references are listed by
+    `Graph::dangling` and don't refuse the file
+  - `Graph::args` and `Graph::args_of(n, part)` parse one entity's (or one complex part's)
+    parameters on demand into borrowed `Value`s, with file text as `Untrusted` and nesting capped
+    at 64; `is_a`, `parts` and `of_type` match complex parts; `referrers` builds the reverse CSR on
+    first use; `census` counts by type and by part
+  - `examples/graph_census.rs` measures the Rust fast path's reach on the corpus, written to
+    `docs/adr/0001-census.md`: 87.0% of faces analytic, 100.0% of edges MVP curves, 70.9% of shape
+    representations in scope, and 39 B of heap per entity with `referrers`
 - **The graph core, G1: a Part 21 scanner and entity table** ([#133](https://github.com/vig-os/stepv/issues/133), ADR-0001 §2.1):
   - `stepv::graph::Graph` maps a STEP file and scans it once, without OCCT, into one row per
     entity instance: its `#id`, its interned type (a complex instance as its sorted part types)

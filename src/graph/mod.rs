@@ -1,19 +1,25 @@
 //! stepv's own graph of a STEP file (ADR-0001, `docs/adr/0001-graph-core.md`).
 //!
-//! This is the entity layer, slice G1: the file is memory-mapped and scanned
-//! once (`lex.rs`) into an entity table, one row per entity instance in file
-//! order, holding its `#id`, its interned type and the byte span of its
-//! parameters, plus an id → node lookup. No OCCT is involved. References in
-//! CSR form and lazily parsed arguments come with G2.
+//! This is the entity layer: the file is memory-mapped and scanned once
+//! (`lex.rs`) into an entity table, one row per entity instance in file
+//! order, holding its `#id`, its interned type, the byte span of its
+//! parameters and its references in CSR form, plus an id → node lookup.
+//! Arguments are parsed only when something reads them ([`Graph::args`]);
+//! reverse references are built on first use ([`Graph::referrers`]). No OCCT
+//! is involved.
 //!
 //! A file the scanner can't read is refused with a [`GraphError`] naming the
 //! byte offset; the callers fall back to the OCCT-only path (ADR §3).
 
+mod args;
 mod lex;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::Path;
+use std::sync::OnceLock;
+
+pub use args::{ArgError, Args, MAX_DEPTH, Untrusted, Value};
 
 use crate::header;
 
@@ -126,6 +132,34 @@ enum Type {
     Complex(Box<[Box<str>]>),
 }
 
+impl Type {
+    fn has(&self, part: &str) -> bool {
+        match self {
+            Self::Simple(s) => &**s == part,
+            Self::Complex(p) => p.binary_search_by(|p| (**p).cmp(part)).is_ok(),
+        }
+    }
+}
+
+/// What a file holds, by type ([`Graph::census`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Entity instances, duplicates included.
+    pub entities: u64,
+    /// How many of them are complex.
+    pub complex: u64,
+    /// Records that repeat an id ([`Graph::duplicate_ids`]).
+    pub duplicate_ids: u64,
+    /// References to undefined ids ([`Graph::dangling`]).
+    pub dangling: u64,
+    /// Instances per type; a complex type is written `(A B C)`, its parts
+    /// sorted.
+    pub types: BTreeMap<String, u64>,
+    /// Instances per part type: a simple entity counts once for its type, a
+    /// complex one once for each of its parts.
+    pub parts: BTreeMap<String, u64>,
+}
+
 /// The `#id` → node lookup (ADR §2.1): dense when the ids are dense enough,
 /// else sorted and bisected. It holds each id's first definition.
 enum Lookup {
@@ -144,6 +178,14 @@ pub struct Graph {
     type_of: Vec<u16>,
     arg_start: Vec<u64>,
     arg_len: Vec<u32>,
+    /// The forward CSR: node `n`'s references are
+    /// `refs[ref_start[n]..ref_start[n + 1]]`.
+    ref_start: Vec<u32>,
+    refs: Vec<Node>,
+    /// `(referrer, id)` of every reference to an id no record defines.
+    dangling: Vec<(Node, StepId)>,
+    /// The reverse CSR, built on first use.
+    referrers: OnceLock<(Vec<u32>, Vec<Node>)>,
     lookup: Lookup,
     /// `(id, node)` of every definition of an id defined more than once,
     /// sorted.
@@ -183,6 +225,8 @@ impl Graph {
         let mut interned: HashMap<Vec<u8>, u16> = HashMap::new();
         let (mut ids, mut type_of, mut arg_start, mut arg_len) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // Until every id is known, `refs` holds the raw ids as `Node`s.
+        let (mut ref_start, mut refs) = (vec![0u32], Vec::new());
         let mut sorted: Vec<&[u8]> = Vec::new();
         let mut key = Vec::new();
         let sections = lex::scan(&bytes, |r| {
@@ -226,6 +270,10 @@ impl Graph {
             arg_len.push(
                 u32::try_from(r.args.1 - r.args.0).map_err(|_| too_large("a record over 4 GiB"))?,
             );
+            refs.extend(r.refs.iter().map(|&id| Node(id)));
+            ref_start.push(
+                u32::try_from(refs.len()).map_err(|_| too_large("over 4294967295 references"))?,
+            );
             Ok(())
         })?;
         let (lookup, duplicates, duplicate_ids) = index(&ids);
@@ -243,6 +291,10 @@ impl Graph {
             type_of,
             arg_start,
             arg_len,
+            ref_start,
+            refs: Vec::new(),
+            dangling: Vec::new(),
+            referrers: OnceLock::new(),
             lookup,
             duplicates,
             duplicate_ids,
@@ -252,6 +304,7 @@ impl Graph {
         g.type_of.shrink_to_fit();
         g.arg_start.shrink_to_fit();
         g.arg_len.shrink_to_fit();
+        g.resolve_refs(refs);
         let products = g.of_simple_type("PRODUCT");
         g.header.product_count = Some(products as u64);
         Ok(g)
@@ -346,11 +399,170 @@ impl Graph {
     }
 
     /// The raw bytes of `n`'s parameters, parentheses included; for a
-    /// complex instance, every part. G2 parses them.
-    #[cfg_attr(not(test), expect(dead_code, reason = "G2's lazy arguments read it"))]
+    /// complex instance, every part.
     pub(crate) fn arg_bytes(&self, n: Node) -> &[u8] {
         let s = self.arg_start[n.index()] as usize;
         &self.bytes[s..s + self.arg_len[n.index()] as usize]
+    }
+
+    /// Resolves the scan's raw reference ids into the forward CSR, per
+    /// reference with [`Graph::resolve`] (#149). A dangling reference is left
+    /// out of `refs` and listed in `dangling`.
+    fn resolve_refs(&mut self, mut refs: Vec<Node>) {
+        let (mut w, mut s) = (0, 0);
+        for n in 0..self.len() {
+            let e = self.ref_start[n + 1] as usize;
+            self.ref_start[n] = w as u32;
+            for k in s..e {
+                let id = StepId(refs[k].0);
+                match self.resolve(id, Node(n as u32)) {
+                    Some(to) => {
+                        refs[w] = to;
+                        w += 1;
+                    }
+                    None => self.dangling.push((Node(n as u32), id)),
+                }
+            }
+            s = e;
+        }
+        *self
+            .ref_start
+            .last_mut()
+            .expect("one start per node, plus one") = w as u32;
+        refs.truncate(w);
+        refs.shrink_to_fit();
+        self.ref_start.shrink_to_fit();
+        self.refs = refs;
+    }
+
+    /// The nodes `n` references, across all its parts, in record order. A
+    /// duplicated id resolves per reference ([`Graph::resolve`]); a dangling
+    /// one is left out (see [`Graph::dangling`]).
+    #[must_use]
+    pub fn refs(&self, n: Node) -> &[Node] {
+        let i = n.index();
+        &self.refs[self.ref_start[i] as usize..self.ref_start[i + 1] as usize]
+    }
+
+    /// Every reference to an id that no record defines, as `(referrer, id)`,
+    /// in file order. They don't refuse the file; [`Graph::args`] on a
+    /// referrer gives [`ArgError::Dangling`].
+    #[must_use]
+    pub fn dangling(&self) -> &[(Node, StepId)] {
+        &self.dangling
+    }
+
+    /// The nodes that reference `n`, in file order, once per reference. The
+    /// reverse CSR is built on the first call, by a counting sort over the
+    /// forward one, O(references).
+    #[must_use]
+    pub fn referrers(&self, n: Node) -> &[Node] {
+        let (start, from) = self.referrers.get_or_init(|| {
+            let mut start = vec![0u32; self.len() + 1];
+            for r in &self.refs {
+                start[r.index() + 1] += 1;
+            }
+            for i in 1..start.len() {
+                start[i] += start[i - 1];
+            }
+            // `start[t]` is the next free slot of target t; after the fill it
+            // is where t + 1's run begins, so shifting it once restores it.
+            let mut from = vec![Node(0); self.refs.len()];
+            for referrer in self.nodes() {
+                for &t in self.refs(referrer) {
+                    from[start[t.index()] as usize] = referrer;
+                    start[t.index()] += 1;
+                }
+            }
+            start.rotate_right(1);
+            start[0] = 0;
+            (start, from)
+        });
+        &from[start[n.index()] as usize..start[n.index() + 1] as usize]
+    }
+
+    /// Whether `n` is a `part`: its simple type, or one part of its complex
+    /// type.
+    #[must_use]
+    pub fn is_a(&self, n: Node, part: &str) -> bool {
+        self.types[self.type_of[n.index()] as usize].has(part)
+    }
+
+    /// `n`'s part types: its type for a simple entity, the sorted parts of a
+    /// complex one.
+    pub fn parts(&self, n: Node) -> impl Iterator<Item = &str> + '_ {
+        let parts = match &self.types[self.type_of[n.index()] as usize] {
+            Type::Simple(s) => std::slice::from_ref(s),
+            Type::Complex(p) => p,
+        };
+        parts.iter().map(|p| &**p)
+    }
+
+    /// The nodes that are a `name` ([`Graph::is_a`]), complex ones included,
+    /// in file order.
+    pub fn of_type(&self, name: &str) -> impl Iterator<Item = Node> + '_ {
+        let want: Vec<bool> = self.types.iter().map(|t| t.has(name)).collect();
+        self.nodes()
+            .filter(move |n| want[self.type_of[n.index()] as usize])
+    }
+
+    /// A simple entity's parameters, parsed now.
+    ///
+    /// # Errors
+    /// [`ArgError::Complex`] for a complex entity (read its parts with
+    /// [`Graph::args_of`]); otherwise when the span doesn't parse.
+    pub fn args(&self, n: Node) -> Result<Args<'_>, ArgError> {
+        match self.types[self.type_of[n.index()] as usize] {
+            Type::Simple(_) => args::Parser::new(self, n).args(),
+            Type::Complex(_) => Err(ArgError::Complex),
+        }
+    }
+
+    /// The parameters of one part of `n`: in Part 21's internal mapping,
+    /// only the attributes that part's own type declares. For a simple
+    /// entity, its [`Graph::args`] when `part` is its type. `None` when `n`
+    /// has no part `part`.
+    #[must_use]
+    pub fn args_of(&self, n: Node, part: &str) -> Option<Result<Args<'_>, ArgError>> {
+        match &self.types[self.type_of[n.index()] as usize] {
+            Type::Simple(s) => (&**s == part).then(|| self.args(n)),
+            Type::Complex(p) if p.iter().any(|p| &**p == part) => {
+                args::Parser::new(self, n).part(part)
+            }
+            Type::Complex(_) => None,
+        }
+    }
+
+    /// Counts by type and by part.
+    #[must_use]
+    pub fn census(&self) -> Census {
+        let mut per_type = vec![0u64; self.types.len()];
+        for &t in &self.type_of {
+            per_type[t as usize] += 1;
+        }
+        let mut c = Census {
+            entities: self.len() as u64,
+            duplicate_ids: self.duplicate_ids as u64,
+            dangling: self.dangling.len() as u64,
+            ..Census::default()
+        };
+        for (t, &count) in self.types.iter().zip(&per_type).filter(|(_, c)| **c > 0) {
+            let parts = match t {
+                Type::Simple(s) => {
+                    c.types.insert(s.to_string(), count);
+                    std::slice::from_ref(s)
+                }
+                Type::Complex(p) => {
+                    c.complex += count;
+                    c.types.insert(format!("({})", p.join(" ")), count);
+                    p
+                }
+            };
+            for p in parts {
+                *c.parts.entry(p.to_string()).or_default() += count;
+            }
+        }
+        c
     }
 
     fn of_simple_type(&self, name: &str) -> usize {

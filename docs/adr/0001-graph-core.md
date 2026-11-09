@@ -39,7 +39,8 @@ files in the S1 sets, the exporter matrix, the 221 MB stress assembly and Ultima
 
 **What a grep says about the local corpus** (397 non-malformed files: abc-dataset, nist-pmi,
 occt-import-js and stress-assembly; the exporter matrix and Ultimaker aren't fetched on this host).
-This is an entity count, not a face count. The graph's census (G2) replaces it.
+This is an entity count, not a face count. The graph's census (G2) replaces it: see
+[`0001-census.md`](0001-census.md).
 
 | Entity | Count | Note |
 | --- | ---: | --- |
@@ -118,7 +119,8 @@ each):
 - with `referrers`: another 8.5 B, so **39–43 B per entity**, or 129–142 MB.
 
 §2.7 states the targets from these numbers. Dangling references (a `#n` that never appears) don't fail
-the scan: they are listed and counted, and anything that walks into one gets an error.
+the scan: they are left out of `refs`, listed (`Graph::dangling`) and counted, and anything that
+walks into one gets an error (`ArgError::Dangling` from `args`).
 
 **Lazy arguments.** `Graph::args(node)` parses only that entity's span into a borrowed
 `Value<'a>`:
@@ -146,8 +148,13 @@ the scan: they are listed and counted, and anything that walks into one gets an 
   them too, so the two can't disagree.
 - **A duplicate `#id`** doesn't refuse the file: OCCT reads such files, and a graph that refused them
   would show less than today's viewer.
-  - The graph keeps the same definition OCCT's reader keeps. G1 settles which one that is with a
-    two-line fixture checked against `occt::outline`, and records it in a test.
+  - Every record stays in the table, and each reference is resolved **per reference**, as OCCT's
+    reader does (`StepData_StepReaderData::SetEntityNumbers`): to the nearest definition before the
+    referring record, else the nearest after it (#149). "Keep first" and "keep last" each fail one
+    ordering. `Graph::resolve(id, from)` implements the rule, and the forward CSR resolves every
+    reference through it. `Graph::node(id)`, which has no referrer, gives the first definition.
+    G1's test checks the rule against `occt::outline` with `#7` defined twice and its referrer
+    before, between and after the two; G2's test checks the CSR on the same three orderings.
   - The count goes into the census as `duplicate_ids`, with a warning.
 - **Refusal:** an unterminated string or record, a missing `ENDSEC`, or a file that isn't Part 21
   refuses the file with a `GraphError` naming the byte offset.
@@ -437,7 +444,8 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
 ```
 
 - **Complex entities** (`#1=(A(…) B(…) C(…));`, one record holding several entity types) are first-class:
-  - Their type is the interned sorted list of part names. `is_a`/`of_type` match any part, so
+  - Their type is the interned sorted list of part names. `TypeName::Complex` holds them as
+    `&[Box<str>]`, the interned table's own slice, rather than the sketch's `&[&str]` (#152). `is_a`/`of_type` match any part, so
     `of_type("SI_UNIT")` finds a complex unit too.
   - `args_of(n, part)` parses just that part's own arguments. In Part 21's internal mapping each part
     carries only the attributes its own type declares. `args(n)` on a complex entity is an error, never
@@ -647,12 +655,14 @@ or a **reason signature**: stable and coarse, as #115's ledger comment set out. 
 
 **Expected coverage, stated before measuring:**
 - **Faces:** at most 80% (the analytic share of surface entities above).
-- **Products:** lower, by the products that contain any non-analytic face. A guess, to be replaced by
-  G2's census:
-  - 50–70% of products in mechanical assemblies (fasteners, plates, shafts);
-  - far less in the ABC subset, where each file is one freeform part.
-- **The census reports both shares,** per file and in total. If the product share comes out far below
-  the guess, the M slices are re-cut before M1a starts (§6).
+- **Products:** lower, by the products that contain any non-analytic face. The guess before
+  measuring was 50–70% of products in mechanical assemblies and far less in the ABC subset.
+- **Measured by G2's census, [`0001-census.md`](0001-census.md),** which replaces the guess: 87.0%
+  of faces are analytic, and 100.0% of edges are MVP edges. Per shape representation (until G3
+  gives products), 70.9% are in scope: Ultimaker 55.3%, the stress assembly 50.0%, `nist-pmi` 69.0%,
+  ABC 75.3%. The mechanical assemblies land at the guess's low end, not far below it. The census is
+  re-run per product after G3 (#153). If the product share comes out far below the guess, the M slices are
+  re-cut before M1a starts (§6).
 
 **Parallelism:** rayon over products, and over the edges and then the faces within a product. Edges
 first, because faces read the edge polylines. Within a product the dependency is edges → faces →
