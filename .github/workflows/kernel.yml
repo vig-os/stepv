@@ -127,6 +127,15 @@ jobs:
           STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
         run: nix develop --command cargo test --test graph_structure -- --nocapture
 
+      # The graph's boxes against the kernel's (ADR-0001 G4), on the same
+      # corpus: each product's box contains its prototype's --topology bbox,
+      # within the kernel's enlargement. It fails when STEPV_CORPUS names no
+      # file or compares no product.
+      - name: Graph bounds against the kernel (nist-pmi, occt-import-js)
+        env:
+          STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
+        run: nix develop --command cargo test --test graph_bounds -- --nocapture
+
       - name: macOS app (Quick Look extensions) and its headless checks
         if: runner.os == 'macOS'
         # The Quick Look round trip (--quicklook) needs a logged-in session to

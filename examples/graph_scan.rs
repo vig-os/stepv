@@ -9,7 +9,9 @@
 //! scan time, and the heap the table holds beyond the map, in total and per
 //! entity, with the peak during the scan. Then [`stepv::graph::structure`]:
 //! its time (building `referrers` included, since it is their first use),
-//! the heap it adds, and the products, instances and leaves. A refused file
+//! the heap it adds, and the products, instances and leaves; then
+//! [`stepv::graph::bounds`]: its time, structure + boxes (§2.7's row), the
+//! heap it adds, and how many product boxes are known. A refused file
 //! prints its error. Exits 1 when any file was refused.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -83,14 +85,29 @@ fn main() {
                 let before = LIVE.load(Relaxed);
                 let t = Instant::now();
                 match graph::structure(&g) {
-                    Ok(s) => println!(
-                        "{f}: structure {:.3} s, heap +{:.1} MB, {} products, {} instances, {} leaves",
-                        t.elapsed().as_secs_f64(),
-                        (LIVE.load(Relaxed) - before) as f64 / 1e6,
-                        s.products.len(),
-                        s.products.iter().map(|p| p.children.len()).sum::<usize>(),
-                        s.leaves,
-                    ),
+                    Ok(s) => {
+                        let structure = t.elapsed().as_secs_f64();
+                        println!(
+                            "{f}: structure {structure:.3} s, heap +{:.1} MB, {} products, {} instances, {} leaves",
+                            (LIVE.load(Relaxed) - before) as f64 / 1e6,
+                            s.products.len(),
+                            s.products.iter().map(|p| p.children.len()).sum::<usize>(),
+                            s.leaves,
+                        );
+                        let before = LIVE.load(Relaxed);
+                        let t = Instant::now();
+                        let b = graph::bounds(&g, &s);
+                        let boxes = t.elapsed().as_secs_f64();
+                        let known = (0..s.products.len())
+                            .filter(|&p| matches!(b.product(p), graph::Bound::Box(_)))
+                            .count();
+                        println!(
+                            "{f}: boxes {boxes:.3} s (structure + boxes {:.3} s), heap +{:.1} MB, {known}/{} product boxes known",
+                            structure + boxes,
+                            (LIVE.load(Relaxed) - before) as f64 / 1e6,
+                            s.products.len(),
+                        );
+                    }
                     Err(e) => {
                         refused = true;
                         println!("{f}: structure refused: {e}");
