@@ -5,25 +5,28 @@
 //! A product gets a fit when every face of its B-rep is on one of:
 //! - **cylinder:** cylinders, cones and tori of one axis, and planes
 //!   perpendicular to it. The axis is the first non-planar face's. The
-//!   radius is the largest of a cylinder's r, a torus' R + r, and a cone's
-//!   or a plane's farthest edge from the axis; the axial extent is the
-//!   union of the faces' edges' extents and each torus' ±r.
+//!   radius is the largest of a torus' R + r and a cylinder's, a cone's or
+//!   a plane's farthest edge from the axis; the axial extent is the union
+//!   of the faces' edges' extents and each torus' ±r.
 //! - **sphere:** spheres of one centre, the first sphere's, and planes. The
 //!   radius is the largest sphere radius and the farthest plane edge from
 //!   the centre.
 //!
 //! Edges are read as [`Piece`]s, the box's own curve bounds: distance from
 //! a line or a point is convex, and an axial coordinate linear, so over a
-//! plane (in its edges' convex hull) or a cone (ruled, linear in v) they are
-//! extreme on the edges.
+//! plane (in its edges' convex hull) or a cylinder or cone (ruled, linear
+//! in v) they are extreme on the edges, however the face's own axis is
+//! tilted. A cylinder's r about its own axis would not do: tilted by θ, its
+//! cut across the fitted axis reaches r / cos θ.
 //!
 //! **Tolerance.** ε is the farthest any face's own axis (over the fit's
 //! axial extent) or centre lies from the fitted one, plus the context's
 //! length uncertainty (`GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT`, the largest
 //! over the representations read, in mm). The radius grows by ε, and a
 //! cylinder's extent by ε at each end. A fit whose ε passes 10× the
-//! uncertainty isn't used, and neither is a plane spanning more than that
-//! along the axis: it isn't perpendicular. Without an uncertainty measured
+//! uncertainty isn't used, nor one with a face's axis tilted by θ with
+//! sin θ · extent past it, nor a plane spanning more than that along the
+//! axis: it isn't parallel, or perpendicular. Without an uncertainty measured
 //! in the context's length unit, "within the uncertainty" has no meaning,
 //! and the leaf keeps its box. So does any product whose box is `Unknown`,
 //! or that has a face on any other surface.
@@ -362,16 +365,18 @@ impl Walk<'_> {
                 .ok_or(Reason("non-finite radius"))
         };
         let (r, m) = match kind {
-            Kind::Plane | Kind::Cone => (0., 0.),
+            Kind::Plane | Kind::Cylinder | Kind::Cone => (0., 0.),
             Kind::Torus => (len(2)?, len(3)?),
-            Kind::Cylinder | Kind::Sphere => (len(2)?, 0.),
+            Kind::Sphere => (len(2)?, 0.),
         };
         let mut edges = Vec::new();
         for b in self.boundary(&a)?.0 {
             if g.is_a(b, "EDGE_CURVE") {
                 edges.extend(self.edge(b, s)?);
-            } else {
+            } else if g.is_a(b, "VERTEX_POINT") {
                 edges.push(Piece::Point(at(self.topo(b, s, 0))?));
+            } else {
+                return Err(Reason("unsupported loop vertex"));
             }
         }
         let rot = |v: [f64; 3]| sub(apply(t, v), column(t, 3));
@@ -454,6 +459,8 @@ fn cylinder(faces: &[Face], o: [f64; 3], d: [f64; 3], unc: f64) -> Option<Fit> {
             Kind::Sphere => return None,
             Kind::Torus => {
                 let (z, c) = (column(&f.f, 2), dot(sub(column(&f.f, 3), o), d));
+                // Within R + r of its centre, whose height is in the extent,
+                // so the centre is within `off` ≤ ε of the fitted axis.
                 let zd = dot(z, d).abs();
                 let e = (f.r + f.m) * (1. - zd * zd).max(0.).sqrt() + f.m * zd;
                 rho = rho.max(f.r + f.m);
@@ -470,12 +477,12 @@ fn cylinder(faces: &[Face], o: [f64; 3], d: [f64; 3], unc: f64) -> Option<Fit> {
                         let (l, h) = along(p, o, d);
                         (s.0.min(l), s.1.max(h))
                     });
-                if f.kind == Kind::Cylinder {
-                    rho = rho.max(f.r);
-                } else {
-                    let far = f.edges.iter().map(|p| radial(p, o, d));
-                    rho = rho.max(far.fold(0., f64::max));
-                }
+                // Ruled (a cylinder or a cone, linear in v) or planar (in
+                // its edges' hull): the distance from any line is convex,
+                // so its largest over the face is on the edges, whatever
+                // the face's own axis. No tilt term is needed.
+                let far = f.edges.iter().map(|p| radial(p, o, d));
+                rho = rho.max(far.fold(0., f64::max));
                 if f.kind == Kind::Plane && span.1 - span.0 > 10. * unc {
                     return None;
                 }
@@ -485,12 +492,14 @@ fn cylinder(faces: &[Face], o: [f64; 3], d: [f64; 3], unc: f64) -> Option<Fit> {
         (lo, hi) = (lo.min(a), hi.max(b));
     }
     // A face's axis' distance from the fitted one is convex along it, so
-    // over the extent it is largest at the ends.
+    // over the extent it is largest at the ends. Its direction is parallel
+    // when it drifts at most 10× the uncertainty over the extent:
+    // sin θ · (hi − lo) ≤ 10 · unc (and |cos θ| ≥ ½, for an extent near 0).
     let mut off = 0f64;
     for f in faces.iter().filter(|f| f.kind != Kind::Plane) {
         let (of, df) = (column(&f.f, 3), column(&f.f, 2));
         let cos = dot(df, d);
-        if cos.abs() < 0.5 {
+        if cos.abs() < 0.5 || norm(cross(df, d)) * (hi - lo) > 10. * unc {
             return None;
         }
         for t in [lo, hi] {

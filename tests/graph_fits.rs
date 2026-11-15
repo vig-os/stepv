@@ -171,9 +171,14 @@ impl F {
 
     /// An axis placement at `at`, z up, x along x.
     fn ax(&mut self, at: [f64; 3]) -> u32 {
+        self.ax_to(at, [0., 0., 1.], [1., 0., 0.])
+    }
+
+    /// An axis placement at `at` with axis `z` and reference direction `x`.
+    fn ax_to(&mut self, at: [f64; 3], z: [f64; 3], x: [f64; 3]) -> u32 {
         let p = self.pt(at);
-        let z = self.add("DIRECTION('',(0.,0.,1.))");
-        let x = self.add("DIRECTION('',(1.,0.,0.))");
+        let z = self.add(&format!("DIRECTION('',({:?},{:?},{:?}))", z[0], z[1], z[2]));
+        let x = self.add(&format!("DIRECTION('',({:?},{:?},{:?}))", x[0], x[1], x[2]));
         self.add(&format!("AXIS2_PLACEMENT_3D('',#{p},#{z},#{x})"))
     }
 
@@ -327,6 +332,70 @@ fn axes_misaligned_past_ten_times_the_uncertainty_are_rejected() {
     let (leaf, product, bound) = one_leaf(&stack("misaligned.step", 1e-5));
     assert_eq!((leaf, product), (None, None));
     assert!(matches!(bound, Bound::Box(_)), "the box stays: {bound:?}");
+    // Either side of the threshold: ε = 9× the uncertainty is used, 11× not.
+    let (_, nine, _) = one_leaf(&stack("nine.step", 8e-7));
+    assert!(
+        matches!(nine, Some(Fit::Cylinder { radius, .. }) if (radius - (3. + 9e-7)).abs() < 1e-12),
+        "{nine:?}"
+    );
+    let (_, eleven, _) = one_leaf(&stack("eleven.step", 1e-6));
+    assert_eq!(eleven, None);
+}
+
+/// A band of a cylinder of radius 10 whose axis is tilted 10° from the
+/// fitted one, cut by the planes z = ±h beside a z cylinder of radius 1 of
+/// the same height, at an uncertainty of 1e-3: (leaf fit, product fit, the
+/// band's farthest points, its cut ellipse's major vertices).
+fn tilted_band(name: &str, h: f64) -> (Option<Fit>, Option<Fit>, Vec<[f64; 3]>) {
+    let (r, th) = (10f64, 10f64.to_radians());
+    let d = [0., th.sin(), th.cos()];
+    let mut f = F::new();
+    let mut faces = f.shaft([0., 0., -h], 1., h, false);
+    let ax = f.ax_to([0.; 3], d, [1., 0., 0.]);
+    let cyl = f.add(&format!("CYLINDRICAL_SURFACE('',#{ax},{r:?})"));
+    let major = r / th.cos();
+    let (mut bounds, mut far) = (Vec::new(), Vec::new());
+    for (z, sense) in [(-h, true), (h, false)] {
+        let c = [0., z * th.tan(), z];
+        let a = f.ax_to(c, [0., 0., 1.], [0., 1., 0.]);
+        let e = f.add(&format!("ELLIPSE('',#{a},{major:?},{r:?})"));
+        let p = f.pt([0., c[1] + major, z]);
+        let v = f.add(&format!("VERTEX_POINT('',#{p})"));
+        let ec = f.add(&format!("EDGE_CURVE('',#{v},#{v},#{e},.T.)"));
+        let s = if sense { ".T." } else { ".F." };
+        let oe = f.add(&format!("ORIENTED_EDGE('',*,*,#{ec},{s})"));
+        let lp = f.add(&format!("EDGE_LOOP('',(#{oe}))"));
+        bounds.push(f.add(&format!("FACE_BOUND('',#{lp},.T.)")));
+        far.extend([1., -1.].map(|sign| [0., c[1] + sign * major, z]));
+    }
+    faces.push(f.face(&bounds, cyl));
+    let item = f.item(&faces, false);
+    let (leaf, product, _) = one_leaf(&part_file(name, 1e-3, &item, &f.out));
+    (leaf, product, far)
+}
+
+/// Round 2's blocker (PR #195 review): the band at h = 0.01. Its axis
+/// strays only 1.8e-3 over the extent, but its cut reaches r / cos 10° ≈
+/// 10.154 from the fitted axis, so a radius of r + ε (f062231) left 0.15 mm
+/// of it outside. Bounded by its edges, the fit holds it.
+#[test]
+fn a_tilted_cylinder_face_never_sticks_out() {
+    let (leaf, product, far) = tilted_band("tilted-band.step", 0.01);
+    let fit = product.expect("a drift of sin 10° · 0.02 is within 10× 1e-3");
+    for fit in [Some(fit), leaf].into_iter().flatten() {
+        for &q in &far {
+            assert!(fit.outside(q) <= 0., "{q:?} outside {fit:?}");
+        }
+    }
+}
+
+/// §2.8's angle criterion: the same band at h = 0.0403 strays 7.1e-3 from
+/// the fitted axis (ε = 8.1× the uncertainty, within 10×), but its axis
+/// drifts sin 10° · 0.0806 = 1.4e-2 over the extent, past 10×: rejected.
+#[test]
+fn a_tilt_past_ten_times_the_uncertainty_is_rejected() {
+    let (leaf, product, _) = tilted_band("tilted-far.step", 0.0403);
+    assert_eq!((leaf, product), (None, None));
 }
 
 /// §2.8's size test compares what is drawn. A shaft of radius 1 and
