@@ -24,6 +24,7 @@ pub use eframe::egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
 use super::Backend;
+use super::placeholder::Shape;
 use crate::measure::Cap;
 use crate::render::{self, Camera};
 use crate::{FaceStatus, LineKind, Scene};
@@ -1955,9 +1956,10 @@ pub struct GpuScene {
     visibility: Visibility,
 }
 
-/// The graph's placeholder boxes on the GPU (#138): each box's 12
-/// triangles and 12 edges, in model mm, with their own uniforms, so they
-/// draw before any scene exists.
+/// The graph's placeholders on the GPU (#138): each box's 12 triangles and
+/// 12 edges, or each fit's drawn shape ([`crate::graph::Fit::drawn`], G6c),
+/// in model mm, with their own uniforms, so they draw before any scene
+/// exists.
 pub struct GpuPlaceholders {
     fill: wgpu::Buffer,
     wire: wgpu::Buffer,
@@ -1970,15 +1972,26 @@ pub struct GpuPlaceholders {
 }
 
 impl GpuPlaceholders {
-    /// Uploads `boxes`' (min, max) corners.
+    /// Uploads `shapes`: boxes by their (min, max) corners, fits by their
+    /// drawn triangles and wireframe.
     #[must_use]
     pub fn upload(
         device: &wgpu::Device,
         renderer: &Renderer,
-        boxes: impl Iterator<Item = crate::BBox>,
+        shapes: impl Iterator<Item = Shape>,
     ) -> Self {
         let (mut fill, mut wire) = (Vec::<[f32; 3]>::new(), Vec::<[f32; 3]>::new());
-        for b in boxes {
+        let f32s = |p: [f64; 3]| p.map(|x| x as f32);
+        for s in shapes {
+            let b = match s {
+                Shape::Box(b) => b,
+                Shape::Fit(f) => {
+                    let (tris, lines) = f.drawn();
+                    fill.extend(tris.into_iter().map(f32s));
+                    wire.extend(lines.into_iter().map(f32s));
+                    continue;
+                }
+            };
             // Corner k takes axis a's max where bit a of k is set.
             let c: [[f32; 3]; 8] = std::array::from_fn(|k| {
                 std::array::from_fn(|a| (if k >> a & 1 == 1 { b.max[a] } else { b.min[a] }) as f32)
@@ -2471,10 +2484,10 @@ impl Headless {
         self.render_with(Some(scene), None, view, width, height)
     }
 
-    /// Uploads placeholder boxes (#138).
+    /// Uploads placeholders, boxes (#138) and fits (#140).
     #[must_use]
-    pub fn upload_placeholders(&self, boxes: impl Iterator<Item = crate::BBox>) -> GpuPlaceholders {
-        GpuPlaceholders::upload(&self.device, &self.renderer, boxes)
+    pub fn upload_placeholders(&self, shapes: impl Iterator<Item = Shape>) -> GpuPlaceholders {
+        GpuPlaceholders::upload(&self.device, &self.renderer, shapes)
     }
 
     /// Renders `scene` and `placeholders` ([`Renderer::render_with`]) and

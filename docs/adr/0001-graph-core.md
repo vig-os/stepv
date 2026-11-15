@@ -493,6 +493,24 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - `gpu::Renderer::plan` lists a frame's draws as `(Pipeline, Geometry)` pairs, and `render_with`
     encodes exactly those. Placeholder boxes have their own pipelines (unlit, alpha-blended, no
     depth write): a translucent fill and a line-list wireframe.
+- **G6c's realised fits** (#140), in `src/graph/bounds/fit.rs`:
+  - **One curve walker.** The box's curve evaluation now yields *pieces*, points and whole conics
+    (centre, unit axes, semi-axes), and the box is their union. A fit reads the same pieces: the
+    largest of a convex function (distance from an axis or a centre) over a conic is bounded by its
+    centre's value plus the larger semi-axis, and an axial coordinate's range is exact,
+    c·d ± √((a·x·d)² + (b·y·d)²). A cone's radial bound is its edges' farthest distance from the
+    axis (ruled, linear in v), the same as "its largest radius at its edges' axial extent", with no
+    angle unit to read.
+  - **Readings of §2.8 that it doesn't spell out.** The fitted axis (or centre) is the first
+    non-planar face's; ε measures every other face against it. Angles are §2.8's sin θ · extent
+    rule; a sphere fit takes planes of any orientation, as §2.8 says. The uncertainty is the context's
+    `UNCERTAINTY_MEASURE_WITH_UNIT` in its (last) length unit, the largest over the representations
+    read: a context without one leaves the box, since "within the uncertainty" has no measure.
+  - `Fits::leaf` places the product's fit like its box, and keeps it only when its drawn volume
+    (a 32-sided prism, or a 12 × 24 latitude–longitude polyhedron scaled by 1 / cos α) is smaller
+    than the leaf's placed box. `Placeholders::fits` holds the leaves drawn as a fit; `shapes()`
+    hands the GPU each leaf's fit or box, both drawn by the placeholder pipelines. The status line
+    reads "graph: N parts, M shown as placeholders", boxes and fits together.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The
@@ -825,8 +843,11 @@ box, so it's a tighter claim of the same kind, never a guess at the shape.
   tori, and planes perpendicular to that axis. The axis is taken from the surfaces' own axis
   placements, collinear within the context's uncertainty.
   - The radius is the largest conservative radial bound of any face about that axis:
-    - a cylinder's r;
-    - a cone face's largest radius at its edges' axial extent;
+    - a cylinder or cone face's farthest edge from the fitted axis. Both are ruled (linear in v),
+      and the distance from a line is convex, so over the face it is largest on its edges, however
+      the face's own axis is tilted. (A cylinder's own r is *not* a bound: tilted by θ, its cut
+      across the fitted axis reaches r / cos θ, which ε doesn't cover; PR #195, round 2.) On a
+      coaxial face this is the cylinder's r, and the cone's largest radius at its edges' extent;
     - a torus' R + r;
     - a plane's largest distance from its edges to the axis. The distance is convex along a line and
       is the circle's radius on a coaxial circle, so the edges bound it.
@@ -840,7 +861,12 @@ box, so it's a tighter claim of the same kind, never a guess at the shape.
     the fitted one, plus the context's uncertainty;
   - the radius grows by ε, and a cylinder's axial extent by ε at each end;
   - a fit whose ε exceeds the context's uncertainty by more than 10× isn't used: the axes don't really
-    agree.
+    agree;
+  - "collinear" also bounds the angle: a face's axis tilted by θ from the fitted one is used only
+    when sin θ · (the fit's axial extent) ≤ 10× the uncertainty, its drift over the extent, and a
+    plane only when its edges span at most 10× the uncertainty along the axis. A torus stays
+    conservative under any accepted tilt: its points lie within R + r of its centre, whose distance
+    from the fitted axis is at most ε, since the centre's height is inside the extent.
 - **Otherwise,** or when any bound is `Unknown`, the leaf keeps its box.
 - **The size test compares what is drawn.** A fit replaces the box only when its *drawn* volume is
   smaller than the box's. That's the circumscribed shape below, after inflation: a prism of
