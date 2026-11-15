@@ -493,6 +493,25 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - `gpu::Renderer::plan` lists a frame's draws as `(Pipeline, Geometry)` pairs, and `render_with`
     encodes exactly those. Placeholder boxes have their own pipelines (unlit, alpha-blended, no
     depth write): a translucent fill and a line-list wireframe.
+- **G6c's realised fits** (#140), in `src/graph/bounds/fit.rs`:
+  - **One curve walker.** The box's curve evaluation now yields *pieces*, points and whole conics
+    (centre, unit axes, semi-axes), and the box is their union. A fit reads the same pieces: the
+    largest of a convex function (distance from an axis or a centre) over a conic is bounded by its
+    centre's value plus the larger semi-axis, and an axial coordinate's range is exact,
+    c·d ± √((a·x·d)² + (b·y·d)²). A cone's radial bound is its edges' farthest distance from the
+    axis (ruled, linear in v), the same as "its largest radius at its edges' axial extent", with no
+    angle unit to read.
+  - **Readings of §2.8 that it doesn't spell out.** The fitted axis (or centre) is the first
+    non-planar face's; ε measures every other face against it. A plane counts as perpendicular when
+    its edges span at most 10× the uncertainty along the axis, the axes' own bar; a sphere fit takes
+    planes of any orientation, as §2.8 says. The uncertainty is the context's
+    `UNCERTAINTY_MEASURE_WITH_UNIT` in its (last) length unit, the largest over the representations
+    read: a context without one leaves the box, since "within the uncertainty" has no measure.
+  - `Fits::leaf` places the product's fit like its box, and keeps it only when its drawn volume
+    (a 32-sided prism, or a 12 × 24 latitude–longitude polyhedron scaled by 1 / cos α) is smaller
+    than the leaf's placed box. `Placeholders::fits` holds the leaves drawn as a fit; `shapes()`
+    hands the GPU each leaf's fit or box, both drawn by the placeholder pipelines. The status line
+    reads "graph: N parts, M shown as placeholders", boxes and fits together.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The

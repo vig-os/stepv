@@ -485,7 +485,10 @@ fn bracket_graph() -> placeholder::GraphView {
     assert_eq!(g.leaves, 3);
     let leaves: Vec<u64> = g.placeholders.boxes.iter().map(|b| b.0).collect();
     assert_eq!(leaves, [0, 1, 2]);
-    assert_eq!(g.placeholders.status(), "graph: 3 parts");
+    assert_eq!(
+        g.placeholders.status(),
+        "graph: 3 parts, 3 shown as placeholders"
+    );
     g
 }
 
@@ -497,7 +500,7 @@ fn the_first_frame_has_placeholders_before_done() {
         return;
     };
     let graph = bracket_graph();
-    let ph = g.upload_placeholders(graph.placeholders.boxes.iter().map(|b| b.1));
+    let ph = g.upload_placeholders(graph.placeholders.shapes());
     let view = View::new(Camera::default());
     // No scene yet: the window's loading stage.
     assert_eq!(
@@ -539,7 +542,7 @@ fn no_placeholder_is_drawn_with_the_shaded_pipeline() {
     let mut delivered = stepv::topology::parts_per_leaf(&topo.tree);
     delivered[2].clear();
     p.replace(&delivered);
-    let ph = g.upload_placeholders(p.boxes.iter().map(|b| b.1));
+    let ph = g.upload_placeholders(p.shapes());
     let gs = g.upload(&scene);
     let view = View::new(Camera::for_scene(&scene));
     let plan = Renderer::plan(Some(&gs), Some(&ph), &view);
@@ -564,6 +567,73 @@ fn no_placeholder_is_drawn_with_the_shaded_pipeline() {
     // And the frame encodes as planned: the GPU accepts every draw.
     let img = g.render_with(Some(&gs), Some(&ph), &view, 256, 192);
     assert!(img.rgba.chunks_exact(4).any(|p| p[3] == 255));
+}
+
+/// #140's acceptance: the bracket's pins are drawn as their fitted
+/// cylinders and its plate as its box; a fit, like a box, goes through the
+/// placeholder pipelines alone, never the shaded one, with or without the
+/// scene.
+#[test]
+fn fits_are_drawn_as_placeholders_never_shaded() {
+    let p = bracket_graph().placeholders;
+    let fitted: Vec<u64> = p.fits.keys().copied().collect();
+    assert_eq!(
+        fitted,
+        [1, 2],
+        "the pins are fitted, the plate keeps its box"
+    );
+    let shapes: Vec<_> = p.shapes().collect();
+    assert!(
+        matches!(shapes[0], placeholder::Shape::Box(_)),
+        "{shapes:?}"
+    );
+    assert!(
+        shapes[1..]
+            .iter()
+            .all(|s| matches!(s, placeholder::Shape::Fit(_))),
+        "{shapes:?}"
+    );
+    let Some(g) = require_gpu(Headless::new()) else {
+        return;
+    };
+    // The pins alone: every placeholder triangle is a fit's.
+    let fits_only = placeholder::Placeholders {
+        boxes: p.boxes[1..].to_vec(),
+        ..p.clone()
+    };
+    let ph = g.upload_placeholders(fits_only.shapes());
+    let scene = load("assembly.step");
+    let gs = g.upload(&scene);
+    let view = View::new(Camera::for_scene(&scene));
+    for with_scene in [None, Some(&gs)] {
+        let plan = Renderer::plan(with_scene, Some(&ph), &view);
+        let on: Vec<Pipeline> = plan
+            .iter()
+            .filter(|d| d.geometry == Geometry::Placeholders)
+            .map(|d| d.pipeline)
+            .collect();
+        assert_eq!(
+            on,
+            [Pipeline::PlaceholderFill, Pipeline::PlaceholderWire],
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .all(|d| d.pipeline != Pipeline::Shaded || d.geometry == Geometry::Scene),
+            "{plan:?}"
+        );
+    }
+    let img = g.render_with(None, Some(&ph), &View::new(Camera::default()), 256, 192);
+    let alpha: Vec<u8> = img.rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let drawn = alpha.iter().filter(|&&a| a > 0).count();
+    assert!(drawn > 256 * 192 / 50, "the fits cover {drawn} pixels");
+    // The fill is translucent; on two thin pins the wireframe is a large
+    // share of the pixels, so a tenth, not half, as for the boxes above.
+    let see_through = alpha.iter().filter(|&&a| a > 0 && a < 128).count();
+    assert!(
+        see_through > drawn / 10,
+        "{see_through} of {drawn} translucent"
+    );
 }
 
 /// #138: each placeholder is replaced by its own leaf's mesh, joined by

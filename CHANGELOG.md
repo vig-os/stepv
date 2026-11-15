@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     position on stderr; `env` and `halt` are refused
   - Nothing bounds a filter's work yet (#187): deep recursion aborts the process (SIGABRT), and
     collecting a walk over a file's reference cycle never ends
+- **The graph core, G6c: primitive fits** ([#140](https://github.com/vig-os/stepv/issues/140), ADR-0001 §2.8):
+  - A leaf whose faces are all on one axis (coaxial cylinders, cones and tori, and perpendicular
+    planes) or one centre (spheres and planes) is drawn as a fitted cylinder or sphere instead of
+    its box, when that drawn shape is smaller than the box. Like the box, the fit contains the
+    leaf's exact geometry: it is inflated by the context's uncertainty and the axes' disagreement,
+    and refused when they disagree by more than 10× the uncertainty
+  - Fits are drawn circumscribed (a prism, a polyhedron), translucent with a wireframe, through the
+    placeholder pipelines. The status line counts boxes and fits together ("graph: 3 parts, 3
+    shown as placeholders")
 - **The graph core, G6b: meshes replace placeholders** ([#139](https://github.com/vig-os/stepv/issues/139), ADR-0001 §3):
   - No placeholder outlives the scene. Each leaf's mesh replaces its box; a leaf the kernel has no
     geometry for loses its box too, and the status line counts it ("graph: 3 parts, 1 without

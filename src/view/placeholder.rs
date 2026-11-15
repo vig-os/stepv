@@ -2,9 +2,11 @@
 //! and a box placeholder per leaf, read in-process while the kernel runs, so
 //! the window shows the assembly's layout long before the mesh arrives.
 //!
-//! A placeholder is the leaf's conservative box ([`crate::graph::Bounds::leaf`]):
-//! it contains the leaf's exact geometry. A leaf whose box is `Unknown` has
-//! no placeholder and is counted instead. When the kernel's scene arrives,
+//! A placeholder is the leaf's conservative box ([`crate::graph::Bounds::leaf`]),
+//! or its fitted cylinder or sphere when that is smaller
+//! ([`crate::graph::Fits::leaf`], ADR §2.8, G6c #140): either contains the
+//! leaf's exact geometry, and both draw through the placeholder pipelines.
+//! A leaf whose box is `Unknown` has no placeholder and is counted instead. When the kernel's scene arrives,
 //! each placeholder is replaced by its leaf's mesh, joined by leaf number
 //! ([`crate::topology::parts_per_leaf`]), and none outlives it (G6b, #139):
 //! a leaf the kernel has no mesh for loses its box and is counted as
@@ -12,10 +14,11 @@
 //! the graph's, the kernel's tree wins: no box maps, and all are dropped
 //! and counted.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::BBox;
-use crate::graph::{self, Bound, Expand, Graph};
+use crate::graph::{self, Bound, Expand, Fit, Graph};
 use crate::topology;
 
 /// The graph's view of a file: what the window shows until the kernel's.
@@ -51,10 +54,17 @@ impl GraphState {
                 None
             }
             Ok(g) => {
-                self.status = Some(g.placeholders.status());
                 if self.scene {
+                    // Nothing is shown as a placeholder after the scene.
+                    let none = Placeholders {
+                        boxes: Vec::new(),
+                        fits: BTreeMap::new(),
+                        ..g.placeholders
+                    };
+                    self.status = Some(none.status());
                     return None;
                 }
+                self.status = Some(g.placeholders.status());
                 self.placeholders = Some(g.placeholders.clone());
                 Some(g)
             }
@@ -77,11 +87,22 @@ impl GraphState {
     }
 }
 
-/// The leaves still drawn as boxes, and what the graph said of the rest.
+/// What a placeholder draws: a box, or a fit (ADR §2.8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shape {
+    Box(BBox),
+    Fit(Fit),
+}
+
+/// The leaves still drawn as placeholders, and what the graph said of the
+/// rest.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Placeholders {
-    /// (leaf number, box in model mm), in leaf order.
+    /// (leaf number, box in model mm), in leaf order: every leaf still
+    /// shown as a placeholder.
     pub boxes: Vec<(u64, BBox)>,
+    /// The leaves of `boxes` drawn as their fit instead, in model mm.
+    pub fits: BTreeMap<u64, Fit>,
     /// The file's leaf count.
     pub leaves: u64,
     /// Leaves without a box (`Bound::Unknown`): no placeholder.
@@ -97,11 +118,13 @@ pub struct Placeholders {
 }
 
 impl Placeholders {
-    /// Every leaf's box from `b`, over the structure's `leaves` leaves.
+    /// Every leaf's box from `b`, and its fit from `f` where that is
+    /// smaller, over the structure's `leaves` leaves.
     #[must_use]
-    pub fn of(b: &graph::Bounds, leaves: u64) -> Self {
+    pub fn of(b: &graph::Bounds, f: &graph::Fits, leaves: u64) -> Self {
         let mut p = Self {
             boxes: Vec::new(),
+            fits: BTreeMap::new(),
             leaves,
             unknown: 0,
             without_geometry: 0,
@@ -110,7 +133,10 @@ impl Placeholders {
         };
         for leaf in 0..leaves {
             match b.leaf(leaf) {
-                Bound::Box(bb) => p.boxes.push((leaf, bb)),
+                Bound::Box(bb) => {
+                    p.boxes.push((leaf, bb));
+                    p.fits.extend(f.leaf(b, leaf).map(|f| (leaf, f)));
+                }
                 Bound::Unknown(_) => p.unknown += 1,
             }
         }
@@ -131,14 +157,17 @@ impl Placeholders {
             self.kernel_leaves = Some(kernel);
             self.unmapped += self.boxes.len() as u64;
             self.boxes.clear();
+            self.fits.clear();
             return;
         }
-        self.boxes.retain(|(leaf, _)| {
-            usize::try_from(*leaf)
+        let pending = |leaf: u64| {
+            usize::try_from(leaf)
                 .ok()
                 .and_then(|l| delivered.get(l))
                 .is_none_or(Vec::is_empty)
-        });
+        };
+        self.boxes.retain(|(leaf, _)| pending(*leaf));
+        self.fits.retain(|leaf, _| pending(*leaf));
     }
 
     /// The kernel is done: the boxes still left are of leaves it has no
@@ -147,14 +176,30 @@ impl Placeholders {
     pub fn done(&mut self) {
         self.without_geometry += self.boxes.len() as u64;
         self.boxes.clear();
+        self.fits.clear();
     }
 
-    /// The status line: "graph: 1,234 parts, 12 without a box", then what
+    /// What each leaf still shown draws, in leaf order: its fit, else its
+    /// box.
+    pub fn shapes(&self) -> impl Iterator<Item = Shape> + '_ {
+        self.boxes.iter().map(|(leaf, b)| {
+            self.fits
+                .get(leaf)
+                .map_or(Shape::Box(*b), |f| Shape::Fit(*f))
+        })
+    }
+
+    /// The status line: "graph: 1,234 parts, 1,222 shown as placeholders,
+    /// 12 without a box" (boxes and fits counted together), then what
     /// the scene dropped: ", 3 without geometry", or on a tree mismatch
     /// "; the kernel's tree has 1,240 parts: 1,222 placeholders dropped".
     #[must_use]
     pub fn status(&self) -> String {
         let mut s = format!("graph: {} parts", thousands(self.leaves));
+        if !self.boxes.is_empty() {
+            let n = thousands(self.boxes.len() as u64);
+            s += &format!(", {n} shown as placeholders");
+        }
         if self.unknown > 0 {
             s += &format!(", {} without a box", thousands(self.unknown));
         }
@@ -211,11 +256,12 @@ pub fn load(path: &Path) -> Result<GraphView, String> {
     let s = graph::structure(&g).map_err(|e| refused(&e))?;
     let tree = s.tree(&g, Expand::default()).map_err(|e| refused(&e))?;
     let b = graph::bounds(&g, &s);
+    let f = graph::fits(&g, &b);
     Ok(GraphView {
         tree,
         // The expansion passed its cap of a million nodes: this fits.
         leaves: s.leaves as usize,
-        placeholders: Placeholders::of(&b, s.leaves),
+        placeholders: Placeholders::of(&b, &f, s.leaves),
     })
 }
 
@@ -297,7 +343,10 @@ mod tests {
         // The graph first: its boxes show, then the meshes replace them.
         let mut s = GraphState::default();
         assert!(s.graph(view()).is_some());
-        assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));
+        assert_eq!(
+            s.status.as_deref(),
+            Some("graph: 2 parts, 2 shown as placeholders")
+        );
         s.scene(Some(&tree));
         assert!(s.placeholders.is_none());
         assert_eq!(s.status.as_deref(), Some("graph: 2 parts"));

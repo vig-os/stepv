@@ -77,19 +77,25 @@ impl Bounds {
     /// by the instances along [`Structure::leaf_path`].
     #[must_use]
     pub fn leaf(&self, leaf: u64) -> Bound {
+        match self.leaf_placement(leaf) {
+            Ok((p, t)) => self.products[p].placed(&t).bound(),
+            Err(r) => Bound::Unknown(r),
+        }
+    }
+
+    /// Leaf `leaf`'s product, and the transform from its coordinates to the
+    /// model's: the instances along [`Structure::leaf_path`] composed.
+    fn leaf_placement(&self, leaf: u64) -> Result<(usize, [f64; 12]), Reason> {
         let s = &self.structure;
-        let Some(path) = s.leaf_path(leaf) else {
-            return Bound::Unknown(Reason("no such leaf"));
-        };
+        let path = s.leaf_path(leaf).ok_or(Reason("no such leaf"))?;
         let mut t = IDENTITY;
         for w in path.0.windows(2) {
             match s.products[w[0].0].children[w[1].1].placement {
                 Placement::Placed(p) => t = compose_raw(t, p),
-                Placement::Unplaced(r) => return Bound::Unknown(r),
+                Placement::Unplaced(r) => return Err(r),
             }
         }
-        let (p, _) = *path.0.last().expect("a path has a level");
-        self.products[p].placed(&t).bound()
+        Ok((path.0.last().expect("a path has a level").0, t))
     }
 
     /// The box of a face, shell, solid, edge, vertex, surface, curve or
@@ -105,12 +111,7 @@ impl Bounds {
 /// Computes every box in one pass, in O(entities + instances).
 #[must_use]
 pub fn bounds(g: &Graph, s: &Structure) -> Bounds {
-    let mut w = Walk {
-        g,
-        memo: HashMap::new(),
-        reps: HashMap::new(),
-        open: Vec::new(),
-    };
+    let mut w = Walk::new(g);
     let mut products = vec![Acc::Empty; s.products.len()];
     match post_order(&s.products) {
         Ok(order) => {
@@ -232,6 +233,53 @@ fn column(t: &[f64; 12], c: usize) -> [f64; 3] {
     [t[c], t[4 + c], t[8 + c]]
 }
 
+/// What holds a curve: points, and whole conics. The largest value of any
+/// convex function on the curve (a coordinate, a distance from an axis or
+/// a point) is at most its largest on these, which the box and the fits
+/// (§2.8) both use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Piece {
+    Point([f64; 3]),
+    /// The conic `c + a·cos t·x + b·sin t·y`, with x and y unit and
+    /// orthogonal, and a, b ≥ 0.
+    Conic {
+        c: [f64; 3],
+        x: [f64; 3],
+        y: [f64; 3],
+        a: f64,
+        b: f64,
+    },
+}
+
+impl Piece {
+    /// Its box: a conic's per world axis i is c_i ± √((a·x_i)² + (b·y_i)²).
+    fn bbox(self) -> Acc {
+        match self {
+            Self::Point(p) => Acc::point(p),
+            Self::Conic { c, x, y, a, b } => Acc::around(
+                c,
+                [0, 1, 2].map(|i| ((a * x[i]).powi(2) + (b * y[i]).powi(2)).sqrt()),
+            ),
+        }
+    }
+}
+
+/// The box of `pieces`, or why there is none.
+fn boxed(pieces: Result<Vec<Piece>, Reason>) -> Acc {
+    pieces.map_or_else(Acc::Unknown, |v| {
+        v.into_iter().fold(Acc::Empty, |a, p| a.union(p.bbox()))
+    })
+}
+
+/// A point's box as the point itself.
+fn at(a: Acc) -> Result<[f64; 3], Reason> {
+    match a {
+        Acc::Box(b) => Ok(b.min),
+        Acc::Unknown(r) => Err(r),
+        Acc::Empty => Err(Reason("not a finite 3-D point")),
+    }
+}
+
 /// A finite real.
 fn num(v: Option<&Value<'_>>) -> Option<f64> {
     v.and_then(real).filter(|x| x.is_finite())
@@ -320,7 +368,16 @@ struct Walk<'g> {
     open: Vec<Node>,
 }
 
-impl Walk<'_> {
+impl<'g> Walk<'g> {
+    fn new(g: &'g Graph) -> Self {
+        Walk {
+            g,
+            memo: HashMap::new(),
+            reps: HashMap::new(),
+            open: Vec::new(),
+        }
+    }
+
     fn any(&self, n: Node, types: &[&str]) -> bool {
         types.iter().any(|t| self.g.is_a(n, t))
     }
@@ -357,8 +414,14 @@ impl Walk<'_> {
     /// The representations `rep` is related to without a transformation,
     /// as OCCT's transfer adds them (`TransferRelatedSRR`): AP203 hybrids.
     fn related(&mut self, rep: Node) -> Acc {
+        self.related_reps(rep)
+            .into_iter()
+            .fold(Acc::Empty, |a, o| a.union(self.rep(o)))
+    }
+
+    fn related_reps(&self, rep: Node) -> Vec<Node> {
         let g = self.g;
-        let mut acc = Acc::Empty;
+        let mut out = Vec::new();
         for &r in g.referrers(rep) {
             let simple = |t| g.type_name(r) == TypeName::Simple(t);
             if !simple("SHAPE_REPRESENTATION_RELATIONSHIP")
@@ -372,23 +435,15 @@ impl Walk<'_> {
             } else {
                 refers(&a, 2)
             };
-            if let Some(o) = other.filter(|&o| o != rep) {
-                acc = acc.union(self.rep(o));
-            }
+            out.extend(other.filter(|&o| o != rep));
         }
-        acc
+        out
     }
 
     fn item(&mut self, item: Node, rep: Node, s: f64) -> Acc {
         let g = self.g;
         if g.is_a(item, "MAPPED_ITEM") {
-            let map = fields(g, item, "MAPPED_ITEM")
-                .ok()
-                .and_then(|a| refers(&a, 1));
-            let mapped = map
-                .and_then(|m| fields(g, m, "REPRESENTATION_MAP").ok())
-                .and_then(|a| refers(&a, 1));
-            let Some(mapped) = mapped else {
+            let Some(mapped) = mapped_rep(g, item) else {
                 return why("malformed mapped item");
             };
             return match (self.rep(mapped), mapped_placement(g, item, rep)) {
@@ -421,8 +476,8 @@ impl Walk<'_> {
             .fold(Acc::Empty, |a, e| a.union(self.surface(e, s, 0)))
     }
 
-    /// `f`'s box for `n`, memoised: a surface or curve shared by several
-    /// faces or edges is boxed once.
+    /// `f`'s box for `n`, memoised: a surface shared by several faces is
+    /// boxed once.
     fn shared(&mut self, n: Node, s: f64, f: impl FnOnce(&mut Self) -> Acc) -> Acc {
         if let Some(&(at, a)) = self.memo.get(&n)
             && at == s
@@ -446,10 +501,7 @@ impl Walk<'_> {
         } else if self.any(n, &["ADVANCED_FACE", "FACE_SURFACE"]) {
             self.face(n, s, depth)
         } else if self.g.is_a(n, "EDGE_CURVE") {
-            match self.g.args(n) {
-                Ok(a) => self.curve(refers(&a, 3), s, Some((refers(&a, 1), refers(&a, 2))), 0),
-                Err(_) => why("malformed edge"),
-            }
+            boxed(self.edge(n, s))
         } else if self.g.is_a(n, "VERTEX_POINT") {
             self.point(self.g.args(n).ok().and_then(|a| refers(&a, 1)), s)
         } else if self.any(n, &CONTAINERS) {
@@ -494,30 +546,13 @@ impl Walk<'_> {
         if !sphere && !self.any(surf, &ruled) {
             return self.surface(surf, s, depth);
         }
-        let mut bounds = Vec::new();
-        ref_list(a.get(1), &mut bounds);
-        let (mut acc, mut edges) = (Acc::Empty, false);
-        for b in bounds {
-            let lp = fields(g, b, "FACE_BOUND").ok().and_then(|a| refers(&a, 1));
-            match lp {
-                Some(lp) if g.is_a(lp, "EDGE_LOOP") => {
-                    for &oe in g.refs(lp) {
-                        let e = g.args(oe).ok().and_then(|a| refers(&a, 3));
-                        let Some(e) = e else {
-                            return why("malformed oriented edge");
-                        };
-                        acc = acc.union(self.topo(e, s, depth + 1));
-                        edges = true;
-                    }
-                }
-                Some(lp) if g.is_a(lp, "VERTEX_LOOP") => {
-                    let v = g.refs(lp).first().copied();
-                    acc =
-                        acc.union(v.map_or(why("malformed loop"), |v| self.topo(v, s, depth + 1)));
-                }
-                _ => return why("unsupported loop"),
-            }
-        }
+        let (bounds, edges) = match self.boundary(&a) {
+            Ok(b) => b,
+            Err(r) => return Acc::Unknown(r),
+        };
+        let acc = bounds
+            .into_iter()
+            .fold(Acc::Empty, |acc, b| acc.union(self.topo(b, s, depth + 1)));
         if sphere {
             self.surface(surf, s, depth).union(acc)
         } else if edges {
@@ -527,71 +562,97 @@ impl Walk<'_> {
         }
     }
 
-    /// A curve's box; a line's needs its edge's vertices `ends`.
+    /// A face's loops: the edges and loop vertices that bound it, and
+    /// whether any is an edge.
+    fn boundary(&self, face: &Args<'_>) -> Result<(Vec<Node>, bool), Reason> {
+        let g = self.g;
+        let mut bounds = Vec::new();
+        ref_list(face.get(1), &mut bounds);
+        let (mut out, mut edges) = (Vec::new(), false);
+        for b in bounds {
+            let lp = fields(g, b, "FACE_BOUND").ok().and_then(|a| refers(&a, 1));
+            match lp {
+                Some(lp) if g.is_a(lp, "EDGE_LOOP") => {
+                    for &oe in g.refs(lp) {
+                        let e = g.args(oe).ok().and_then(|a| refers(&a, 3));
+                        out.push(e.ok_or(Reason("malformed oriented edge"))?);
+                        edges = true;
+                    }
+                }
+                Some(lp) if g.is_a(lp, "VERTEX_LOOP") => {
+                    out.push(*g.refs(lp).first().ok_or(Reason("malformed loop"))?);
+                }
+                _ => return Err(Reason("unsupported loop")),
+            }
+        }
+        Ok((out, edges))
+    }
+
+    /// What holds an `EDGE_CURVE`, in mm at scale `s`.
+    fn edge(&mut self, e: Node, s: f64) -> Result<Vec<Piece>, Reason> {
+        let a = self.g.args(e).map_err(|_| Reason("malformed edge"))?;
+        self.curve(refers(&a, 3), s, Some((refers(&a, 1), refers(&a, 2))), 0)
+    }
+
+    /// What holds a curve; a line needs its edge's vertices `ends`.
     fn curve(
         &mut self,
         c: Option<Node>,
         s: f64,
         ends: Option<(Option<Node>, Option<Node>)>,
         depth: usize,
-    ) -> Acc {
+    ) -> Result<Vec<Piece>, Reason> {
         let g = self.g;
-        let Some(c) = c else {
-            return why("malformed edge");
-        };
+        let c = c.ok_or(Reason("malformed edge"))?;
         if depth > MAX_DEPTH {
-            return why("nested too deep");
+            return Err(Reason("nested too deep"));
         }
         if self.any(c, &BSPLINE_CURVES) {
-            return self.shared(c, s, |w| w.poles(c, s, false));
+            return self.poles(c, s, false);
         }
-        let Ok(a) = g.args(c) else {
-            return why("unsupported curve");
-        };
+        let a = g.args(c).map_err(|_| Reason("unsupported curve"))?;
         if self.any(c, &["SURFACE_CURVE", "SEAM_CURVE", "INTERSECTION_CURVE"]) {
             return self.curve(refers(&a, 1), s, ends, depth + 1);
         }
         if g.is_a(c, "LINE") {
-            return match ends {
-                Some((v1, v2)) => {
-                    let v = |v: Option<Node>, w: &mut Self| {
-                        v.map_or(why("malformed edge"), |v| w.topo(v, s, depth + 1))
-                    };
-                    v(v1, self).union(v(v2, self))
-                }
-                None => why("unbounded line"),
+            let (v1, v2) = ends.ok_or(Reason("unbounded line"))?;
+            let mut v = |v: Option<Node>| {
+                at(v.map_or(why("malformed edge"), |v| self.topo(v, s, depth + 1)))
+                    .map(Piece::Point)
             };
+            return Ok(vec![v(v1)?, v(v2)?]);
         }
-        self.shared(c, s, |w| w.conic(c, &a, s))
+        self.conic(c, &a, s).map(|p| vec![p])
     }
 
-    /// A `CIRCLE`'s or an `ELLIPSE`'s whole box.
-    fn conic(&self, c: Node, a: &Args<'_>, s: f64) -> Acc {
+    /// A `CIRCLE` or an `ELLIPSE`, whole.
+    fn conic(&self, c: Node, a: &Args<'_>, s: f64) -> Result<Piece, Reason> {
         let g = self.g;
-        let conic = g.is_a(c, "CIRCLE") || g.is_a(c, "ELLIPSE");
+        let circle = g.is_a(c, "CIRCLE");
+        let conic = circle || g.is_a(c, "ELLIPSE");
         let Some(f) = refers(a, 1)
             .filter(|_| conic)
             .and_then(|p| frame(g, p, s).ok())
         else {
-            return why(if conic {
+            return Err(Reason(if conic {
                 "malformed conic"
             } else {
                 "unsupported curve"
-            });
+            }));
         };
-        let (x, y, z) = (column(&f, 0), column(&f, 1), column(&f, 2));
-        let h = if g.is_a(c, "CIRCLE") {
-            let Some(r) = num(a.get(2)) else {
-                return why("non-finite radius");
-            };
-            z.map(|n| r.abs() * s * (1. - n * n).max(0.).sqrt())
+        let p = num(a.get(2)).ok_or(Reason("non-finite radius"))?;
+        let q = if circle {
+            p
         } else {
-            let (Some(p), Some(q)) = (num(a.get(2)), num(a.get(3))) else {
-                return why("non-finite radius");
-            };
-            [0, 1, 2].map(|i| ((p * s * x[i]).powi(2) + (q * s * y[i]).powi(2)).sqrt())
+            num(a.get(3)).ok_or(Reason("non-finite radius"))?
         };
-        Acc::around(column(&f, 3), h)
+        Ok(Piece::Conic {
+            c: column(&f, 3),
+            x: column(&f, 0),
+            y: column(&f, 1),
+            a: p.abs() * s,
+            b: q.abs() * s,
+        })
     }
 
     /// A surface's own box, without its face's bounds, memoised.
@@ -605,7 +666,7 @@ impl Walk<'_> {
             return why("nested too deep");
         }
         if self.any(sf, &BSPLINE_SURFACES) {
-            return self.poles(sf, s, true);
+            return boxed(self.poles(sf, s, true));
         }
         let Ok(a) = g.args(sf) else {
             return why("unsupported surface");
@@ -644,7 +705,7 @@ impl Walk<'_> {
     /// `SURFACE_OF_REVOLUTION(name, swept curve, AXIS1_PLACEMENT)`.
     fn revolution(&mut self, a: &Args<'_>, s: f64, depth: usize) -> Acc {
         let g = self.g;
-        let Acc::Box(b) = self.curve(refers(a, 1), s, None, depth + 1) else {
+        let Acc::Box(b) = boxed(self.curve(refers(a, 1), s, None, depth + 1)) else {
             return why("unbounded swept curve");
         };
         let axis = refers(a, 2).and_then(|n| fields(g, n, "AXIS1_PLACEMENT").ok());
@@ -696,7 +757,7 @@ impl Walk<'_> {
 
     /// A B-spline's control points' box: their convex hull holds the curve
     /// or surface, a rational one's only when every weight is positive.
-    fn poles(&self, n: Node, s: f64, surface: bool) -> Acc {
+    fn poles(&self, n: Node, s: f64, surface: bool) -> Result<Vec<Piece>, Reason> {
         let g = self.g;
         let simple = matches!(g.type_name(n), TypeName::Simple(_));
         let (part, rational) = if surface {
@@ -712,7 +773,7 @@ impl Walk<'_> {
         } else {
             g.args_of(n, part)
         }) else {
-            return why("malformed B-spline");
+            return Err(Reason("malformed B-spline"));
         };
         let mut points = Vec::new();
         ref_list(a.get(k), &mut points);
@@ -727,19 +788,30 @@ impl Walk<'_> {
             let mut ws = Vec::new();
             weights(w.as_ref(), &mut ws);
             if ws.len() != points.len() {
-                return why("malformed weights");
+                return Err(Reason("malformed weights"));
             }
             if !ws.iter().all(|w| w.is_finite() && *w > 0.) {
-                return why("non-positive weight");
+                return Err(Reason("non-positive weight"));
             }
         }
         if points.is_empty() {
-            return why("malformed B-spline");
+            return Err(Reason("malformed B-spline"));
         }
         points
             .into_iter()
-            .fold(Acc::Empty, |acc, p| acc.union(self.point(Some(p), s)))
+            .map(|p| at(self.point(Some(p), s)).map(Piece::Point))
+            .collect()
     }
+}
+
+/// The representation a `MAPPED_ITEM` maps.
+fn mapped_rep(g: &Graph, item: Node) -> Option<Node> {
+    let map = fields(g, item, "MAPPED_ITEM")
+        .ok()
+        .and_then(|a| refers(&a, 1))?;
+    fields(g, map, "REPRESENTATION_MAP")
+        .ok()
+        .and_then(|a| refers(&a, 1))
 }
 
 /// The weights in a (nested) list; a non-number reads as NaN.
@@ -750,6 +822,9 @@ fn weights(v: Option<&Value<'_>>, out: &mut Vec<f64>) {
         None => {}
     }
 }
+
+mod fit;
+pub use fit::{Fit, Fits, fits};
 
 #[cfg(test)]
 mod tests;

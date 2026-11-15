@@ -1340,8 +1340,8 @@ impl Window {
                     *tree = Some(Box::new(Tree::from_nodes(&g.tree, g.leaves)));
                 }
                 if let Some(r) = &self.renderer {
-                    let boxes = g.placeholders.boxes.iter().map(|b| b.1);
-                    self.placeholders = Some(GpuPlaceholders::upload(&rs.device, r, boxes));
+                    let shapes = g.placeholders.shapes();
+                    self.placeholders = Some(GpuPlaceholders::upload(&rs.device, r, shapes));
                 }
             }
         }
