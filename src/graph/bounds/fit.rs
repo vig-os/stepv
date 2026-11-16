@@ -40,7 +40,7 @@
 
 use super::{
     Bound, Bounds, CONTAINERS, IDENTITY, MAX_DEPTH, Piece, SKIPPED, Walk, apply, at, column,
-    mapped_rep, num, ref_list, wire,
+    mapped_rep, num, ref_list, related_reps, wire,
 };
 use crate::BBox;
 use crate::graph::structure::{compose_raw, default_x, fields, frame, mm_per_unit, real, refers};
@@ -238,7 +238,7 @@ pub fn fits(g: &Graph, b: &Bounds) -> Fits {
         }
         let (mut faces, mut unc) = (Vec::new(), 0f64);
         for &body in &me.bodies {
-            for rep in std::iter::once(body).chain(w.related_reps(body)) {
+            for rep in std::iter::once(body).chain(related_reps(g, body)) {
                 w.faces(rep, IDENTITY, 0, &mut faces, &mut unc).ok()?;
             }
         }

@@ -147,6 +147,16 @@ jobs:
           STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
         run: nix develop --command cargo test --test graph_fits -- --nocapture
 
+      # The graph's colours (ADR-0001 G7) against XCAF's: every leaf's part
+      # colour, and its face colours joined by transfer order where the join
+      # checks out (equal counts, every mesh vertex in the joined face's
+      # graph box), else its set of face colours. 0 mismatches; it fails when
+      # STEPV_CORPUS names no file or compares no coloured leaf.
+      - name: Graph colours against the kernel (nist-pmi, occt-import-js)
+        env:
+          STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
+        run: nix develop --command cargo test --test graph_colors -- --nocapture --test-threads 2
+
       - name: macOS app (Quick Look extensions) and its headless checks
         if: runner.os == 'macOS'
         # The Quick Look round trip (--quicklook) needs a logged-in session to

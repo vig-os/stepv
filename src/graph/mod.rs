@@ -13,6 +13,7 @@
 
 mod args;
 mod bounds;
+mod colors;
 pub mod json;
 mod lex;
 #[cfg(feature = "query")]
@@ -25,6 +26,7 @@ use std::sync::OnceLock;
 
 pub use args::{ArgError, Args, MAX_DEPTH, Untrusted, Value};
 pub use bounds::{Bound, Bounds, Fit, Fits, bounds, fits};
+pub use colors::{Colors, FaceColor, PartColors, colors};
 pub use structure::{
     Expand, ExpandError, Instance, Occurrence, Occurrences, Path, Placement, Product, Reason,
     Structure, StructureError, mapped_placement, structure,
