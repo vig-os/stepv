@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T02:32:46Z
-updated: 2026-11-09T02:32:46Z
+updated: 2026-11-15T20:09:22Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/170
-comments: 0
+comments: 1
 labels: feature, priority:low
 assignees: none
-milestone: none
+milestone: Coverage: Rust meshing
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:29:29.823Z
+synced: 2026-11-16T09:18:52.349Z
 ---
 
 # [Issue 170]: [Per-face routing (v2): mesh analytic faces in Rust, carve hard faces for OCCT, stitch at shared edges](https://github.com/vig-os/stepv/issues/170)
@@ -111,4 +111,21 @@ Each slice is ≤ ~400 product lines.
 **Critical files:** `kernel/stepv-occt-core.cpp`, `kernel/heal.cpp`, `kernel/stepv-occt.cpp`, `src/occt.rs`, `docs/adr/0001-graph-core.md`.
 
 Refs: #115
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 08:09 PM_
+
+**Owner decision (2026-11-15):** the goal is **100% Rust**: every face meshed in Rust, using rayon and SIMD, so the product gets lighter and stops depending on OCCT. OCCT is not a permanent partner for "hard" faces.
+
+How this changes this brief:
+- **Per-face routing is a transition, not the destination.** Its job is to let Rust coverage grow face by face, while OCCT meshes only what Rust can't do *yet*. Every face routed to OCCT is a tracked coverage gap with an issue, not a design choice.
+- **Q1, the V0 ≤ 75% go criterion, no longer applies.** v2 isn't gated on a threshold. V0 still runs, but now as the baseline for measuring progress toward 100%.
+- **Q2:** Rust sweeps (#171 SW1) come before v2, as already ordered.
+- **Q3:** yes. A mixed product shows its Rust faces before OCCT's arrive, and its status says "partial" until it's complete.
+- **Performance is part of the design:** rayon over products and faces, and SIMD in the evaluation hot loops (B-spline basis, surface inversion, the deflection tests), each measured against a scalar baseline.
+
+The exit from OCCT at runtime (transfer, healing, colours, sandboxed kernel) gets its own ADR. See the issue linked below.
 

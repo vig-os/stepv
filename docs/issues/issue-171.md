@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T02:33:23Z
-updated: 2026-11-09T02:33:23Z
+updated: 2026-11-15T20:10:19Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/171
-comments: 0
+comments: 1
 labels: feature, priority:low
 assignees: none
-milestone: none
+milestone: Coverage: Rust meshing
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:29:29.389Z
+synced: 2026-11-16T09:18:51.972Z
 ---
 
 # [Issue 171]: [Swept surfaces in Rust: recognise analytic revolutions/extrusions, then mesh general extrusions, revolutions and offsets](https://github.com/vig-os/stepv/issues/171)
@@ -135,4 +135,17 @@ The agent's scan covered the 51 fixtures that use these surfaces, all in ABC.
 **Critical files:** `docs/adr/0001-graph-core.md`, `docs/adr/0001-census.md`, `src/graph/mod.rs`, `kernel/topology.cpp`, `kernel/heal.cpp`.
 
 Refs: #115, #170
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 08:10 PM_
+
+**Owner answers (2026-11-15):**
+1. **Only SW0 and SW1 land now:** measure, then recognise the analytic revolutions and extrusions, about 2,550 faces. SW3–SW5 wait until #172 or #170 exist.
+2. **A sampled gate for offsets is acceptable,** provided the samples include the face boundary and the points of highest curvature.
+3. **Recognition uses the context's uncertainty,** the same rule as §2.8's fits, not a fixed 1e-9.
+
+Applies to every slice: step by step, gated against OCCT's output as the golden reference, live and as committed golden files (see #194).
 

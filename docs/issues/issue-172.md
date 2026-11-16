@@ -2,18 +2,18 @@
 type: issue
 state: open
 created: 2026-11-09T02:33:59Z
-updated: 2026-11-09T02:33:59Z
+updated: 2026-11-15T20:10:20Z
 author: gerchowl
 author_url: https://github.com/gerchowl
 url: https://github.com/vig-os/stepv/issues/172
-comments: 0
+comments: 1
 labels: feature, priority:low
 assignees: none
-milestone: none
+milestone: Coverage: Rust meshing
 projects: none
 parent: none
 children: none
-synced: 2026-11-09T09:29:28.905Z
+synced: 2026-11-16T09:18:51.611Z
 ---
 
 # [Issue 172]: [B-spline surfaces in Rust: project boundaries from shared edge polylines, bound every triangle within d, route whole products](https://github.com/vig-os/stepv/issues/172)
@@ -161,4 +161,16 @@ The 31 `QUASI_UNIFORM_CURVE` edges come along: M1b's curve code gets the same im
 **Critical files:** `docs/adr/0001-graph-core.md`, `src/graph/mod.rs`, `src/graph/args.rs`, `kernel/heal.cpp`, `kernel/stepv-occt-core.cpp`.
 
 Refs: #115, #170, #171
+
+---
+
+# [Comment #1]() by [gerchowl]()
+
+_Posted on November 15, 2026 at 08:10 PM_
+
+**Owner answers (2026-11-15):**
+1. **This ships after M5,** so the saving in transfer time is measurable from the first slice.
+2. **Per-face budget:** 200k points and 50 ms per face, both configurable. An overrun is logged as `rs-fail:budget`, and the face falls back to OCCT for the transition. M4a's measurements recalibrate both numbers.
+
+Applies to every slice: step by step, gated against OCCT's output as the golden reference, live and as committed golden files (see #194).
 
