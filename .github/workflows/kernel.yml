@@ -147,6 +147,15 @@ jobs:
           STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
         run: nix develop --command cargo test --test graph_fits -- --nocapture
 
+      # The Rust edge polylines (ADR-0001 §2.6, M1a) against OCCT's --edges
+      # polylines, joined by geometry: 0 unmatched, each side within 2·d of
+      # the other. It fails when STEPV_CORPUS names no file or compares no
+      # edge.
+      - name: Edge polylines against the kernel (nist-pmi, occt-import-js)
+        env:
+          STEPV_CORPUS: tests/fixtures/nist-pmi:tests/fixtures/occt-import-js
+        run: nix develop --command cargo test --test mesh_edges -- --nocapture
+
       # The graph's colours (ADR-0001 G7) against XCAF's: every leaf's part
       # colour, and its face colours joined by transfer order where the join
       # checks out (equal counts, every mesh vertex in the joined face's

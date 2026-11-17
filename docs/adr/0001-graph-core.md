@@ -536,6 +536,32 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - Not covered, so a gate failure where XCAF colours them: `SURFACE_STYLE_RENDERING` colours
     (`tests/graph_colors.rs` proves the gate catches it), and instance colours. Multi-file leaves
     are skipped and counted, as their parts are outside the graph (§2.2).
+- **M1a's realised edge polylines** (#142), in `src/mesh/edges.rs`:
+  - `Polylines::build(&g, edges, mm_per_unit, Tolerance::new(Deflection, diagonal))` builds each
+    `EDGE_CURVE` once, into one struct-of-arrays point buffer (x, y, z), for M4a's rayon and SIMD.
+    `get(edge)` gives a `Polyline` or the edge's reason; `oriented(&g, oriented_edge)` walks it in
+    the oriented edge's direction as `(EdgePoint { edge, index }, point)`.
+  - The curve resolution the boxes and fits used moved to `src/graph/curve.rs`, shared by all three:
+    an `EDGE_CURVE`'s and an `ORIENTED_EDGE`'s arguments, the 3-D curve under a `SURFACE_CURVE` or
+    `SEAM_CURVE`, a whole conic, a vertex's point.
+  - **The sweep.** A vertex's parameter is its angle in the conic's frame, `atan2(y/B, x/A)`; the
+    edge runs from its start's to its end's, increasing when `same_sense` and decreasing otherwise,
+    through the seam when it must. An edge whose vertices are one vertex, or give the same parameter,
+    sweeps the whole conic. `n_min` applies to ellipses too.
+  - **Routed, never dropped:** any other curve (`unsupported curve`), a conic with a zero semi-axis
+    (`degenerate conic`), and an edge that would need over 2^20 segments (`too many segments`, a
+    needle ellipse against a fine d), which would otherwise exhaust memory.
+  - **The OCCT join without edge ids (M5's).** `tests/mesh_edges.rs` joins an `EDGE_CURVE` to the
+    kernel's `--edges` polyline of the same product whose ends equal its own within d, the pair
+    within 2·d both ways; what remains (healing splits some closed circles in two) is compared point
+    by point against the other side's whole edge set, within 2·d. 0 unmatched on `tests/data`,
+    nist-pmi and occt-import-js: 18,684 edges joined one to one and 738 polylines point by point; the
+    largest distances are 0.50·d (Rust's points from OCCT's polylines) and 0.998·d (OCCT's from
+    Rust's). Products whose geometry is in other files are skipped and counted.
+  - **Ultimaker (`--release`, one thread):** 96,561 edges, 80,500 polylines and 253,878 points in
+    about 270 ms; the other 16,061 are B-splines (M1b). The graph's model diagonal there is 42,076 mm
+    against OCCT's 2,572 (16×), the case where §2.6 uses the OCCT-equivalent diagonal; at either d,
+    the angle bound sets every count.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The
