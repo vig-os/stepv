@@ -100,17 +100,23 @@ pub(crate) fn conic(g: &Graph, c: Node, s: f64) -> Result<Conic, Reason> {
     if !f.iter().all(|v| v.is_finite()) {
         return Err(Reason("non-finite conic"));
     }
+    // Finite after scaling, as a radius in inches can overflow in mm.
+    let (p, q) = (p.abs() * s, q.abs() * s);
+    if !(p.is_finite() && q.is_finite()) {
+        return Err(Reason("non-finite radius"));
+    }
     let col = |k: usize| [f[k], f[4 + k], f[8 + k]];
     Ok(Conic {
         c: col(3),
         x: col(0),
         y: col(1),
-        a: p.abs() * s,
-        b: q.abs() * s,
+        a: p,
+        b: q,
     })
 }
 
-/// A `CARTESIAN_POINT` with three finite coordinates, at `s` mm per unit.
+/// A `CARTESIAN_POINT` at `s` mm per unit, its three coordinates finite
+/// after scaling (1E307 inches overflow).
 pub(crate) fn point(g: &Graph, p: Node, s: f64) -> Result<[f64; 3], Reason> {
     fields(g, p, "CARTESIAN_POINT")
         .ok()
@@ -121,6 +127,7 @@ pub(crate) fn point(g: &Graph, p: Node, s: f64) -> Result<[f64; 3], Reason> {
             }
             _ => None,
         })
+        .filter(|c| c.iter().all(|x| x.is_finite()))
         .ok_or(Reason("not a finite 3-D point"))
 }
 

@@ -448,3 +448,97 @@ fn a_non_finite_step_count_is_refused_before_n_min() {
     assert_eq!(segments(2.5, false), Ok(3));
     assert_eq!(segments(0.5, true), Ok(3));
 }
+
+#[test]
+fn a_closed_edge_whose_vertex_overflows_from_the_centre_is_routed() {
+    // The centre and the vertex are finite, `p0 − c` is −inf, and its
+    // parameter `atan2(−inf·0, …)` NaN; the closed sweep is still 2π.
+    let g = file(
+        "#1=CARTESIAN_POINT('',(1E308,0.,0.));\n#2=AXIS2_PLACEMENT_3D('',#1,$,$);\n\
+         #3=CIRCLE('',#2,1.);\n#4=CARTESIAN_POINT('',(-1E308,0.,0.));\n#5=VERTEX_POINT('',#4);\n\
+         #6=EDGE_CURVE('',#5,#5,#3,.T.);\n",
+    );
+    let tol = Tolerance::from_mm(1e-3, 0.3).unwrap();
+    let e = node(&g, 6);
+    let p = Polylines::build(&g, [e], 1., tol);
+    assert_eq!(
+        p.get(e).unwrap().unwrap_err(),
+        Reason("non-finite parameter")
+    );
+    assert_eq!(p.point_count(), 0);
+}
+
+#[test]
+fn a_line_that_overflows_in_mm_is_routed() {
+    // 1E307 inches is 2.54E308 mm: past f64::MAX.
+    let g = file(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));\n#2=VERTEX_POINT('',#1);\n\
+         #3=CARTESIAN_POINT('',(1E307,0.,0.));\n#4=VERTEX_POINT('',#3);\n\
+         #5=DIRECTION('',(1.,0.,0.));\n#6=VECTOR('',#5,1.);\n#7=LINE('',#1,#6);\n\
+         #8=EDGE_CURVE('',#2,#4,#7,.T.);\n",
+    );
+    let tol = Tolerance::from_mm(1e-3, 0.3).unwrap();
+    let e = node(&g, 8);
+    let p = Polylines::build(&g, [e], 25.4, tol);
+    assert_eq!(
+        p.get(e).unwrap().unwrap_err(),
+        Reason("not a finite 3-D point")
+    );
+    assert_eq!(p.point_count(), 0);
+}
+
+#[test]
+fn no_non_finite_coordinate_escapes_at_the_overflow_corners() {
+    // Huge coordinates, radii and unit scales, on lines, circles and
+    // ellipses: every edge is either routed or entirely finite.
+    let mut built = 0;
+    for big in [1., 1e300, 1e307, 1e308, f64::MAX] {
+        for s in [1., 25.4, 1000.] {
+            for (cx, vx, r) in [
+                (big, -big, 1.),
+                (big, big + 1., 1.),
+                (0., big, big),
+                (-big, 0., big),
+                (big / 2., -big / 2., big),
+            ] {
+                let g = file(&format!(
+                    "#1=CARTESIAN_POINT('',({cx:?},0.,0.));\n#2=AXIS2_PLACEMENT_3D('',#1,$,$);\n\
+                     #3=CIRCLE('',#2,{r:?});\n#4=ELLIPSE('',#2,{r:?},{:?});\n\
+                     #5=CARTESIAN_POINT('',({vx:?},0.,0.));\n#6=VERTEX_POINT('',#5);\n\
+                     #7=CARTESIAN_POINT('',({cx:?},{r:?},0.));\n#8=VERTEX_POINT('',#7);\n\
+                     #9=DIRECTION('',(1.,0.,0.));\n#10=VECTOR('',#9,1.);\n#11=LINE('',#1,#10);\n\
+                     #12=EDGE_CURVE('',#6,#8,#11,.T.);\n#13=EDGE_CURVE('',#6,#6,#3,.T.);\n\
+                     #14=EDGE_CURVE('',#6,#8,#3,.F.);\n#15=EDGE_CURVE('',#6,#6,#4,.T.);\n\
+                     #16=EDGE_CURVE('',#6,#8,#4,.T.);\n",
+                    r / 2.
+                ));
+                let tol = Tolerance::from_mm(1e-3, 0.3).unwrap();
+                let edges = (12..=16).map(|id| node(&g, id));
+                let p = Polylines::build(&g, edges, s, tol);
+                for (e, line) in p.edges() {
+                    built += 1;
+                    assert!(
+                        line.points().flatten().all(f64::is_finite),
+                        "big {big:e} s {s} #{}: {:?}",
+                        g.id(e).0,
+                        line.points().take(3).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+    assert!(built > 0, "the finite cases build");
+    // Finite centre, radius and vertices, (c, ∓r): the arc through t = 0
+    // reaches c + r, past f64::MAX. Only the exit check sees it.
+    let g = file(
+        "#1=CARTESIAN_POINT('',(1.5E308,0.,0.));\n#2=AXIS2_PLACEMENT_3D('',#1,$,$);\n\
+         #3=CIRCLE('',#2,1E308);\n#4=CARTESIAN_POINT('',(1.5E308,-1E308,0.));\n\
+         #5=VERTEX_POINT('',#4);\n#6=CARTESIAN_POINT('',(1.5E308,1E308,0.));\n\
+         #7=VERTEX_POINT('',#6);\n#8=EDGE_CURVE('',#5,#7,#3,.T.);\n",
+    );
+    let e = node(&g, 8);
+    // d at the radius' scale, so the count stays small.
+    let p = Polylines::build(&g, [e], 1., Tolerance::from_mm(1e306, 0.3).unwrap());
+    assert_eq!(p.get(e).unwrap().unwrap_err(), Reason("non-finite point"));
+    assert_eq!(p.point_count(), 0, "nothing of it is left behind");
+}

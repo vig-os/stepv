@@ -33,6 +33,9 @@
 //! at 0/2π when it must. An edge whose two vertices are one vertex, or give
 //! the same parameter, sweeps the whole conic.
 //!
+//! **Finite or routed:** every coordinate [`Polylines::build`] emits is
+//! finite; an edge that would emit a non-finite one is routed instead.
+//!
 //! The points are a struct of arrays, so a later slice can add rayon and
 //! SIMD (M4a) without changing the layout.
 
@@ -99,7 +102,7 @@ pub struct EdgePoint {
 }
 
 /// One edge's polyline, in mm: at least two points, from its start vertex
-/// to its end vertex.
+/// to its end vertex, every coordinate finite.
 #[derive(Debug, Clone, Copy)]
 pub struct Polyline<'a> {
     x: &'a [f64],
@@ -156,6 +159,11 @@ impl Polylines {
     /// The polylines of `edges` (`EDGE_CURVE`s; each built once, however
     /// often it is listed), in mm at `mm_per_unit` (their representation's
     /// unit, as [`crate::graph::Product::mm_per_unit`]).
+    ///
+    /// **Postcondition:** every coordinate of every polyline is finite. An
+    /// edge that would emit a non-finite one (an overflow in mm, a
+    /// parameter that is NaN) gets no polyline and a `non-finite …` or
+    /// `not a finite 3-D point` reason instead.
     #[must_use]
     pub fn build(
         g: &Graph,
@@ -174,6 +182,17 @@ impl Polylines {
             } else {
                 Err(Reason("non-finite unit"))
             };
+            // The postcondition: every emitted coordinate is finite. A sum
+            // of finite terms can still overflow (a centre near f64::MAX
+            // plus a radius), so it is checked here, at the one exit.
+            let r = r.and_then(|()| {
+                let finite = |v: &[f64]| v[start..].iter().all(|x| x.is_finite());
+                if finite(&p.x) && finite(&p.y) && finite(&p.z) {
+                    Ok(())
+                } else {
+                    Err(Reason("non-finite point"))
+                }
+            });
             if r.is_err() {
                 p.x.truncate(start);
                 p.y.truncate(start);
@@ -259,9 +278,13 @@ impl Polylines {
         if small <= 0. {
             return Err(Reason("degenerate conic"));
         }
-        let t0 = param(&k, p0);
+        // `p − c` can overflow while both are finite: a NaN parameter.
+        let (t0, t1) = (param(&k, p0), param(&k, p1));
+        if !(t0.is_finite() && t1.is_finite()) {
+            return Err(Reason("non-finite parameter"));
+        }
         let dir = if ec.same_sense { 1. } else { -1. };
-        let mut sweep = (dir * (param(&k, p1) - t0)).rem_euclid(TAU);
+        let mut sweep = (dir * (t1 - t0)).rem_euclid(TAU);
         let closed = ec.start == ec.end || sweep == 0.;
         if closed {
             sweep = TAU;
