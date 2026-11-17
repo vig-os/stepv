@@ -416,3 +416,35 @@ fn two_faces_sharing_an_edge_walk_it_in_opposite_order() {
         Some(Reason("edge not built"))
     );
 }
+
+#[test]
+fn a_non_finite_conic_centre_is_routed_not_nan_or_one_chord() {
+    // `1.E400` reads as +inf: the centre's parameter would be NaN, a closed
+    // edge NaN points and an open one a single chord.
+    let g = file(
+        "#1=CARTESIAN_POINT('',(1.E400,0.,0.));\n#2=AXIS2_PLACEMENT_3D('',#1,$,$);\n\
+         #3=CIRCLE('',#2,1.);\n#4=CARTESIAN_POINT('',(1.,0.,0.));\n#5=VERTEX_POINT('',#4);\n\
+         #6=CARTESIAN_POINT('',(0.,1.,0.));\n#7=VERTEX_POINT('',#6);\n\
+         #8=EDGE_CURVE('',#5,#5,#3,.T.);\n#9=EDGE_CURVE('',#5,#7,#3,.T.);\n",
+    );
+    let tol = Tolerance::from_mm(1e-3, 0.3).unwrap();
+    let [closed, open] = [8, 9].map(|id| node(&g, id));
+    let p = Polylines::build(&g, [closed, open], 1., tol);
+    for e in [closed, open] {
+        assert_eq!(p.get(e).unwrap().unwrap_err(), Reason("non-finite conic"));
+    }
+    assert_eq!(p.point_count(), 0);
+}
+
+#[test]
+fn a_non_finite_step_count_is_refused_before_n_min() {
+    // `NaN.ceil().max(1.)` is 1: a NaN count must not become one segment.
+    assert_eq!(segments(f64::NAN, false), Err(Reason("non-finite sweep")));
+    assert_eq!(segments(f64::NAN, true), Err(Reason("non-finite sweep")));
+    assert_eq!(
+        segments(f64::INFINITY, false),
+        Err(Reason("too many segments"))
+    );
+    assert_eq!(segments(2.5, false), Ok(3));
+    assert_eq!(segments(0.5, true), Ok(3));
+}

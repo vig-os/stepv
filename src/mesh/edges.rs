@@ -255,7 +255,7 @@ impl Polylines {
         }
         let k = curve::conic(g, c, s)?;
         let (big, small) = (k.a.max(k.b), k.a.min(k.b));
-        // Finite: `curve::conic` refuses a non-finite radius.
+        // Finite: `curve::conic` refuses a non-finite centre, axis or radius.
         if small <= 0. {
             return Err(Reason("degenerate conic"));
         }
@@ -293,7 +293,11 @@ impl Polylines {
 }
 
 /// `max(n_min, ⌈steps⌉)`, with `n_min` 3 on a closed edge and 1 otherwise.
+/// A NaN count is refused before `max`, which would turn it into `n_min`.
 fn segments(steps: f64, closed: bool) -> Result<usize, Reason> {
+    if steps.is_nan() {
+        return Err(Reason("non-finite sweep"));
+    }
     let min = if closed { 3. } else { 1. };
     let n = steps.ceil().max(min);
     if n.is_finite() && n <= MAX_SEGMENTS as f64 {

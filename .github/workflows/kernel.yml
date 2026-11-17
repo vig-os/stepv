@@ -148,8 +148,8 @@ jobs:
         run: nix develop --command cargo test --test graph_fits -- --nocapture
 
       # The Rust edge polylines (ADR-0001 §2.6, M1a) against OCCT's --edges
-      # polylines, joined by geometry: 0 unmatched, each side within 2·d of
-      # the other. It fails when STEPV_CORPUS names no file or compares no
+      # polylines, joined by geometry: 0 unmatched, Rust's within d of OCCT's
+      # and OCCT's within 2·d of Rust's. It fails when STEPV_CORPUS names no file or compares no
       # edge.
       - name: Edge polylines against the kernel (nist-pmi, occt-import-js)
         env:

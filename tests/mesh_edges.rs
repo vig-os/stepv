@@ -5,8 +5,10 @@
 //! **The join.** The kernel numbers a prototype's edges in its own order,
 //! with no STEP entity id until M5, so an `EDGE_CURVE` is joined to OCCT's
 //! edges by geometry: a candidate's ends equal the Rust polyline's (in
-//! either order) within d, and the pair matches when every point of each
-//! lies within `2·d` (d plus OCCT's own d) of the other polyline. Every Rust
+//! either order) within d, and the pair matches when every Rust point lies
+//! within d of OCCT's polyline (Rust's points are on the curve, OCCT's
+//! polyline within its d of it) and every OCCT point within `2·d` (d plus
+//! OCCT's own d) of Rust's. Every Rust
 //! polyline must match an OCCT edge of its product, and every OCCT line,
 //! circle or ellipse edge that bounds a face must match a Rust polyline:
 //! 0 unmatched either way. The two directions' largest distances are
@@ -196,9 +198,8 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
                     continue;
                 }
                 let gap = apart(pts, o);
-                let bound = 2. * d + slack(o);
                 let better = best.is_none_or(|(_, w)| gap[0].max(gap[1]) < w[0].max(w[1]));
-                if gap[0] <= bound && gap[1] <= bound && better {
+                if gap[0] <= d + slack(o) && gap[1] <= 2. * d + slack(o) && better {
                     best = Some((i, gap));
                 }
             }
@@ -219,7 +220,7 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
         for (e, pts) in left {
             all.by_points += 1;
             match farthest(pts, &occt_all) {
-                Some(gap) if gap <= 2. * d + slack(pts) => all.worst[0] = all.worst[0].max(gap / d),
+                Some(gap) if gap <= d + slack(pts) => all.worst[0] = all.worst[0].max(gap / d),
                 gap => all.unmatched.push(format!(
                     "{file} product {p}: Rust edge #{} ({} points) lies {gap:?} mm from OCCT's",
                     g.id(e).0,

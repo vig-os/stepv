@@ -78,7 +78,8 @@ fn num(v: Option<&Value<'_>>) -> Option<f64> {
     v.and_then(real).filter(|x| x.is_finite())
 }
 
-/// A `CIRCLE` or an `ELLIPSE`, whole, at `s` mm per unit.
+/// A `CIRCLE` or an `ELLIPSE`, whole, at `s` mm per unit: its centre, axes
+/// and radii all finite.
 pub(crate) fn conic(g: &Graph, c: Node, s: f64) -> Result<Conic, Reason> {
     let circle = g.is_a(c, "CIRCLE");
     let is_conic = circle || g.is_a(c, "ELLIPSE");
@@ -95,6 +96,10 @@ pub(crate) fn conic(g: &Graph, c: Node, s: f64) -> Result<Conic, Reason> {
     } else {
         num(a.get(3)).ok_or(Reason("non-finite radius"))?
     };
+    // The placement's reals are read as written: `1.E400` is +inf.
+    if !f.iter().all(|v| v.is_finite()) {
+        return Err(Reason("non-finite conic"));
+    }
     let col = |k: usize| [f[k], f[4 + k], f[8 + k]];
     Ok(Conic {
         c: col(3),

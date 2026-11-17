@@ -552,9 +552,10 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     (`degenerate conic`), and an edge that would need over 2^20 segments (`too many segments`, a
     needle ellipse against a fine d), which would otherwise exhaust memory.
   - **The OCCT join without edge ids (M5's).** `tests/mesh_edges.rs` joins an `EDGE_CURVE` to the
-    kernel's `--edges` polyline of the same product whose ends equal its own within d, the pair
-    within 2·d both ways; what remains (healing splits some closed circles in two) is compared point
-    by point against the other side's whole edge set, within 2·d. 0 unmatched on `tests/data`,
+    kernel's `--edges` polyline of the same product whose ends equal its own within d, Rust's points
+    within d of OCCT's polyline (they lie on the curve) and OCCT's within 2·d of Rust's (d plus
+    OCCT's own d); what remains (healing splits some closed circles in two) is compared point by
+    point against the other side's whole edge set, with the same bounds. 0 unmatched on `tests/data`,
     nist-pmi and occt-import-js: 18,684 edges joined one to one and 738 polylines point by point; the
     largest distances are 0.50·d (Rust's points from OCCT's polylines) and 0.998·d (OCCT's from
     Rust's). Products whose geometry is in other files are skipped and counted.
