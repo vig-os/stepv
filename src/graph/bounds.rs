@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 
+use super::curve::{self, Conic};
 use super::structure::{
     compose_raw, default_x, fields, frame, mm_per_unit, post_order, real, refers,
 };
@@ -240,15 +241,8 @@ fn column(t: &[f64; 12], c: usize) -> [f64; 3] {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Piece {
     Point([f64; 3]),
-    /// The conic `c + a·cos t·x + b·sin t·y`, with x and y unit and
-    /// orthogonal, and a, b ≥ 0.
-    Conic {
-        c: [f64; 3],
-        x: [f64; 3],
-        y: [f64; 3],
-        a: f64,
-        b: f64,
-    },
+    /// A whole circle or ellipse.
+    Conic(Conic),
 }
 
 impl Piece {
@@ -256,7 +250,7 @@ impl Piece {
     fn bbox(self) -> Acc {
         match self {
             Self::Point(p) => Acc::point(p),
-            Self::Conic { c, x, y, a, b } => Acc::around(
+            Self::Conic(Conic { c, x, y, a, b }) => Acc::around(
                 c,
                 [0, 1, 2].map(|i| ((a * x[i]).powi(2) + (b * y[i]).powi(2)).sqrt()),
             ),
@@ -495,16 +489,9 @@ impl<'g> Walk<'g> {
     }
 
     fn point(&self, p: Option<Node>, s: f64) -> Acc {
-        let c = p
-            .and_then(|p| fields(self.g, p, "CARTESIAN_POINT").ok())
-            .and_then(|a| match a.get(1) {
-                Some(Value::List(v)) if v.len() == 3 => {
-                    let c: Option<Vec<f64>> = v.iter().map(|x| num(Some(x))).collect();
-                    c.map(|c| [c[0] * s, c[1] * s, c[2] * s])
-                }
-                _ => None,
-            });
-        c.map_or(why("not a finite 3-D point"), Acc::point)
+        p.map_or(why("not a finite 3-D point"), |p| {
+            curve::point(self.g, p, s).map_or_else(Acc::Unknown, Acc::point)
+        })
     }
 
     fn face(&mut self, n: Node, s: f64, depth: usize) -> Acc {
@@ -586,12 +573,9 @@ impl<'g> Walk<'g> {
         if depth > MAX_DEPTH {
             return Err(Reason("nested too deep"));
         }
+        let c = curve::basis(g, c)?;
         if self.any(c, &BSPLINE_CURVES) {
             return self.poles(c, s, false);
-        }
-        let a = g.args(c).map_err(|_| Reason("unsupported curve"))?;
-        if self.any(c, &["SURFACE_CURVE", "SEAM_CURVE", "INTERSECTION_CURVE"]) {
-            return self.curve(refers(&a, 1), s, ends, depth + 1);
         }
         if g.is_a(c, "LINE") {
             let (v1, v2) = ends.ok_or(Reason("unbounded line"))?;
@@ -601,37 +585,7 @@ impl<'g> Walk<'g> {
             };
             return Ok(vec![v(v1)?, v(v2)?]);
         }
-        self.conic(c, &a, s).map(|p| vec![p])
-    }
-
-    /// A `CIRCLE` or an `ELLIPSE`, whole.
-    fn conic(&self, c: Node, a: &Args<'_>, s: f64) -> Result<Piece, Reason> {
-        let g = self.g;
-        let circle = g.is_a(c, "CIRCLE");
-        let conic = circle || g.is_a(c, "ELLIPSE");
-        let Some(f) = refers(a, 1)
-            .filter(|_| conic)
-            .and_then(|p| frame(g, p, s).ok())
-        else {
-            return Err(Reason(if conic {
-                "malformed conic"
-            } else {
-                "unsupported curve"
-            }));
-        };
-        let p = num(a.get(2)).ok_or(Reason("non-finite radius"))?;
-        let q = if circle {
-            p
-        } else {
-            num(a.get(3)).ok_or(Reason("non-finite radius"))?
-        };
-        Ok(Piece::Conic {
-            c: column(&f, 3),
-            x: column(&f, 0),
-            y: column(&f, 1),
-            a: p.abs() * s,
-            b: q.abs() * s,
-        })
+        curve::conic(g, c, s).map(|k| vec![Piece::Conic(k)])
     }
 
     /// A surface's own box, without its face's bounds, memoised.

@@ -15,6 +15,12 @@ use stepv::{Scene, occt};
 /// Runs the kernel on `input` under the memory cap, for its mesh with edge
 /// polylines and its topology.
 pub fn kernel(input: &Path) -> Result<(Scene, Topology), String> {
+    kernel_summary(input).map(|(scene, t, _)| (scene, t))
+}
+
+/// [`kernel`], with the kernel's JSON summary (its diagonal and absolute
+/// deflection).
+pub fn kernel_summary(input: &Path) -> Result<(Scene, Topology, occt::Summary), String> {
     let k = occt::kernel_path();
     assert!(
         k.is_file(),
@@ -49,7 +55,12 @@ pub fn kernel(input: &Path) -> Result<(Scene, Topology), String> {
     };
     let scene = occt::read_mesh(&read(&mesh)?).map_err(|e| format!("mesh: {e:?}"))?;
     let t = Topology::parse(&read(&topo)?).map_err(|e| e.to_string())?;
-    Ok((scene, t))
+    let summary = String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .next()
+        .and_then(|l| serde_json::from_str(l).ok())
+        .ok_or("no kernel summary")?;
+    Ok((scene, t, summary))
 }
 
 /// The inverse of a rigid transform, row-major 3×4.
