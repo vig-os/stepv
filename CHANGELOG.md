@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     position on stderr; `env` and `halt` are refused
   - Nothing bounds a filter's work yet (#187): deep recursion aborts the process (SIGABRT), and
     collecting a walk over a file's reference cycle never ends
+- **The graph core, G7: colours from the graph** ([#141](https://github.com/vig-os/stepv/issues/141), ADR-0001 §2.2):
+  - The graph reads the STEP style chain itself: each product's colour and each face's, with face
+    overrides, overriding styles, `COLOUR_RGB` and pre-defined colours, every surface side, and
+    styles held in a presentation representation or not
+  - Equal to OCCT's XCAF colours on every leaf of the corpus, and checked in CI on nist-pmi and
+    occt-import-js; a colour XCAF gives that the graph doesn't is a test failure
 - **The graph core, G6c: primitive fits** ([#140](https://github.com/vig-os/stepv/issues/140), ADR-0001 §2.8):
   - A leaf whose faces are all on one axis (coaxial cylinders, cones and tori, and perpendicular
     planes) or one centre (spheres and planes) is drawn as a fitted cylinder or sphere instead of

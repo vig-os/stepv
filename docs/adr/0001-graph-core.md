@@ -511,6 +511,31 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     than the leaf's placed box. `Placeholders::fits` holds the leaves drawn as a fit; `shapes()`
     hands the GPU each leaf's fit or box, both drawn by the placeholder pipelines. The status line
     reads "graph: N parts, M shown as placeholders", boxes and fits together.
+- **G7's realised colours** (#141), in `src/graph/colors.rs`:
+  - `graph::colors(&g)` indexes every `STYLED_ITEM` and `OVER_RIDING_STYLED_ITEM` (simple or
+    complex) by the item it styles. `Product::color` is filled by `structure()`.
+    `Colors::parts(&g, &s, p)` gives XCAF's parts of a product (`PartColors`: a colour, and each
+    face's `FaceColor` in the transfer's order, `None` meaning the part's colour).
+  - **The rules are XCAF's observed output** on `tests/graph_colors.rs`'s fixtures and the corpus
+    (black box, §4), listed in the module's doc: sRGB in the file, linear out; the last
+    `.BOTH.`/`.POSITIVE.` usage, else the last `.NEGATIVE.`; of several styles on one item, the
+    last in the file, overriding or not; no presentation representation needed; a part's colour is
+    the style on its shape when that is one item, else a style on the product's representation
+    (applied only when the file styles some representation item); a face takes its own style, else
+    the latest among its containers below its part's shape; a leaf's colour is its product's.
+  - **XCAF's parts.** XCAF splits a product into parts per shape definition representation, per
+    related representation (`SHAPE_REPRESENTATION_RELATIONSHIP`), per solid or shell of a related
+    representation holding several, and for a shape aspect's solids and shells no other
+    representation lists. It splits in further cases not modelled (a solid beside a curve set in one
+    representation: 4 corpus leaves); there the parity test compares every face's drawn colour
+    (its own, else its part's) over the leaf, and counts the leaf apart.
+  - **The face join without face ids (M5's).** The kernel numbers a part's faces in its transfer's
+    order, which `Colors::parts` follows. The parity test checks the join instead of assuming it:
+    equal counts and every kernel mesh vertex inside the joined face's G4 box. Healing can split,
+    drop or reorder faces; such a part is compared by its set of face colours and counted apart.
+  - Not covered, so a gate failure where XCAF colours them: `SURFACE_STYLE_RENDERING` colours
+    (`tests/graph_colors.rs` proves the gate catches it), and instance colours. Multi-file leaves
+    are skipped and counted, as their parts are outside the graph (§2.2).
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The

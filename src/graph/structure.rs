@@ -73,6 +73,9 @@ pub struct Product {
     pub children: Vec<Instance>,
     /// Millimetres per length unit of its first body's context (1 without).
     pub mm_per_unit: f64,
+    /// Its colour as XCAF colours its leaf ([`super::Colors::product`]);
+    /// its parts' and faces' are [`super::Colors::parts`].
+    pub color: Option<crate::Color>,
 }
 
 /// A `NEXT_ASSEMBLY_USAGE_OCCURRENCE`: an edge of the DAG.
@@ -233,7 +236,12 @@ pub fn structure(g: &Graph) -> Result<Structure, StructureError> {
             leaf_count: 1,
             children,
             mm_per_unit,
+            color: None,
         });
+    }
+    let styles = super::colors(g);
+    for p in &mut products {
+        p.color = styles.product(g, p);
     }
     let order = post_order(&products)?;
     let mut height = vec![0u32; products.len()];

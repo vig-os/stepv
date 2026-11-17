@@ -287,7 +287,7 @@ fn num(v: Option<&Value<'_>>) -> Option<f64> {
 
 /// The references in a list argument; nested lists flattened (a B-spline
 /// surface's grid).
-fn ref_list(v: Option<&Value<'_>>, out: &mut Vec<Node>) {
+pub(super) fn ref_list(v: Option<&Value<'_>>, out: &mut Vec<Node>) {
     match v {
         Some(Value::Ref(n)) => out.push(*n),
         Some(Value::List(l)) => l.iter().for_each(|v| ref_list(Some(v), out)),
@@ -295,7 +295,7 @@ fn ref_list(v: Option<&Value<'_>>, out: &mut Vec<Node>) {
     }
 }
 
-const SKIPPED: [&str; 5] = [
+pub(super) const SKIPPED: [&str; 5] = [
     "AXIS1_PLACEMENT",
     "AXIS2_PLACEMENT_2D",
     "AXIS2_PLACEMENT_3D",
@@ -305,7 +305,7 @@ const SKIPPED: [&str; 5] = [
 
 /// A curve or a point: wireframe, outside the B-rep and the box. Anything
 /// else in a geometric set is taken for a surface.
-fn wire(g: &Graph, n: Node) -> bool {
+pub(super) fn wire(g: &Graph, n: Node) -> bool {
     const NAMED: [&str; 8] = [
         "CURVE",
         "LINE",
@@ -326,7 +326,7 @@ fn wire(g: &Graph, n: Node) -> bool {
 }
 
 /// Solids, shells and face sets: the union of what they reference.
-const CONTAINERS: [&str; 11] = [
+pub(super) const CONTAINERS: [&str; 11] = [
     "MANIFOLD_SOLID_BREP",
     "BREP_WITH_VOIDS",
     "FACETED_BREP",
@@ -414,30 +414,9 @@ impl<'g> Walk<'g> {
     /// The representations `rep` is related to without a transformation,
     /// as OCCT's transfer adds them (`TransferRelatedSRR`): AP203 hybrids.
     fn related(&mut self, rep: Node) -> Acc {
-        self.related_reps(rep)
+        related_reps(self.g, rep)
             .into_iter()
             .fold(Acc::Empty, |a, o| a.union(self.rep(o)))
-    }
-
-    fn related_reps(&self, rep: Node) -> Vec<Node> {
-        let g = self.g;
-        let mut out = Vec::new();
-        for &r in g.referrers(rep) {
-            let simple = |t| g.type_name(r) == TypeName::Simple(t);
-            if !simple("SHAPE_REPRESENTATION_RELATIONSHIP")
-                && !simple("MECHANICAL_DESIGN_AND_DRAUGHTING_RELATIONSHIP")
-            {
-                continue;
-            }
-            let Ok(a) = g.args(r) else { continue };
-            let other = if refers(&a, 2) == Some(rep) {
-                refers(&a, 3)
-            } else {
-                refers(&a, 2)
-            };
-            out.extend(other.filter(|&o| o != rep));
-        }
-        out
     }
 
     fn item(&mut self, item: Node, rep: Node, s: f64) -> Acc {
@@ -805,7 +784,29 @@ impl<'g> Walk<'g> {
 }
 
 /// The representation a `MAPPED_ITEM` maps.
-fn mapped_rep(g: &Graph, item: Node) -> Option<Node> {
+/// The representations `rep` is related to without a transformation, as
+/// OCCT's transfer adds them (`TransferRelatedSRR`): AP203 hybrids.
+pub(super) fn related_reps(g: &Graph, rep: Node) -> Vec<Node> {
+    let mut out = Vec::new();
+    for &r in g.referrers(rep) {
+        let simple = |t| g.type_name(r) == TypeName::Simple(t);
+        if !simple("SHAPE_REPRESENTATION_RELATIONSHIP")
+            && !simple("MECHANICAL_DESIGN_AND_DRAUGHTING_RELATIONSHIP")
+        {
+            continue;
+        }
+        let Ok(a) = g.args(r) else { continue };
+        let other = if refers(&a, 2) == Some(rep) {
+            refers(&a, 3)
+        } else {
+            refers(&a, 2)
+        };
+        out.extend(other.filter(|&o| o != rep));
+    }
+    out
+}
+
+pub(super) fn mapped_rep(g: &Graph, item: Node) -> Option<Node> {
     let map = fields(g, item, "MAPPED_ITEM")
         .ok()
         .and_then(|a| refers(&a, 1))?;
