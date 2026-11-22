@@ -9,13 +9,21 @@
 //! [`EdgePoint`]s: two faces sharing an edge get the same points in
 //! opposite order.
 //!
-//! **Curves:** `LINE`, `CIRCLE` and `ELLIPSE`, directly or as a
-//! `SURFACE_CURVE`'s or `SEAM_CURVE`'s 3-D curve. Any other curve is routed
-//! with its reason, never dropped.
+//! **Curves:** `LINE`, `CIRCLE`, `ELLIPSE` and `B_SPLINE_CURVE_WITH_KNOTS`
+//! (rational or not, simple or complex), directly or as a `SURFACE_CURVE`'s
+//! or `SEAM_CURVE`'s 3-D curve. Any other curve, and a malformed B-spline,
+//! is routed with its reason, never dropped.
 //!
 //! **The quality contract**, with d the linear and a the angular deflection
 //! of a [`Tolerance`]: every chord lies within d of its curve, and
 //! consecutive segments turn by at most a.
+//!
+//! **Corners (B-splines):** the turn bound is exempt at a B-spline's C0
+//! knots (interior multiplicity ≥ its degree p), where the curve itself can
+//! have a corner, and at the seam of a closed B-spline, which nothing makes
+//! tangent-continuous. Those curve points are exact polyline points, so
+//! face meshing (M2/M3) must expect a corner at any of them; a degree-1
+//! B-spline is exactly its control polygon.
 //! - A line gets no interior points.
 //! - A circle arc of radius r and sweep θ takes
 //!   `n = max(n_min, ⌈max(θ/a, θ/(2·acos(1 − min(d/r, 1))))⌉)` equal
@@ -26,6 +34,12 @@
 //!   `Δt ≤ min(a·B/A, √(8d/A))`, and the same `n_min`. The tangent turns at
 //!   most A/B times faster than t, and a chord over Δt sags at most
 //!   `Δt²/8 · max|C''| = Δt²·A/8`.
+//! - A B-spline is cut into Bézier spans at its knots and each span halved
+//!   until its control points lie within d of its chord and every two of
+//!   its control polygon's legs turn by at most a/2: by the convex-hull
+//!   property both hold for the span, and consecutive chords turn by at
+//!   most a/2 + a/2 (ADR §2.6). Its vertices are located on the curve, and
+//!   one farther than d from it is routed (`vertex off curve`).
 //!
 //! **The sweep:** a vertex's parameter is its angle in the conic's frame,
 //! `atan2(y/B, x/A)`. The edge runs from its start's parameter to its end's,
@@ -272,6 +286,10 @@ impl Polylines {
             self.push(p1);
             return Ok(());
         }
+        if g.is_a(c, "B_SPLINE_CURVE_WITH_KNOTS") {
+            let b = curve::bspline(g, c, s)?;
+            return self.bspline(&b, [p0, p1], ec.start == ec.end, ec.same_sense, tol);
+        }
         let k = curve::conic(g, c, s)?;
         let (big, small) = (k.a.max(k.b), k.a.min(k.b));
         // Finite: `curve::conic` refuses a non-finite centre, axis or radius.
@@ -339,5 +357,6 @@ fn param(k: &Conic, p: [f64; 3]) -> f64 {
     (dot(k.y) / k.b).atan2(dot(k.x) / k.a)
 }
 
+mod bspline;
 #[cfg(test)]
 mod tests;

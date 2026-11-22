@@ -1,4 +1,4 @@
-//! `mesh::edges` (ADR-0001 §2.6, M1a) against OCCT's edge polylines, the
+//! `mesh::edges` (ADR-0001 §2.6, M1a/M1b) against OCCT's edge polylines, the
 //! golden reference: the kernel's `--edges` output, at the same deflection
 //! (its own absolute d, from its model diagonal, and 20°).
 //!
@@ -10,9 +10,13 @@
 //! polyline within its d of it) and every OCCT point within `2·d` (d plus
 //! OCCT's own d) of Rust's. Every Rust
 //! polyline must match an OCCT edge of its product, and every OCCT line,
-//! circle or ellipse edge that bounds a face must match a Rust polyline:
-//! 0 unmatched either way. The two directions' largest distances are
-//! reported in units of d.
+//! circle, ellipse or B-spline edge that bounds a face must match a Rust
+//! polyline: 0 unmatched either way. The two directions' largest distances
+//! are reported in units of d.
+//!
+//! **Every file is compared, or the gate fails** (#200, #203): a file whose
+//! check fails is counted with its reason, and only the multi-file
+//! assemblies' top files, whose parts are in other files, are skipped.
 //!
 //! Products are compared in their own mm: OCCT's points are taken back
 //! through each part's placement, as `graph_bounds` does. `STEPV_CORPUS`
@@ -42,8 +46,15 @@ struct Tally {
     /// compared point by point instead.
     joined: usize,
     by_points: usize,
+    /// The Rust polylines over B-spline curves, and their points.
+    bspline: usize,
+    bspline_points: usize,
     /// Rust edges without a polyline, by reason.
     routed: BTreeMap<String, usize>,
+    /// OCCT edges not compared, by why.
+    occt_skipped: BTreeMap<&'static str, usize>,
+    /// Files that couldn't be compared, with why.
+    not_compared: Vec<String>,
     unmatched: Vec<String>,
     /// The largest distance of a Rust point from its OCCT polyline, and of
     /// an OCCT point from its Rust polyline, in units of d.
@@ -140,8 +151,11 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
         let me = &s.products[p];
         let edges = edges_of(&g, &me.bodies);
         let rust = Polylines::build(&g, edges.iter().copied(), me.mm_per_unit, tol);
-        // OCCT's analytic face edges, in product mm, each prototype once.
+        // OCCT's line, conic and B-spline face edges, in product mm, each
+        // prototype once.
         let mut occt: Vec<Vec<[f64; 3]>> = Vec::new();
+        // Per OCCT edge: a B-spline seam (twice in one face).
+        let mut seams: Vec<bool> = Vec::new();
         let mut protos = HashSet::new();
         for &part in parts {
             let placed = &topo.parts[part];
@@ -150,17 +164,20 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
             }
             let proto = &topo.prototypes[placed.prototype];
             let on_face = face_edges(proto);
+            let seam = seam_edges(proto);
             let back = invert(&placed.transform);
             let e = &scene.parts[part].edges;
             let mut at = 0;
             for (&id, &len) in e.ids.iter().zip(&e.lens) {
                 let pts = &e.points[at * 3..(at + len as usize) * 3];
                 at += len as usize;
-                let analytic = matches!(
+                let meshed = matches!(
                     proto.edges[id as usize].curve,
-                    Curve::Line | Curve::Circle { .. } | Curve::Ellipse { .. }
+                    Curve::Line | Curve::Circle { .. } | Curve::Ellipse { .. } | Curve::Bspline
                 );
-                if analytic && on_face[id as usize] {
+                if meshed && on_face[id as usize] {
+                    let bspline = proto.edges[id as usize].curve == Curve::Bspline;
+                    seams.push(bspline && seam[id as usize]);
                     occt.push(
                         pts.chunks_exact(3)
                             .map(|v| apply(&back, [0, 1, 2].map(|i| f64::from(v[i]))))
@@ -176,14 +193,21 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
         }
         all.products += 1;
         all.occt += occt.len();
-        for (_, r) in rust.routed() {
+        // The vertex points of the edges Rust routes, in product mm.
+        let mut routed_ends = Vec::new();
+        for (e, r) in rust.routed() {
             *all.routed.entry(r.to_string()).or_default() += 1;
+            routed_ends.extend(ends_of(&g, e, me.mm_per_unit));
         }
         let rust: Vec<(Node, Vec<[f64; 3]>)> = edges
             .iter()
             .filter_map(|&e| Some((e, rust.get(e)?.ok()?.points().collect())))
             .collect();
         all.rust += rust.len();
+        for (_, pts) in rust.iter().filter(|(e, _)| is_bspline(&g, *e)) {
+            all.bspline += 1;
+            all.bspline_points += pts.len();
+        }
         // OCCT's f32 coordinates: 1e-6 of the largest coordinate as slack.
         let slack =
             |pts: &[[f64; 3]]| 1e-6 * pts.iter().flatten().fold(1f64, |m, x| m.max(x.abs()));
@@ -228,20 +252,94 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
                 )),
             }
         }
-        for (o, _) in occt.iter().zip(&used).filter(|(_, u)| !**u) {
+        for ((o, _), &seam) in occt
+            .iter()
+            .zip(&used)
+            .zip(&seams)
+            .filter(|((_, u), _)| !**u)
+        {
             all.by_points += 1;
-            match farthest(o, &rust_all) {
-                Some(gap) if gap <= 2. * d + slack(o) => all.worst[1] = all.worst[1].max(gap / d),
-                gap => all.unmatched.push(format!(
+            let gap = farthest(o, &rust_all);
+            if let Some(gap) = gap.filter(|&g| g <= 2. * d + slack(o)) {
+                all.worst[1] = all.worst[1].max(gap / d);
+                continue;
+            }
+            // Not on Rust's polylines. OCCT's healing closes a periodic face
+            // bounded by two loops with a seam no `EDGE_CURVE` names, and an
+            // edge Rust routes has no polyline: both are counted instead.
+            let (oa, ob) = (o[0], o[o.len() - 1]);
+            let tol = d + slack(o);
+            let near = |[a, b]: [[f64; 3]; 2]| {
+                (dist(a, oa) <= tol && dist(b, ob) <= tol)
+                    || (dist(a, ob) <= tol && dist(b, oa) <= tol)
+            };
+            let skip = if seam {
+                "OCCT B-spline seam"
+            } else if routed_ends.iter().any(|&e| near(e)) {
+                "routed in Rust"
+            } else {
+                all.unmatched.push(format!(
                     "{file} product {p}: OCCT edge {:?} → {:?} ({} points) lies {gap:?} mm from Rust's",
                     o[0],
                     o[o.len() - 1],
                     o.len()
-                )),
-            }
+                ));
+                continue;
+            };
+            all.by_points -= 1;
+            *all.occt_skipped.entry(skip).or_default() += 1;
         }
     }
     Ok(())
+}
+
+/// An `EDGE_CURVE`'s two vertex points at `s` mm per unit, as written.
+fn ends_of(g: &Graph, e: Node, s: f64) -> Option<[[f64; 3]; 2]> {
+    let point = |v: Node| -> Option<[f64; 3]> {
+        let p = *g.refs(v).first()?;
+        let a = g.args(p).ok()?;
+        let graph::Value::List(c) = a.get(1)? else {
+            return None;
+        };
+        let num = |x: &graph::Value<'_>| match x {
+            graph::Value::Real(r) => Some(*r * s),
+            graph::Value::Int(i) => Some(*i as f64 * s),
+            _ => None,
+        };
+        Some([num(c.first()?)?, num(c.get(1)?)?, num(c.get(2)?)?])
+    };
+    let r = g.refs(e);
+    Some([point(*r.first()?)?, point(*r.get(1)?)?])
+}
+
+/// Which of a prototype's edges are seams: twice in one face.
+fn seam_edges(proto: &topology::Prototype) -> Vec<bool> {
+    let mut seam = vec![false; proto.edges.len()];
+    for f in &proto.faces {
+        let mut seen = HashSet::new();
+        for &e in &f.edges {
+            if !seen.insert(e) {
+                seam[e] = true;
+            }
+        }
+    }
+    seam
+}
+
+/// Whether `e`'s curve, directly or under a `SURFACE_CURVE` or
+/// `SEAM_CURVE`, is a B-spline.
+fn is_bspline(g: &Graph, e: Node) -> bool {
+    let mut c = g.refs(e).last().copied();
+    while let Some(n) = c {
+        if g.is_a(n, "B_SPLINE_CURVE_WITH_KNOTS") {
+            return true;
+        }
+        if !(g.is_a(n, "SURFACE_CURVE") || g.is_a(n, "SEAM_CURVE")) {
+            return false;
+        }
+        c = g.refs(n).first().copied();
+    }
+    false
 }
 
 /// The largest distance of a point of `pts` from the nearest of `lines`;
@@ -291,13 +389,14 @@ fn run(files: &[PathBuf]) -> Tally {
             continue;
         }
         if let Err(e) = check(f, &mut all) {
-            eprintln!("{}: not compared: {e}", f.display());
+            all.not_compared.push(format!("{}: {e}", f.display()));
         }
     }
     eprintln!(
         "mesh::edges: {} files, {} products ({} with external geometry skipped); {} Rust polylines \
          against {} OCCT edges, {} joined one to one, {} polylines compared point by point; \
-         worst Rust → OCCT {:.3}·d, OCCT → Rust {:.3}·d; {} unmatched; routed {:?}",
+         worst Rust → OCCT {:.3}·d, OCCT → Rust {:.3}·d; {} unmatched; {} B-spline polylines \
+         ({} points); routed {:?}; OCCT edges skipped {:?}; {} not compared",
         files.len(),
         all.products,
         all.external,
@@ -308,7 +407,17 @@ fn run(files: &[PathBuf]) -> Tally {
         all.worst[0],
         all.worst[1],
         all.unmatched.len(),
-        all.routed
+        all.bspline,
+        all.bspline_points,
+        all.routed,
+        all.occt_skipped,
+        all.not_compared.len()
+    );
+    assert!(
+        all.not_compared.is_empty(),
+        "{} files not compared:\n{}",
+        all.not_compared.len(),
+        all.not_compared.join("\n")
     );
     assert!(
         all.unmatched.is_empty(),
@@ -354,6 +463,49 @@ fn ellipse_plate() -> PathBuf {
     part_file("ellipse-plate.step", 1e-7, &item, &f.out)
 }
 
+/// A plate bounded by a cubic B-spline with a simple interior knot, from
+/// (0, 0) to (10, 0) through y > 0, and back by a rational semicircle in
+/// the complex form (two quarters, a C0 knot between them) through y < 0.
+fn bspline_plate() -> PathBuf {
+    let mut f = F::new();
+    let ax = f.ax([0., 0., 0.]);
+    let cubic = [[0., 0.], [1., 4.], [4., 6.], [7., 2.], [10., 0.]];
+    let half = [[10., 0.], [10., -5.], [5., -5.], [0., -5.], [0., 0.]];
+    let refs = |f: &mut F, pts: &[[f64; 2]]| -> String {
+        let r: Vec<String> = pts
+            .iter()
+            .map(|p| format!("#{}", f.pt([p[0], p[1], 0.])))
+            .collect();
+        r.join(",")
+    };
+    let c = refs(&mut f, &cubic);
+    let cubic = f.add(&format!(
+        "B_SPLINE_CURVE_WITH_KNOTS('',3,({c}),.UNSPECIFIED.,.F.,.F.,(4,1,4),(0.,0.4,1.),.UNSPECIFIED.)"
+    ));
+    let h = refs(&mut f, &half);
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let half = f.add(&format!(
+        "(BOUNDED_CURVE() B_SPLINE_CURVE(2,({h}),.CIRCULAR_ARC.,.F.,.F.) \
+         B_SPLINE_CURVE_WITH_KNOTS((3,2,3),(0.,1.,2.),.UNSPECIFIED.) CURVE() \
+         GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE((1.,{w:?},1.,{w:?},1.)) \
+         REPRESENTATION_ITEM(''))"
+    ));
+    let (a, b) = (f.pt([0., 0., 0.]), f.pt([10., 0., 0.]));
+    let va = f.add(&format!("VERTEX_POINT('',#{a})"));
+    let vb = f.add(&format!("VERTEX_POINT('',#{b})"));
+    let e1 = f.add(&format!("EDGE_CURVE('',#{va},#{vb},#{cubic},.T.)"));
+    // Against the curve: its direction runs from (10, 0) to (0, 0).
+    let e2 = f.add(&format!("EDGE_CURVE('',#{va},#{vb},#{half},.F.)"));
+    let o1 = f.add(&format!("ORIENTED_EDGE('',*,*,#{e1},.T.)"));
+    let o2 = f.add(&format!("ORIENTED_EDGE('',*,*,#{e2},.F.)"));
+    let lp = f.add(&format!("EDGE_LOOP('',(#{o1},#{o2}))"));
+    let outer = f.add(&format!("FACE_OUTER_BOUND('',#{lp},.F.)"));
+    let plane = f.add(&format!("PLANE('',#{ax})"));
+    let face = f.face(&[outer], plane);
+    let item = f.item(&[face], false);
+    part_file("bspline-plate.step", 1e-7, &item, &f.out)
+}
+
 #[test]
 fn tests_data_edges_match_occts() {
     // `multifile/bracket.step` is left out: its parts' geometry is in the
@@ -368,12 +520,14 @@ fn tests_data_edges_match_occts() {
     .map(|f| data.join(f))
     .to_vec();
     files.push(ellipse_plate());
+    files.push(bspline_plate());
     let mut f = F::new();
     let shaft = f.shaft([1., 2., 3.], 4., 20., true);
     let item = f.item(&shaft, true);
     files.push(part_file("shaft.step", 1e-7, &item, &f.out));
     let all = run(&files);
     assert!(all.routed.is_empty(), "{:?}", all.routed);
+    assert!(all.bspline >= 2, "the B-spline plate's edges are compared");
 }
 
 #[test]

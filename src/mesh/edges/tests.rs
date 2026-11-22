@@ -3,6 +3,7 @@
 //! the ends, over radii from 1e-3 to 1e3 mm (d > r included), ellipses with
 //! B/A down to 0.01, `same_sense = .F.`, closed edges and arcs through the
 //! seam. And sharing: two faces walk one edge's points in opposite order.
+//! B-spline edges are in [`bspline`].
 
 use std::f64::consts::{PI, TAU};
 
@@ -341,7 +342,7 @@ fn lines_take_their_vertices_and_curves_route_with_a_reason() {
          #3=CARTESIAN_POINT('',(3.,4.,0.));\n#4=VERTEX_POINT('',#3);\n\
          #5=DIRECTION('',(0.6,0.8,0.));\n#6=VECTOR('',#5,5.);\n#7=LINE('',#1,#6);\n\
          #8=SURFACE_CURVE('',#7,(#1),.CURVE_3D.);\n#9=EDGE_CURVE('',#2,#4,#8,.F.);\n\
-         #10=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#3),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);\n\
+         #10=BEZIER_CURVE('',1,(#1,#3),.UNSPECIFIED.,.F.,.F.);\n\
          #11=EDGE_CURVE('',#2,#4,#10,.T.);\n\
          #12=AXIS2_PLACEMENT_3D('',#1,$,$);\n#13=ELLIPSE('',#12,1.,0.);\n#14=EDGE_CURVE('',#2,#4,#13,.T.);\n\
          #15=CIRCLE('',#12,1E300);\n#16=CARTESIAN_POINT('',(1E300,0.,0.));\n#17=VERTEX_POINT('',#16);\n\
@@ -542,3 +543,5 @@ fn no_non_finite_coordinate_escapes_at_the_overflow_corners() {
     assert_eq!(p.get(e).unwrap().unwrap_err(), Reason("non-finite point"));
     assert_eq!(p.point_count(), 0, "nothing of it is left behind");
 }
+
+mod bspline;

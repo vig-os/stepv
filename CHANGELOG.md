@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Rust mesher, M1b: B-spline edge polylines** ([#143](https://github.com/vig-os/stepv/issues/143), ADR-0001 §2.6):
+  - `stepv::mesh::Polylines` also flattens `B_SPLINE_CURVE_WITH_KNOTS` edges (rational or not, simple
+    or complex, directly or through a `SURFACE_CURVE`/`SEAM_CURVE`): de Boor blossoms and de Casteljau
+    halving until every span's control points lie within d of its chord and its legs turn by at most
+    a/2, so consecutive chords turn by at most a (§2.6, amended)
+  - C0 knots and a closed curve's seam are exact polyline points where the turn bound is exempt;
+    malformed curves, vertices off the curve and vanishing tangents are routed with a reason
+  - The OCCT golden compares B-spline edges too and fails on a file it can't compare; Ultimaker's
+    edges are now 99.9% meshed in Rust (96,476 of 96,561) in about 580 ms on one thread
 - **The Rust mesher, M1a: edge polylines** ([#142](https://github.com/vig-os/stepv/issues/142), ADR-0001 §2.6):
   - `stepv::mesh::Polylines` turns every `LINE`, `CIRCLE` and `ELLIPSE` edge (directly or through a
     `SURFACE_CURVE`/`SEAM_CURVE`) into one polyline from its start vertex to its end vertex, shared
