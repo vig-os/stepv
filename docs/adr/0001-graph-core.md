@@ -641,14 +641,19 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     routed routes the face (`edge routed: <reason>`).
   - **The golden** (`tests/mesh_plane.rs`) compares each planar face's mesh area with the kernel's
     `--topology` face area, joined as G7 joins faces (transfer order, checked by count, surface type
-    and box). The mesh is bounded by chords and OCCT's area by curves, so the exact circle and ellipse
-    segment areas are added per chord; a B-spline chord adds at most d·|chord|, and a vertex off its
-    line or circle by g (within the file's uncertainty) moves every edge it ends, by at most
-    g·(L + 2g). A part whose join fails is compared by value: each Rust area must fit an unused OCCT
-    plane face's. On `tests/data`, nist-pmi and occt-import-js (88 files): 2,545 faces within 1e-6
-    relative with no bound (worst 6.7e-8), 243 within their bound, 352 of all of them by value in 9
-    unjoined parts; 6 routed (`loop:self-touching` 3, `rs-fail:coincident` 3), 0 failing, and every
-    Rust normal parallel to OCCT's.
+    and box; a product's kernel parts are those of every leaf it is, one per prototype). The mesh is
+    bounded by chords and OCCT's area by curves, so the exact circle and ellipse segment areas are
+    added per chord; a B-spline chord adds at most d·|chord|, and a vertex off its line or conic by g
+    within the file's uncertainty moves every edge it ends, by at most g·(L + 2g). A vertex off
+    beyond the uncertainty leaves the face undefined: counted, not compared; Rust should route it
+    (#207). Where the join fails, each Rust area must fit an unused OCCT plane face's, the tightest
+    bounds first. On `tests/data`, nist-pmi and occt-import-js (88 files), in CI: 2,543 faces within
+    1e-6 relative with no bound (worst 5.3e-8), 243 within their bound, 350 of all of them by value
+    in 9 unjoined parts; 6 routed (`loop:self-touching` 3, `rs-fail:coincident` 3; #208), 2 with a
+    vertex off beyond the uncertainty; 0 failing, and every Rust normal parallel to OCCT's.
+  - **ABC (local, 298 files):** 18,173 exact (worst 3.2e-9), 1,971 within their bound, 0 failing;
+    but every ABC file declares an uncertainty of 1e-17 mm, so 5,703 faces route `curve:off-surface`
+    and 4,788 have a vertex off its curve beyond it (#210, a design question for the owner).
   - **ABC `00000046` (`--release`, one thread):** its 6 planar faces, two of them with 2,499 holes
     each (the file has 2,499 cylinders; "1,250 holes" in §6 and `plan.md` undercounts them), mesh
     into 99,972 triangles in 0.11 s (graph and polylines 0.04 s more), at 45 MB peak RSS, against

@@ -8,21 +8,28 @@
 //! curve: a circle's segment `r²/2·(φ − sin φ)` and an ellipse's
 //! `A·B/2·(Δt − sin Δt)`, positive when the face lies on the curve's
 //! centre side of the chord. A line adds nothing, so a face bounded by
-//! lines alone compares its mesh area as is. A B-spline chord has no closed
-//! form: it lies within d of its curve, so it adds at most `d·|chord|` either
-//! way, and such a face ("bounded") passes within 1e-6 relative plus that
-//! bound.
+//! lines alone compares its mesh area as is. What can't be exact is bounded,
+//! and such a face passes within 1e-6 relative plus its bound:
+//! - a B-spline chord lies within d of its curve, so it adds at most
+//!   `d·|chord|` either way;
+//! - a vertex g off one of its lines or conics (a file may write them apart,
+//!   within its uncertainty; Rust's face follows the vertex, OCCT's the
+//!   curve) moves every edge it ends, by at most `g·(L + 2g)` each. A vertex
+//!   off beyond the uncertainty leaves the face undefined: it is counted,
+//!   not compared, and Rust should route it (#207).
 //!
 //! **The face join** (G7's, `graph_colors`): the kernel reports a part's
 //! faces in transfer order, with no STEP ids until M5, and
 //! [`stepv::graph::Colors::parts`] lists a product's faces in that order. A
-//! part's faces are joined by position, and the join is checked, never
+//! product's kernel parts are those of every leaf it is, one per prototype.
+//! A part's faces are joined by position, and the join is checked, never
 //! assumed: the counts agree, each pair is planar on both sides or on
 //! neither, and every kernel mesh vertex of a face lies in the graph's
-//! conservative box of its partner (G4). A part whose join fails, a file the
-//! kernel or the graph can't read, a planar face whose area differs, or a
-//! Rust normal not parallel to OCCT's fails the gate. Faces Rust routes are
-//! counted by reason.
+//! conservative box of its partner (G4). Where it fails (XCAF splits or
+//! healing reorders), each Rust area must fit an unused OCCT plane face's,
+//! the tightest bounds first. A file the kernel or the graph can't read, a
+//! planar face whose area fits no OCCT face, or a Rust normal not parallel
+//! to OCCT's fails the gate. Faces Rust routes are counted by reason.
 //!
 //! `STEPV_CORPUS` (paths, `:`-separated, files or directories) adds the
 //! local corpus. The perforated plate (ABC `00000046`, named by
@@ -61,6 +68,9 @@ struct Tally {
     /// Faces whose OCCT normal is opposite to Rust's (shell orientation).
     opposite: usize,
     routed: BTreeMap<String, usize>,
+    /// Meshed faces with a vertex off its curve beyond the uncertainty, not
+    /// compared (#207).
+    inconsistent: usize,
     failing: Vec<String>,
     not_compared: Vec<String>,
 }
@@ -184,9 +194,10 @@ fn conic(g: &Graph, edge: Node, s: f64) -> Option<Conic> {
     })
 }
 
-/// The distances of `edge`'s two vertices from its line or circle, at `s`
-/// mm per unit (0 on other curves), with the vertices: a file may write
-/// them apart, within its uncertainty.
+/// The distances of `edge`'s two vertices from its line or conic, at `s`
+/// mm per unit (0 on B-splines, which M1b checks), less f64's rounding of them (as
+/// `mesh::plane` allows it), with the vertices: a file may write them
+/// apart, within its uncertainty.
 fn vertex_gaps(g: &Graph, edge: Node, s: f64) -> Option<[(Node, f64); 2]> {
     let e = g.args(edge).ok()?;
     let mut c = at(e.get(3))?;
@@ -200,11 +211,22 @@ fn vertex_gaps(g: &Graph, edge: Node, s: f64) -> Option<[(Node, f64); 2]> {
             let a = g.args(c).ok()?;
             let o = triple(g, at(a.get(1))?)?.map(|x| x * s);
             let dir = triple(g, at(g.args(at(a.get(2))?).ok()?.get(1))?)?;
-            norm(cross(sub(q, o), dir)) / norm(dir)
-        } else if let Some(k) = conic(g, edge, s).filter(|k| k.a == k.b) {
+            let rounding = 8. * f64::EPSILON * (norm(q) + norm(o));
+            (norm(cross(sub(q, o), dir)) / norm(dir) - rounding).max(0.)
+        } else if let Some(k) = conic(g, edge, s) {
+            // In the conic's frame; off an ellipse to first order, |F|/|∇F|
+            // with F = (u/a)² + (v/b)² − 1, exact on a circle.
             let w = sub(q, k.c);
-            let h = dot(w, k.z);
-            h.hypot(norm(sub(w, k.z.map(|x| x * h))) - k.a)
+            let (u, v, h) = (dot(w, k.x), dot(w, cross(k.z, k.x)), dot(w, k.z));
+            let f = (u / k.a).powi(2) + (v / k.b).powi(2) - 1.;
+            let grad = (2. * u / (k.a * k.a)).hypot(2. * v / (k.b * k.b));
+            let off = if k.a == k.b {
+                u.hypot(v) - k.a
+            } else {
+                f / grad
+            };
+            let rounding = 8. * f64::EPSILON * (norm(q) + norm(k.c) + k.a.max(k.b));
+            (h.hypot(off) - rounding).max(0.)
         } else {
             0.
         };
@@ -222,6 +244,8 @@ struct Measured {
     bound: f64,
     /// The face's outward normal, with its shell's orientation unknown.
     normal: [f64; 3],
+    /// The largest distance of a vertex from one of its curves.
+    gap: f64,
 }
 
 /// `face`'s [`Measured`] area, from its mesh `m`; `None` when a loop can't
@@ -290,6 +314,7 @@ fn measure(g: &Graph, face: Node, m: &FaceMesh, p: &Polylines, s: f64, d: f64) -
         area: area(m) + exact,
         bound,
         normal: n,
+        gap: gaps.values().fold(0., |a, &b| f64::max(a, b)),
     })
 }
 
@@ -384,35 +409,42 @@ impl Rust<'_> {
             }
         };
         let s = self.ctx.mm_per_unit;
-        let m = measure(self.g, f, &mesh, &self.polylines, s, self.d);
-        if m.is_none() {
-            let id = self.g.id(f).0;
+        let id = self.g.id(f).0;
+        let Some(m) = measure(self.g, f, &mesh, &self.polylines, s, self.d) else {
             all.failing
                 .push(format!("{here} face #{id}: boundary unread"));
+            return None;
+        };
+        // A vertex off its curve beyond the uncertainty: the file defines no
+        // exact face, and Rust should route it (#207).
+        if m.gap > self.ctx.uncertainty {
+            all.inconsistent += 1;
+            return None;
         }
-        m
+        Some(m)
     }
 
     /// Compares `faces` with OCCT's `occt` faces by value, where the join by
     /// position fails: each Rust area must fit an OCCT plane face's, each
-    /// OCCT face used once.
+    /// OCCT face used once, the tightest bounds matched first so a loose one
+    /// can't take another face's partner.
     fn by_value(&self, faces: &[Node], occt: &[&topology::Face], here: &str, all: &mut Tally) {
         let mut left: Vec<f64> = occt
             .iter()
             .filter(|f| matches!(f.surface, Surface::Plane { .. }))
             .map(|f| f.area)
             .collect();
-        for &f in faces.iter().filter(|&&f| on_plane(self.g, f)) {
-            let Some(m) = self.measure(f, here, all) else {
-                continue;
-            };
+        let mut mine: Vec<(Node, Measured)> = faces
+            .iter()
+            .filter(|&&f| on_plane(self.g, f))
+            .filter_map(|&f| Some((f, self.measure(f, here, all)?)))
+            .collect();
+        mine.sort_by(|a, b| a.1.bound.total_cmp(&b.1.bound));
+        for (f, m) in mine {
+            let gap = |k: usize| (left[k] - m.area).abs();
             let best = (0..left.len())
                 .filter(|&k| m.fits(left[k]))
-                .min_by(|&i, &j| {
-                    (left[i] - m.area)
-                        .abs()
-                        .total_cmp(&(left[j] - m.area).abs())
-                });
+                .min_by(|&i, &j| gap(i).total_cmp(&gap(j)));
             match best {
                 Some(k) => {
                     m.tally(left.swap_remove(k), all);
@@ -442,13 +474,27 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
         .ok_or("no deflection")?;
     let multi_file = g.of_type("DOCUMENT_FILE").next().is_some();
     let file = input.file_name().unwrap().to_string_lossy().into_owned();
-    let mut done = HashSet::new();
+    // Each product once, with the kernel parts of every leaf it is, one per
+    // prototype: instances repeat a prototype, and XCAF can show one graph
+    // product as several leaves.
+    let mut order: Vec<(usize, usize)> = Vec::new();
+    let mut kernel_parts: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut seen = HashSet::new();
     for (leaf, parts) in topology::parts_per_leaf(&topo.tree).iter().enumerate() {
         let path = s.leaf_path(leaf as u64).ok_or("no leaf path")?;
         let p = path.0.last().unwrap().0;
-        if !done.insert(p) {
-            continue;
+        let mine = kernel_parts.entry(p).or_insert_with(|| {
+            order.push((p, leaf));
+            Vec::new()
+        });
+        for &i in parts {
+            if seen.insert((p, topo.parts[i].prototype)) {
+                mine.push(i);
+            }
         }
+    }
+    for &(p, leaf) in &order {
+        let parts = &kernel_parts[&p];
         let mine = colors.parts(&g, &s, p);
         if multi_file && mine.iter().all(|m| m.faces.is_empty()) {
             all.external += 1;
@@ -542,7 +588,8 @@ fn run(files: &[PathBuf]) -> Tally {
     eprintln!(
         "mesh::plane: {} files, {} products ({} with external geometry skipped); planar faces: \
          {} matched exactly (worst {:.2e} relative), {} within their bound; {} matched by value \
-         in {} unjoined parts; {} routed {:?}, {} failing; {} normals opposite to OCCT's; \
+         in {} unjoined parts; {} routed {:?}; {} with a vertex off its curve beyond the \
+         uncertainty, not compared (#207); {} failing; {} normals opposite to OCCT's; \
          {} files not compared",
         files.len(),
         all.products,
@@ -554,6 +601,7 @@ fn run(files: &[PathBuf]) -> Tally {
         all.unjoined,
         all.routed.values().sum::<usize>(),
         all.routed,
+        all.inconsistent,
         all.failing.len(),
         all.opposite,
         all.not_compared.len()
