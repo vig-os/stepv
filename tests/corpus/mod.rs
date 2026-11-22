@@ -5,10 +5,12 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use stepv::graph::{self, Graph, Node};
 use stepv::topology::{self, Topology};
 use stepv::{Scene, occt};
 
@@ -154,4 +156,39 @@ pub fn collect(p: &Path, out: &mut Vec<PathBuf>) {
     {
         out.push(p.to_path_buf());
     }
+}
+
+/// The `EDGE_CURVE`s under a product's bodies and the representations
+/// they're related to without a transformation (AP203 hybrids, as
+/// `graph::bounds` adds them), in the graph's order.
+pub fn edges_of(g: &Graph, bodies: &[Node]) -> Vec<Node> {
+    let mut reps = bodies.to_vec();
+    let mut k = 0;
+    while let Some(&rep) = reps.get(k) {
+        k += 1;
+        for &r in g.referrers(rep) {
+            let simple = |t| g.type_name(r) == graph::TypeName::Simple(t);
+            if simple("SHAPE_REPRESENTATION_RELATIONSHIP")
+                || simple("MECHANICAL_DESIGN_AND_DRAUGHTING_RELATIONSHIP")
+            {
+                for &o in g.refs(r) {
+                    if !reps.contains(&o) {
+                        reps.push(o);
+                    }
+                }
+            }
+        }
+    }
+    let (mut seen, mut out, mut stack) = (HashSet::new(), Vec::new(), reps);
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) || g.is_a(n, "MAPPED_ITEM") {
+            continue;
+        }
+        if g.is_a(n, "EDGE_CURVE") {
+            out.push(n);
+        } else {
+            stack.extend(g.refs(n).iter().rev());
+        }
+    }
+    out
 }

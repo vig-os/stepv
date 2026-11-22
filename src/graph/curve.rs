@@ -285,3 +285,61 @@ pub(crate) fn bspline(g: &Graph, c: Node, s: f64) -> Result<BSpline, Reason> {
         knots,
     })
 }
+
+/// A list of references, `None` unless every element is one.
+fn refs_list(v: Option<&Value<'_>>) -> Option<Vec<Node>> {
+    list(v)?
+        .iter()
+        .map(|x| match x {
+            Value::Ref(n) => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An `ADVANCED_FACE`'s bounds (`FACE_BOUND`s and `FACE_OUTER_BOUND`s), its
+/// surface, and whether the surface's normal is the face's (`same_sense`).
+pub(crate) fn advanced_face(g: &Graph, f: Node) -> Result<(Vec<Node>, Node, bool), Reason> {
+    let bad = Reason("malformed face");
+    let a = fields(g, f, "ADVANCED_FACE").map_err(|_| bad)?;
+    let bounds = refs_list(a.get(1)).ok_or(bad)?;
+    Ok((
+        bounds,
+        refers(&a, 2).ok_or(bad)?,
+        logical(a.get(3)).ok_or(bad)?,
+    ))
+}
+
+/// A `FACE_BOUND`'s or `FACE_OUTER_BOUND`'s `EDGE_LOOP`, as its oriented
+/// edges, and its `orientation`: whether the face walks the loop in the
+/// loop's own direction.
+pub(crate) fn face_bound(g: &Graph, b: Node) -> Result<(Vec<Node>, bool), Reason> {
+    let bad = Reason("malformed bound");
+    let a = ["FACE_BOUND", "FACE_OUTER_BOUND"]
+        .iter()
+        .find(|t| g.is_a(b, t))
+        .and_then(|t| fields(g, b, t).ok())
+        .ok_or(bad)?;
+    let lp = refers(&a, 1).ok_or(bad)?;
+    if !g.is_a(lp, "EDGE_LOOP") {
+        return Err(Reason("loop:not an edge loop"));
+    }
+    let edges = fields(g, lp, "EDGE_LOOP")
+        .ok()
+        .and_then(|l| refs_list(l.get(1)))
+        .ok_or(bad)?;
+    Ok((edges, logical(a.get(2)).ok_or(bad)?))
+}
+
+/// A `PLANE`'s position at `s` mm per unit: its origin, then its unit axes
+/// x, y and z (the normal, `x × y`), all finite.
+pub(crate) fn plane(g: &Graph, p: Node, s: f64) -> Result<[[f64; 3]; 4], Reason> {
+    let bad = Reason("malformed plane");
+    let a = fields(g, p, "PLANE").map_err(|_| bad)?;
+    let f = refers(&a, 1).and_then(|n| frame(g, n, s).ok()).ok_or(bad)?;
+    if !f.iter().all(|v| v.is_finite()) {
+        return Err(Reason("non-finite plane"));
+    }
+    let col = |k: usize| [f[k], f[4 + k], f[8 + k]];
+    Ok([col(3), col(0), col(1), col(2)])
+}

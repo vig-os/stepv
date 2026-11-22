@@ -28,7 +28,7 @@ mod stepgen;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use corpus::{apply, corpus_files, face_edges, invert, kernel_summary};
+use corpus::{apply, corpus_files, edges_of, face_edges, invert, kernel_summary};
 use stepgen::{F, part_file};
 use stepv::Deflection;
 use stepv::graph::{self, Graph, Node};
@@ -96,41 +96,6 @@ fn apart(a: &[[f64; 3]], b: &[[f64; 3]]) -> [f64; 2] {
     let one =
         |a: &[[f64; 3]], b: &[[f64; 3]]| a.iter().map(|&q| to_polyline(q, b)).fold(0f64, f64::max);
     [one(a, b), one(b, a)]
-}
-
-/// The `EDGE_CURVE`s under a product's bodies and the representations
-/// they're related to without a transformation (AP203 hybrids, as
-/// `graph::bounds` adds them), in the graph's order.
-fn edges_of(g: &Graph, bodies: &[Node]) -> Vec<Node> {
-    let mut reps = bodies.to_vec();
-    let mut k = 0;
-    while let Some(&rep) = reps.get(k) {
-        k += 1;
-        for &r in g.referrers(rep) {
-            let simple = |t| g.type_name(r) == graph::TypeName::Simple(t);
-            if simple("SHAPE_REPRESENTATION_RELATIONSHIP")
-                || simple("MECHANICAL_DESIGN_AND_DRAUGHTING_RELATIONSHIP")
-            {
-                for &o in g.refs(r) {
-                    if !reps.contains(&o) {
-                        reps.push(o);
-                    }
-                }
-            }
-        }
-    }
-    let (mut seen, mut out, mut stack) = (HashSet::new(), Vec::new(), reps);
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n) || g.is_a(n, "MAPPED_ITEM") {
-            continue;
-        }
-        if g.is_a(n, "EDGE_CURVE") {
-            out.push(n);
-        } else {
-            stack.extend(g.refs(n).iter().rev());
-        }
-    }
-    out
 }
 
 fn check(input: &Path, all: &mut Tally) -> Result<(), String> {

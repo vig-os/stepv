@@ -81,6 +81,12 @@ jaq-core = { version = "=3.1.2", optional = true }
 jaq-std = { version = "=3.0.4", optional = true }
 jaq-json = { version = "=2.0.3", optional = true, default-features = false, features = ["std", "serde"] }
 
+# The planar face mesher's constrained Delaunay triangulation (ADR-0001
+# §2.6, M2): exact predicates, and `try_add_constraint` reports a crossing
+# instead of splitting it. Pinned exactly: the routing relies on that
+# contract. MIT OR Apache-2.0.
+spade = "=2.15.1"
+
 # PNG encoding for `--png` (the rasteriser itself is src/render.rs).
 png = "0.18"
 

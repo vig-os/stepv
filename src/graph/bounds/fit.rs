@@ -406,8 +406,10 @@ impl Walk<'_> {
 
 /// The length uncertainty of `rep`'s context, in its units: the largest
 /// `UNCERTAINTY_MEASURE_WITH_UNIT` in the context's length unit (the last
-/// one, which [`mm_per_unit`] reads).
-fn uncertainty(g: &Graph, rep: Node) -> Option<f64> {
+/// one, which [`crate::graph::Product::mm_per_unit`] reads). `None` without one, or when none is
+/// finite and positive.
+#[must_use]
+pub fn uncertainty(g: &Graph, rep: Node) -> Option<f64> {
     let ctx = fields(g, rep, "REPRESENTATION")
         .ok()
         .and_then(|a| refers(&a, 2))?;

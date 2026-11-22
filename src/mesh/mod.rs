@@ -4,8 +4,10 @@
 //! It is edge-first: [`edges`] turns every `EDGE_CURVE` into one canonical
 //! polyline, shared by every face that uses it, so neighbouring faces share
 //! their boundary points by construction. Faces (M2/M3) refer to those
-//! points as [`edges::EdgePoint`]s.
+//! points as [`edges::EdgePoint`]s; [`plane`] meshes planar faces (M2).
 
 pub mod edges;
+pub mod plane;
 
 pub use edges::{EdgePoint, Polyline, Polylines, Tolerance};
+pub use plane::{Context, FaceMesh, Route};
