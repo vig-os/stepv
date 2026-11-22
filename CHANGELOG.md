@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Rust mesher, M1a: edge polylines** ([#142](https://github.com/vig-os/stepv/issues/142), ADR-0001 §2.6):
+  - `stepv::mesh::Polylines` turns every `LINE`, `CIRCLE` and `ELLIPSE` edge (directly or through a
+    `SURFACE_CURVE`/`SEAM_CURVE`) into one polyline from its start vertex to its end vertex, shared
+    by every face that uses it; a face walks it in its oriented edge's direction
+  - Every chord within d and every turn within a, with §2.6's clamped circle count and the ellipse
+    bound `√(8d/A)`; other curves are routed with a reason
+  - Within d of OCCT's edge polylines, and OCCT's within 2·d of them, on `tests/data`, nist-pmi and occt-import-js,
+    checked in CI; Ultimaker's 80,500 analytic edges take about 270 ms on one thread
 - **The graph core, G5: `stepv graph`** ([#137](https://github.com/vig-os/stepv/issues/137), ADR-0001 §2.4):
   - `stepv graph summary|census|tree|query <input>` prints the file's own graph as one JSON value,
     without the kernel: the header, units, census and model box; the census by type and part; a

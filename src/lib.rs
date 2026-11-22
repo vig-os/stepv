@@ -18,6 +18,7 @@ pub mod glb;
 pub mod graph;
 pub mod header;
 pub mod measure;
+pub mod mesh;
 pub mod occt;
 pub mod render;
 pub mod topology;

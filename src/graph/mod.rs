@@ -14,6 +14,7 @@
 mod args;
 mod bounds;
 mod colors;
+pub(crate) mod curve;
 pub mod json;
 mod lex;
 #[cfg(feature = "query")]

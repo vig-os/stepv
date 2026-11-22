@@ -43,6 +43,7 @@ use super::{
     mapped_rep, num, ref_list, related_reps, wire,
 };
 use crate::BBox;
+use crate::graph::curve::Conic;
 use crate::graph::structure::{compose_raw, default_x, fields, frame, mm_per_unit, real, refers};
 use crate::graph::{Graph, Node, Placement, Reason, Value, mapped_placement};
 
@@ -384,13 +385,13 @@ impl Walk<'_> {
             .into_iter()
             .map(|p| match p {
                 Piece::Point(p) => Piece::Point(apply(t, p)),
-                Piece::Conic { c, x, y, a, b } => Piece::Conic {
+                Piece::Conic(Conic { c, x, y, a, b }) => Piece::Conic(Conic {
                     c: apply(t, c),
                     x: rot(x),
                     y: rot(y),
                     a,
                     b,
-                },
+                }),
             })
             .collect();
         Ok(Face {
@@ -528,7 +529,7 @@ fn sphere(faces: &[Face], c: [f64; 3], unc: f64) -> Option<Fit> {
                 for p in &f.edges {
                     r = r.max(match *p {
                         Piece::Point(p) => norm(sub(p, c)),
-                        Piece::Conic { c: o, a, b, .. } => norm(sub(o, c)) + a.max(b),
+                        Piece::Conic(Conic { c: o, a, b, .. }) => norm(sub(o, c)) + a.max(b),
                     });
                 }
             }
@@ -549,7 +550,7 @@ fn along(p: &Piece, o: [f64; 3], d: [f64; 3]) -> (f64, f64) {
             let t = dot(sub(p, o), d);
             (t, t)
         }
-        Piece::Conic { c, x, y, a, b } => {
+        Piece::Conic(Conic { c, x, y, a, b }) => {
             let t = dot(sub(c, o), d);
             let h = ((a * dot(x, d)).powi(2) + (b * dot(y, d)).powi(2)).sqrt();
             (t - h, t + h)
@@ -561,7 +562,7 @@ fn along(p: &Piece, o: [f64; 3], d: [f64; 3]) -> (f64, f64) {
 fn radial(p: &Piece, o: [f64; 3], d: [f64; 3]) -> f64 {
     let (q, extra) = match *p {
         Piece::Point(q) => (q, 0.),
-        Piece::Conic { c, a, b, .. } => (c, a.max(b)),
+        Piece::Conic(Conic { c, a, b, .. }) => (c, a.max(b)),
     };
     let w = sub(q, o);
     norm(sub(w, scale(d, dot(w, d)))) + extra
