@@ -563,6 +563,58 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     about 270 ms; the other 16,061 are B-splines (M1b). The graph's model diagonal there is 42,076 mm
     against OCCT's 2,572 (16×), the case where §2.6 uses the OCCT-equivalent diagonal; at either d,
     the angle bound sets every count.
+- **M1b's realised B-spline edge polylines** (#143), in `src/mesh/edges/bspline.rs`, through the same
+  single exit `Polylines::build`:
+  - **The resolver** is `curve::bspline` (`src/graph/curve.rs`): `B_SPLINE_CURVE_WITH_KNOTS`, simple or
+    complex, rational or not, as a struct of arrays. It validates before anything is evaluated, and
+    each failure is routed with its reason: degree 1..=25 (`unsupported degree`; OCCT's limit, as work
+    per span grows with p³), multiplicities 1..=p + 1 (`bad multiplicity`) summing to n + p + 1
+    (`knot count`), finite (`non-finite knot`) and non-decreasing (`decreasing knots`) knots, no
+    interior multiplicity over p, where the curve could jump (`discontinuous B-spline`), a non-empty
+    range `[u_p, u_n]` (`empty knot range`), finite weights > 0 (`non-positive weight`), one per control
+    point (`malformed weights`), and control points finite in mm. Weights are scaled so the largest is
+    1, so a weighted coordinate can't overflow. `closed_curve` and `self_intersect` must be LOGICALs,
+    but ISO 10303-42 makes them "for information only", so nothing relies on them.
+  - **Evaluation** is the blossom by de Boor's triangle, every step a convex combination; a Bézier span
+    over any `[a, b]` inside a knot span comes straight from it, so a trimmed range needs no extra
+    insertion. Halving is de Casteljau, in place. Each span is put in standard form (equal end weights,
+    a reparametrisation that changes neither the curve nor its control points) before its test, so a
+    halving doesn't land where an extreme end weight makes the curve stall.
+  - **The range.** `EDGE_CURVE` gives vertices, not parameters, so each vertex is located on the curve
+    by branch and bound over halved spans (the chord less the control points' deviation from it bounds
+    a span's distance from below; a box's bound tightens only linearly and exploded near a minimum
+    that isn't zero). A vertex farther than d from the curve is `vertex off curve`. The edge runs from
+    its start's parameter to its end's in the curve's direction (swapped for `same_sense = .F.`, the
+    points then reversed, so the two senses give exactly reversed points), through the seam when the
+    curve is closed (its ends within d) and it must (`vertex order` otherwise). A closed edge sweeps the
+    whole curve; on an open curve it is `closed edge on an open curve`.
+  - **Steps (M1b round 2).** Every chord joins two points of the curve. A closed curve's ends can be
+    up to d apart (g), and a chord from the curve's end to the first point past its start would lie up
+    to about d + g from the curve; so both ends are emitted, joined by a step of length g, which lies
+    within g of the curve. So is a vertex farther than d·10⁻⁶ from its curve point. Nearer, the vertex
+    replaces it (a separate point would make a segment of rounding, whose direction is noise), which
+    can add d·10⁻⁶ to a chord's deviation. The turn at a step's ends is exempt, like a C0 knot's.
+  - **`zero tangent`.** At a joint inside a C1 piece, an end leg that rounding could turn by over
+    10⁻³·θ (no longer than 2⁻⁴⁶ of the span's largest coordinate, about 48 halvings' rounding, over
+    10⁻³·θ) is a vanishing derivative, a possible cusp, and the edge is routed. A cusp inside a span
+    never passes the angle test and hits the depth bound.
+  - **Termination.** At most 48 halvings per span (`too many segments` beyond) and at most 2^20
+    segments per edge, so the work is at most 2 · 2^20 tests plus the knot spans; the vertex search
+    examines at most 2^16 spans (`vertex inversion`).
+  - **The golden** (`tests/mesh_edges.rs`) compares OCCT's B-spline face edges too, with M1a's join and
+    bounds, and a file that can't be compared fails the gate (#200, #203). OCCT's own B-spline seams
+    (twice in one face: healing closes a periodic face bounded by two loops with one, and no
+    `EDGE_CURVE` names it) and the OCCT edges whose ends are those of an edge Rust routes are counted,
+    not compared, but only after they fail the comparison. A seam is exempt only when no Rust
+    polyline's ends are its ends (round 2): otherwise a Rust closed edge over part of its curve, whose
+    points all lie on OCCT's seam, would pass one way and have OCCT's edge skipped the other. `tests/data` gains a plate bounded by a
+    cubic and a complex-form rational semicircle. On `tests/data`, nist-pmi and occt-import-js
+    (88 files): 0 unmatched, 0 not compared, 2,111 B-spline polylines; worst 0.500·d (Rust's points
+    from OCCT's polylines) and 1.057·d (OCCT's from Rust's); 211 OCCT seams and 12 edges routed in Rust
+    (31 `QUASI_UNIFORM_CURVE` edges, `unsupported curve`; 1 `zero tangent`) counted.
+  - **Ultimaker (`--release`, one thread):** 96,476 of 96,561 edges now get a polyline (M1a: 80,500),
+    465,369 points in about 580 ms (M1a: 270 ms for the analytic ones). The 85 left are `zero
+    tangent`: near-cusps where the tangent still turns at spans of about 10⁻⁹ mm.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The
@@ -774,9 +826,28 @@ a view are indistinguishable:
   - n is the larger of the two counts, which is conservative and costs extra points only on eccentric
     ellipses. A curvature-adaptive step is a later refinement.
 - **B-spline curves:** recursive subdivision (de Boor / knot insertion) until each span's control
-  polygon lies within d of its chord and its legs turn by at most a. The convex-hull property makes
-  both tests conservative. Rational curves need weights > 0, else the edge is routed. Lines get no
-  interior points.
+  polygon lies within d of its chord and every two of its legs turn by at most **a/2** (amended in
+  M1b, #143). Rational curves need weights > 0, else the edge is routed. Lines get no interior points.
+  - **Why a/2, not a.** "Legs turn by at most a" bounds the turn *within* a span, not between two
+    spans' chords. A uniform quadratic with control points (0, 0), (10, 0), (10, 0) + 0.1·(cos 20°,
+    sin 20°) and that point + 10·(cos 40°, sin 40°) passes both tests at d = 0.02 and a = 20° in each
+    of its two spans, and its chords turn by 39.8°: up to 2a at a C1 joint.
+  - **Soundness.** A span lies in its control points' hull, so within d of the chord, a convex set.
+    The chord is the sum of the legs, so it lies within a/2 of each (the cone of directions within
+    a/2 ≤ π/2 of a leg is convex). At a C1 joint the shared end tangent is the last leg of one span
+    and the first of the next (collinear by de Casteljau, or C1 at a knot of multiplicity < p), so
+    consecutive chords turn by at most a/2 + a/2 = a. With weights > 0 the hull holds for a rational
+    curve too, and its end tangent still points along its end leg.
+  - **Rejected: the angle across adjacent spans ≤ a.** Fewer segments, but it couples neighbouring
+    spans, which breaks the per-span independence M4a's rayon/SIMD needs and makes the termination
+    proof non-local. The cost of a/2 is up to about 2× the segments where the angle bound dominates;
+    the chordal d bound usually dominates.
+  - **C0 knots are exempt, emitted exactly, not routed.** At an interior knot of multiplicity ≥ p the
+    curve can have a real corner, which no turn bound can meet, and routing would lose every degree-1
+    curve. The range is split there; each C1 piece is flattened as above, the knot's curve point is an
+    exact polyline vertex, and the turn at it is exempt. So is the seam of a closed B-spline, which
+    nothing makes tangent-continuous. Faces (M2/M3) must expect a corner at those points. A degree-1
+    B-spline comes out as exactly its control polygon.
 - **The diagonal:** the graph's model box is conservative, so it may be larger than OCCT's. G4 reports
   the ratio. If it is over 1.05 on corpus files, the fast path uses the OCCT-equivalent diagonal of the
   B-rep's edges instead, so the Rust mesh is never coarser than OCCT's.
