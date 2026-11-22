@@ -2,7 +2,7 @@
 type: issue
 state: open
 created: 2026-10-04T11:16:29Z
-updated: 2026-11-15T04:01:47Z
+updated: 2026-11-21T18:08:04Z
 author: renovate[bot]
 author_url: https://github.com/renovate[bot]
 url: https://github.com/vig-os/stepv/issues/2
@@ -13,18 +13,24 @@ milestone: none
 projects: none
 parent: none
 children: none
-synced: 2026-11-15T09:01:39.053Z
+synced: 2026-11-22T09:34:59.478Z
 ---
 
 # [Issue 2]: [Dependency Dashboard](https://github.com/vig-os/stepv/issues/2)
 
 This issue lists Renovate updates and detected dependencies. Read the [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/) docs to learn more.<br>[View this repository on the Mend.io Web Portal](https://developer.mend.io/github/vig-os/stepv).
 
+## Awaiting Schedule
+
+The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
+
+ - [ ] <!-- unschedule-branch=renovate/cachix-install-nix-action-32.x -->ci(actions): update cachix/install-nix-action action to v32
+
 ## Open
 
 The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.
 
- - [ ] <!-- rebase-branch=renovate/actions-create-github-app-token-digest -->[chore(deps): update actions/create-github-app-token digest to 64ab729](../pull/114)
+ - [ ] <!-- rebase-branch=renovate/actions-create-github-app-token-digest -->[chore(deps): update actions/create-github-app-token digest to f418cff](../pull/114)
  - [ ] <!-- rebase-branch=renovate/github-actions-(minor-and-patch) -->[ci(actions): update github-actions (minor and patch)](../pull/56) (`actions/upload-artifact`, `cachix/install-nix-action`, `rust-lang/crates-io-auth-action`)
  - [ ] <!-- rebase-branch=renovate/macos-26.x -->[ci(actions): update dependency macos to v26](../pull/57)
  - [ ] <!-- rebase-all-open-prs -->**Click on this checkbox to rebase all open PRs at once**
@@ -37,7 +43,7 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/workflows/kernel.yml (5)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`, `v32.0.0`]
  - `cachix/cachix-action v17@38b082610b782e7e93e209c35fd730d399dee866`
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
  - `ubuntu 26.04`
@@ -62,17 +68,17 @@ The following updates have all been created. To force a retry/rebase of any, cli
 <details><summary>.github/workflows/release-extension.yml (17)</summary>
 
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`, `v32.0.0`]
  - `cachix/cachix-action v17@38b082610b782e7e93e209c35fd730d399dee866`
  - `actions/attest-build-provenance v4.2.2@4d101475d8b20a2381f78447822ac1eab6504dd8`
  - `actions/upload-artifact v7.0.1@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` → [Updates: `v7.0.2`]
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`, `v32.0.0`]
  - `cachix/cachix-action v17@38b082610b782e7e93e209c35fd730d399dee866`
  - `actions/attest-build-provenance v4.2.2@4d101475d8b20a2381f78447822ac1eab6504dd8`
  - `actions/upload-artifact v7.0.1@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` → [Updates: `v7.0.2`]
  - `actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1`
- - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`]
+ - `cachix/install-nix-action v31.11.1@13d8dd58da0234aa297dedd986986ccb8e7f3e24` → [Updates: `v31.11.5`, `v32.0.0`]
  - `cachix/cachix-action v17@38b082610b782e7e93e209c35fd730d399dee866`
  - `rust-lang/crates-io-auth-action v1.0.5@c6f97d42243bad5fab37ca0427f495c86d5b1a18` → [Updates: `v1.0.6`]
  - `ubuntu 26.04`
