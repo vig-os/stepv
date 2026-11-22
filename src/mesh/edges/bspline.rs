@@ -10,6 +10,13 @@
 //! reversed), through the curve's seam when the curve is closed (its ends
 //! within d) and must. A closed edge sweeps the whole curve.
 //!
+//! **Steps.** Every chord joins two points of the curve. A vertex farther
+//! than d·10⁻⁶ from the curve point it stands at is joined to that point by
+//! a step, and so are the curve's two ends across a closed curve's seam
+//! gap; a step lies within its length (≤ d) of the curve. Nearer, the vertex
+//! replaces the curve point, which can add d·10⁻⁶ to a chord's deviation.
+//! The turn at a step's ends is exempt, as at a C0 knot.
+//!
 //! **Pieces.** The range is cut at its C0 knots (interior multiplicity ≥ p)
 //! and at the seam. Each piece is cut at its knots into Bézier spans, and a
 //! span is halved until it passes [`flat`]. Every span end is a polyline
@@ -265,6 +272,12 @@ fn invert(c: &BSpline, v: [f64; 3], eps: f64) -> Result<(f64, f64), Reason> {
 }
 
 impl Polylines {
+    /// The last point appended.
+    fn last(&self) -> [f64; 3] {
+        let n = self.x.len() - 1;
+        [self.x[n], self.y[n], self.z[n]]
+    }
+
     /// Appends `q`, unless it repeats the last point since `start`.
     fn push_new(&mut self, start: usize, q: [f64; 3]) {
         let n = self.x.len();
@@ -308,7 +321,18 @@ impl Polylines {
         self.push(va);
         let mut s = Scratch::default();
         let mut segments = 0;
+        // A point within d·10⁻⁶ of the last stands for it: a separate one
+        // would make a segment of rounding, whose direction is noise.
+        let close = |p: [f64; 3], q: [f64; 3]| norm(sub(p, q)) <= d * 1e-6;
         for (a, b) in ranges.into_iter().filter(|(a, b)| a < b) {
+            // The range's own first point, unless the last point stands for
+            // it: a vertex off the curve, or the curve's end across a seam
+            // gap, is joined to it by a step, so no chord of the curve
+            // starts off it.
+            let first = at(c, a);
+            if !close(self.last(), first) {
+                self.push(first);
+            }
             // The C0 knots inside: runs of at least p equal knots.
             let mut cuts = vec![a];
             cuts.extend(
@@ -354,8 +378,9 @@ impl Polylines {
                 }
             }
         }
-        // The last point is the curve's end: the vertex point replaces it.
-        if self.x.len() - start >= 2 {
+        // The last point is the curve's end: the vertex point replaces it
+        // when it stands for it, else follows it by a step.
+        if close(self.last(), vb) && self.x.len() - start >= 2 {
             self.x.pop();
             self.y.pop();
             self.z.pop();

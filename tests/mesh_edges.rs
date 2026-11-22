@@ -252,45 +252,88 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
                 )),
             }
         }
+        let rust_ends: Vec<[[f64; 3]; 2]> =
+            rust.iter().map(|(_, p)| [p[0], p[p.len() - 1]]).collect();
         for ((o, _), &seam) in occt
             .iter()
             .zip(&used)
             .zip(&seams)
             .filter(|((_, u), _)| !**u)
         {
-            all.by_points += 1;
-            let gap = farthest(o, &rust_all);
-            if let Some(gap) = gap.filter(|&g| g <= 2. * d + slack(o)) {
-                all.worst[1] = all.worst[1].max(gap / d);
-                continue;
+            let ends = Ends {
+                rust: &rust_ends,
+                routed: &routed_ends,
+            };
+            match occt_left(o, seam, &rust_all, ends, d, slack(o)) {
+                Left::Near(gap) => {
+                    all.by_points += 1;
+                    all.worst[1] = all.worst[1].max(gap / d);
+                }
+                Left::Skipped(why) => *all.occt_skipped.entry(why).or_default() += 1,
+                Left::Far(gap) => {
+                    all.by_points += 1;
+                    all.unmatched.push(format!(
+                        "{file} product {p}: OCCT edge {:?} → {:?} ({} points) lies {gap:?} mm from Rust's",
+                        o[0],
+                        o[o.len() - 1],
+                        o.len()
+                    ));
+                }
             }
-            // Not on Rust's polylines. OCCT's healing closes a periodic face
-            // bounded by two loops with a seam no `EDGE_CURVE` names, and an
-            // edge Rust routes has no polyline: both are counted instead.
-            let (oa, ob) = (o[0], o[o.len() - 1]);
-            let tol = d + slack(o);
-            let near = |[a, b]: [[f64; 3]; 2]| {
-                (dist(a, oa) <= tol && dist(b, ob) <= tol)
-                    || (dist(a, ob) <= tol && dist(b, oa) <= tol)
-            };
-            let skip = if seam {
-                "OCCT B-spline seam"
-            } else if routed_ends.iter().any(|&e| near(e)) {
-                "routed in Rust"
-            } else {
-                all.unmatched.push(format!(
-                    "{file} product {p}: OCCT edge {:?} → {:?} ({} points) lies {gap:?} mm from Rust's",
-                    o[0],
-                    o[o.len() - 1],
-                    o.len()
-                ));
-                continue;
-            };
-            all.by_points -= 1;
-            *all.occt_skipped.entry(skip).or_default() += 1;
         }
     }
     Ok(())
+}
+
+/// The end points of Rust's polylines and of the edges Rust routes, in
+/// product mm.
+#[derive(Clone, Copy)]
+struct Ends<'a> {
+    rust: &'a [[[f64; 3]; 2]],
+    routed: &'a [[[f64; 3]; 2]],
+}
+
+/// What became of an OCCT edge no Rust polyline matched one to one.
+#[derive(Debug, PartialEq)]
+enum Left {
+    /// Within 2·d of Rust's polylines, point by point.
+    Near(f64),
+    /// Counted, not compared.
+    Skipped(&'static str),
+    /// Unmatched: the gate fails.
+    Far(Option<f64>),
+}
+
+/// The OCCT→Rust verdict on such an edge `o`, at deflection `d` with
+/// OCCT's f32 `slack`. Off Rust's polylines, it is skipped only when it provably has no
+/// Rust counterpart: OCCT's healing closes a periodic face bounded by two
+/// loops with a seam no `EDGE_CURVE` names, so a `seam` whose ends are no
+/// Rust polyline's ends; and an edge whose ends are those of an edge Rust
+/// routes, which has no polyline.
+fn occt_left(
+    o: &[[f64; 3]],
+    seam: bool,
+    rust: &[&[[f64; 3]]],
+    ends: Ends<'_>,
+    d: f64,
+    slack: f64,
+) -> Left {
+    let tol = d + slack;
+    let gap = farthest(o, rust);
+    if let Some(gap) = gap.filter(|&g| g <= 2. * d + slack) {
+        return Left::Near(gap);
+    }
+    let (oa, ob) = (o[0], o[o.len() - 1]);
+    let near = |&[a, b]: &[[f64; 3]; 2]| {
+        (dist(a, oa) <= tol && dist(b, ob) <= tol) || (dist(a, ob) <= tol && dist(b, oa) <= tol)
+    };
+    if seam && !ends.rust.iter().any(near) {
+        Left::Skipped("OCCT B-spline seam")
+    } else if ends.routed.iter().any(near) {
+        Left::Skipped("routed in Rust")
+    } else {
+        Left::Far(gap)
+    }
 }
 
 /// An `EDGE_CURVE`'s two vertex points at `s` mm per unit, as written.
@@ -535,4 +578,40 @@ fn corpus_edges_match_occts() {
     if let Some(files) = corpus_files("mesh_edges") {
         run(&files);
     }
+}
+
+#[test]
+fn a_seam_whose_ends_a_rust_polyline_shares_is_not_exempt() {
+    // OCCT's closed seam loop at V = (1, 0, 0), and a Rust closed edge at V
+    // over only part of it: every Rust point lies on OCCT's loop, so the
+    // pair passes Rust → OCCT, but most of OCCT's loop is far from Rust's.
+    let ring = |t: f64| [t.cos(), t.sin(), 0.];
+    let occt: Vec<[f64; 3]> = (0..=64)
+        .map(|i| ring(f64::from(i) * std::f64::consts::TAU / 64.))
+        .collect();
+    let rust = vec![ring(0.), ring(0.3), ring(0.6), ring(0.)];
+    let ends = Ends {
+        rust: &[[rust[0], rust[3]]],
+        routed: &[],
+    };
+    let left = occt_left(&occt, true, &[&rust], ends, 1e-3, 0.);
+    assert!(matches!(left, Left::Far(Some(g)) if g > 0.5), "{left:?}");
+    // A healing seam, its ends no Rust polyline's: counted.
+    let none = Ends {
+        rust: &[],
+        routed: &[],
+    };
+    assert_eq!(
+        occt_left(&occt, true, &[&rust], none, 1e-3, 0.),
+        Left::Skipped("OCCT B-spline seam")
+    );
+    // An edge Rust routes: counted.
+    let routed = Ends {
+        rust: &[],
+        routed: &[[ring(0.), ring(0.)]],
+    };
+    assert_eq!(
+        occt_left(&occt, false, &[&rust], routed, 1e-3, 0.),
+        Left::Skipped("routed in Rust")
+    );
 }

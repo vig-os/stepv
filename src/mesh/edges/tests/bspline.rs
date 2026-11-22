@@ -377,6 +377,44 @@ fn a_rational_full_circle_closes_through_its_seam_and_wraps() {
 }
 
 #[test]
+fn a_nearly_closed_curve_steps_across_its_seam_gap_within_d() {
+    // The full circle with its last control point pulled in by g = 0.99·d:
+    // its ends are g apart, within d, so the closed edge from t = 0.3 wraps
+    // through the gap. At r = 6 the chord bound sets the spans, and the
+    // first after the seam sags by about 0.45·d: a chord from the curve's
+    // end across the gap, instead of from its start, would lie about
+    // 1.08·d from the curve. Every point of every segment must lie within
+    // d of the exact curve.
+    let (d, r) = (1e-3, 6.);
+    let tol = Tolerance::from_mm(d, 1.5).unwrap();
+    let mut s = circle([0.; 3], r);
+    s.pts[8][0] -= 0.99 * d;
+    (s.t, s.closed) = ([0.3, 0.3], true);
+    let got = measure(&s, tol, &[(0.3, 1.), (0., 0.3)], &[s.eval(0.), s.eval(1.)]);
+    within("nearly closed", &got, tol);
+    let curve: Vec<[f64; 3]> = [(0.3, 1.), (0., 0.3)]
+        .iter()
+        .flat_map(|&(a, b)| dense(&s, a, b, d))
+        .collect();
+    let mut worst = 0f64;
+    for w in got.pts.windows(2) {
+        for k in 1..16 {
+            let f = f64::from(k) / 16.;
+            let q = [0, 1, 2].map(|i| w[0][i] + f * (w[1][i] - w[0][i]));
+            worst = worst.max(to_polyline(q, &curve));
+        }
+    }
+    // The samples' own chords sag by at most d/100.
+    assert!(
+        worst <= 1.01 * d,
+        "a chord lies {worst} from the curve, over d {d}"
+    );
+    for end in [s.eval(0.), s.eval(1.)] {
+        assert!(got.pts.contains(&end), "the curve's end {end:?}, exactly");
+    }
+}
+
+#[test]
 fn a_c0_knot_is_an_exact_corner_and_the_bound_holds_on_both_sides() {
     // Two cubic Béziers meeting at (3, 0, 0) at 45°: the interior knot has
     // multiplicity 3 = p.

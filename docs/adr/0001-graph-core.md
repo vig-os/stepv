@@ -588,6 +588,12 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     points then reversed, so the two senses give exactly reversed points), through the seam when the
     curve is closed (its ends within d) and it must (`vertex order` otherwise). A closed edge sweeps the
     whole curve; on an open curve it is `closed edge on an open curve`.
+  - **Steps (M1b round 2).** Every chord joins two points of the curve. A closed curve's ends can be
+    up to d apart (g), and a chord from the curve's end to the first point past its start would lie up
+    to about d + g from the curve; so both ends are emitted, joined by a step of length g, which lies
+    within g of the curve. So is a vertex farther than d·10⁻⁶ from its curve point. Nearer, the vertex
+    replaces it (a separate point would make a segment of rounding, whose direction is noise), which
+    can add d·10⁻⁶ to a chord's deviation. The turn at a step's ends is exempt, like a C0 knot's.
   - **`zero tangent`.** At a joint inside a C1 piece, an end leg that rounding could turn by over
     10⁻³·θ (no longer than 2⁻⁴⁶ of the span's largest coordinate, about 48 halvings' rounding, over
     10⁻³·θ) is a vanishing derivative, a possible cusp, and the edge is routed. A cusp inside a span
@@ -599,7 +605,9 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     bounds, and a file that can't be compared fails the gate (#200, #203). OCCT's own B-spline seams
     (twice in one face: healing closes a periodic face bounded by two loops with one, and no
     `EDGE_CURVE` names it) and the OCCT edges whose ends are those of an edge Rust routes are counted,
-    not compared, but only after they fail the comparison. `tests/data` gains a plate bounded by a
+    not compared, but only after they fail the comparison. A seam is exempt only when no Rust
+    polyline's ends are its ends (round 2): otherwise a Rust closed edge over part of its curve, whose
+    points all lie on OCCT's seam, would pass one way and have OCCT's edge skipped the other. `tests/data` gains a plate bounded by a
     cubic and a complex-form rational semicircle. On `tests/data`, nist-pmi and occt-import-js
     (88 files): 0 unmatched, 0 not compared, 2,111 B-spline polylines; worst 0.500·d (Rust's points
     from OCCT's polylines) and 1.057·d (OCCT's from Rust's); 211 OCCT seams and 12 edges routed in Rust

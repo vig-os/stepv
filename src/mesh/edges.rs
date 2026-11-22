@@ -18,12 +18,6 @@
 //! of a [`Tolerance`]: every chord lies within d of its curve, and
 //! consecutive segments turn by at most a.
 //!
-//! **Corners (B-splines):** the turn bound is exempt at a B-spline's C0
-//! knots (interior multiplicity ≥ its degree p), where the curve itself can
-//! have a corner, and at the seam of a closed B-spline, which nothing makes
-//! tangent-continuous. Those curve points are exact polyline points, so
-//! face meshing (M2/M3) must expect a corner at any of them; a degree-1
-//! B-spline is exactly its control polygon.
 //! - A line gets no interior points.
 //! - A circle arc of radius r and sweep θ takes
 //!   `n = max(n_min, ⌈max(θ/a, θ/(2·acos(1 − min(d/r, 1))))⌉)` equal
@@ -40,6 +34,16 @@
 //!   property both hold for the span, and consecutive chords turn by at
 //!   most a/2 + a/2 (ADR §2.6). Its vertices are located on the curve, and
 //!   one farther than d from it is routed (`vertex off curve`).
+//!
+//! **Corners (B-splines):** the turn bound is exempt at a B-spline's C0
+//! knots (interior multiplicity ≥ its degree p), where the curve itself can
+//! have a corner, at the seam of a closed B-spline, which nothing makes
+//! tangent-continuous, and at the ends of a step: the straight join of a
+//! vertex farther than d·10⁻⁶ from its curve point, or of a closed curve's
+//! two ends across its seam gap (≤ d), so that every chord joins two curve
+//! points. Those curve points are exact polyline points, so
+//! face meshing (M2/M3) must expect a corner at any of them; a degree-1
+//! B-spline is exactly its control polygon.
 //!
 //! **The sweep:** a vertex's parameter is its angle in the conic's frame,
 //! `atan2(y/B, x/A)`. The edge runs from its start's parameter to its end's,
