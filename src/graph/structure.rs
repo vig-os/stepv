@@ -740,7 +740,19 @@ pub(super) fn default_x(v: [f64; 3]) -> [f64; 3] {
 /// (`STEPConstruct_UnitContext::ComputeFactors`): the last length unit wins;
 /// an `SI_UNIT` is its prefix's metres; a `CONVERSION_BASED_UNIT` its factor's
 /// value times its SI target's prefix; anything else, or none, is 1.
-pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
+pub(crate) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
+    si_per_unit(g, rep, "LENGTH_UNIT").map_or(1., |f| f * 1000.)
+}
+
+/// Radians per plane angle unit of `rep`'s context, read as
+/// [`mm_per_unit`] reads lengths (a `DEGREE` is its factor's value, about
+/// 0.01745); 1 without one. A `CONICAL_SURFACE`'s semi-angle is in it.
+pub(crate) fn rad_per_unit(g: &Graph, rep: Node) -> f64 {
+    si_per_unit(g, rep, "PLANE_ANGLE_UNIT").unwrap_or(1.)
+}
+
+/// The SI value of the last unit of type `kind` in `rep`'s context.
+fn si_per_unit(g: &Graph, rep: Node, kind: &str) -> Option<f64> {
     let ctx = fields(g, rep, "REPRESENTATION")
         .ok()
         .and_then(|a| refers(&a, 2));
@@ -748,7 +760,7 @@ pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
         .and_then(|c| g.args_of(c, "GLOBAL_UNIT_ASSIGNED_CONTEXT"))
         .and_then(Result::ok);
     let Some(Value::List(units)) = units.as_ref().and_then(|a| a.first()) else {
-        return 1.;
+        return None;
     };
     // A simple SI_UNIT lists its NAMED_UNIT's dimensions first.
     let prefix = |n: Node| -> Option<f64> {
@@ -759,7 +771,7 @@ pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
             _ => 1.,
         })
     };
-    let mut mm = 1.;
+    let mut si = None;
     for u in units.iter().filter_map(|u| {
         if let Value::Ref(n) = u {
             Some(*n)
@@ -767,7 +779,7 @@ pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
             None
         }
     }) {
-        if !g.is_a(u, "LENGTH_UNIT") {
+        if !g.is_a(u, kind) {
             continue;
         }
         let factor = if g.is_a(u, "CONVERSION_BASED_UNIT") {
@@ -779,11 +791,9 @@ pub(super) fn mm_per_unit(g: &Graph, rep: Node) -> f64 {
         } else {
             prefix(u)
         };
-        if let Some(f) = factor {
-            mm = f * 1000.;
-        }
+        si = factor.or(si);
     }
-    mm
+    si
 }
 
 fn si_prefix(p: &str) -> Option<f64> {
