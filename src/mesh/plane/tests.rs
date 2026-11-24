@@ -5,7 +5,7 @@
 //! triangulation can't take exactly is routed with its reason.
 
 use super::*;
-use crate::graph::StepId;
+use crate::graph::{Reason, StepId};
 use crate::mesh::Tolerance;
 
 /// A STEP file under construction: lines and circles on planes.
@@ -114,7 +114,9 @@ impl F {
 
 const CTX: Context = Context {
     mm_per_unit: 1.,
+    rad_per_unit: 1.,
     uncertainty: 1e-7,
+    floored: false,
 };
 
 fn node(g: &Graph, id: u32) -> Node {
@@ -192,7 +194,8 @@ fn check(g: &Graph, p: &Polylines, m: &FaceMesh, outer: &[[f64; 2]], holes: &[Ve
     for t in &m.triangles {
         let [a, b, c] = t.map(|i| m.point(i as usize));
         let n = cross(sub(b, a), sub(c, a));
-        let twice = n[0] * m.normal[0] + n[1] * m.normal[1] + n[2] * m.normal[2];
+        let nm = m.normal(0);
+        let twice = n[0] * nm[0] + n[1] * nm[1] + n[2] * nm[2];
         assert!(twice > 0., "a zero-area or reversed triangle {t:?}");
         area += twice / 2.;
         let q = [0, 1].map(|k| (a[k] + b[k] + c[k]) / 3.);
@@ -212,7 +215,8 @@ fn check(g: &Graph, p: &Polylines, m: &FaceMesh, outer: &[[f64; 2]], holes: &[Ve
         assert_eq!(m.point(i), q, "vertex {i} is its edge point, bit for bit");
         assert!(q.iter().all(|c| c.is_finite()));
     }
-    let n = m.normal;
+    let n = m.normal(0);
+    assert!((0..m.x.len()).all(|i| m.normal(i) == n), "one exact normal");
     assert!((n[0] * n[0] + n[1] * n[1] + n[2] * n[2] - 1.).abs() < 1e-15);
     let _ = g;
 }
@@ -230,7 +234,7 @@ fn a_square_is_two_triangles_on_its_corners() {
     let m = m.unwrap();
     assert_eq!(m.triangles.len(), 2);
     assert_eq!(m.points.len(), 4);
-    assert_eq!(m.normal, [0., 0., 1.]);
+    assert_eq!(m.normal(0), [0., 0., 1.]);
     check(&g, &p, &m, &ring(&g, &p, &oes), &[]);
 }
 
@@ -256,7 +260,7 @@ fn a_square_on_a_tilted_plane_inverts_within_the_uncertainty() {
     let (_, _, m) = run(&f, face, false);
     let m = m.unwrap();
     assert_eq!(m.triangles.len(), 2);
-    assert_eq!(m.normal, [0., -0.6, 0.8]);
+    assert_eq!(m.normal(0), [0., -0.6, 0.8]);
 }
 
 #[test]
@@ -381,12 +385,12 @@ fn same_sense_f_flips_the_normal_and_the_winding() {
     let face = f.face(&[b], ax, false);
     let (g, p, m) = run(&f, face, false);
     let m = m.unwrap();
-    assert_eq!(m.normal, [-0., -0., -1.]);
+    assert_eq!(m.normal(0), [-0., -0., -1.]);
     check(&g, &p, &m, &ring(&g, &p, &oes), &[]);
     // Reversed in its shell, it faces +z again.
     let (_, _, r) = run(&f, face, true);
     let r = r.unwrap();
-    assert_eq!(r.normal, [0., 0., 1.]);
+    assert_eq!(r.normal(0), [0., 0., 1.]);
     check(&g, &p, &r, &ring(&g, &p, &oes), &[]);
 }
 
@@ -600,7 +604,7 @@ fn no_non_finite_output_at_large_coordinates() {
     for i in 0..m.points.len() {
         assert!(m.point(i).iter().all(|c| c.is_finite()));
     }
-    assert!(m.normal.iter().all(|c| c.is_finite()));
+    assert!(m.normal(0).iter().all(|c| c.is_finite()));
     assert_eq!(
         plate(1e100).unwrap_err(),
         Route::Face(Reason("rs-fail:coordinate"))

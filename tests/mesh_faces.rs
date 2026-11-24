@@ -1,6 +1,14 @@
-//! `mesh::plane` (ADR-0001 §2.6, M2) against OCCT, the golden reference:
-//! every planar face's Rust mesh area equals the kernel's `--topology` face
-//! area (`BRepGProp` on the exact face) within 1e-6 relative.
+//! `mesh::plane` (ADR-0001 §2.6, M2) and `mesh::analytic` (M3a) against
+//! OCCT, the golden reference: every planar face's Rust mesh area equals the
+//! kernel's `--topology` face area (`BRepGProp` on the exact face) within
+//! 1e-6 relative, and every cylinder's and cone's within the deflection's
+//! bound.
+//!
+//! **Cylinders and cones.** Their mesh is inscribed, its triangles' normals
+//! within a of the surface's, so it projects onto the surface with a
+//! Jacobian of at least cos a: its area is the exact face's within
+//! `A·(1 − cos a)`, plus `d·L` for the strip between the chords of its
+//! curved edges (length L) and their curves, plus the vertex gaps below.
 //!
 //! **The exact boundary.** The mesh is bounded by chords of the edge
 //! polylines, OCCT's area by the exact curves. So the mesh area is compared
@@ -18,6 +26,10 @@
 //!   off beyond the uncertainty leaves the face undefined: it is counted,
 //!   not compared, and Rust should route it (#207).
 //!
+//! **The context** is [`Context::of`]'s: the declared uncertainty, floored at
+//! 1e-7 mm (#210). Faces meshed or routed under a floored context are
+//! counted as `uncertainty:floored`.
+//!
 //! **The face join** (G7's, `graph_colors`): the kernel reports a part's
 //! faces in transfer order, with no STEP ids until M5, and
 //! [`stepv::graph::Colors::parts`] lists a product's faces in that order. A
@@ -26,15 +38,17 @@
 //! assumed: the counts agree, each pair is planar on both sides or on
 //! neither, and every kernel mesh vertex of a face lies in the graph's
 //! conservative box of its partner (G4). Where it fails (XCAF splits or
-//! healing reorders), each Rust area must fit an unused OCCT plane face's,
+//! healing reorders), each Rust area must fit an unused OCCT face's of its
+//! kind,
 //! the tightest bounds first. A file the kernel or the graph can't read, a
-//! planar face whose area fits no OCCT face, or a Rust normal not parallel
+//! face whose area fits no OCCT face, or a planar Rust normal not parallel
 //! to OCCT's fails the gate. Faces Rust routes are counted by reason.
 //!
 //! `STEPV_CORPUS` (paths, `:`-separated, files or directories) adds the
 //! local corpus. The perforated plate (ABC `00000046`, named by
 //! `STEPV_PLATE`) is meshed apart, Rust only, with its time and peak RSS
-//! reported.
+//! reported. `STEPV_TIMING` names a file whose planar, cylinder and cone
+//! faces are all meshed in Rust, timed, with the share meshed.
 
 mod corpus;
 mod stepgen;
@@ -48,7 +62,7 @@ use corpus::{apply, corpus_files, edges_of, invert, kernel_summary};
 use stepgen::{F, part_file};
 use stepv::Deflection;
 use stepv::graph::{self, Bound, Graph, Node, Value};
-use stepv::mesh::{Context, FaceMesh, Polylines, Tolerance, plane};
+use stepv::mesh::{Context, FaceMesh, Polylines, Tolerance, analytic, plane};
 use stepv::topology::{self, Surface};
 
 #[derive(Default, Debug)]
@@ -68,6 +82,10 @@ struct Tally {
     /// Faces whose OCCT normal is opposite to Rust's (shell orientation).
     opposite: usize,
     routed: BTreeMap<String, usize>,
+    /// Faces meshed or routed under a floored context (#210).
+    floored: usize,
+    /// The graph's faces in the compared parts (kept in the planar tally).
+    faces: usize,
     /// Meshed faces with a vertex off its curve beyond the uncertainty, not
     /// compared (#207).
     inconsistent: usize,
@@ -93,6 +111,37 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 fn norm(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
+}
+
+/// What the golden compares: faces on planes, and on cylinders or cones.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Plane = 0,
+    Analytic = 1,
+}
+
+/// `face`'s [`Kind`], if it is an `ADVANCED_FACE` of one.
+fn kind(g: &Graph, face: Node) -> Option<Kind> {
+    if !g.is_a(face, "ADVANCED_FACE") {
+        return None;
+    }
+    let s = g.args(face).ok().and_then(|a| at(a.get(2)))?;
+    if g.is_a(s, "PLANE") {
+        Some(Kind::Plane)
+    } else if g.is_a(s, "CYLINDRICAL_SURFACE") || g.is_a(s, "CONICAL_SURFACE") {
+        Some(Kind::Analytic)
+    } else {
+        None
+    }
+}
+
+/// An OCCT face's [`Kind`].
+fn occt_kind(f: &topology::Face) -> Option<Kind> {
+    match f.surface {
+        Surface::Plane { .. } => Some(Kind::Plane),
+        Surface::Cylinder { .. } | Surface::Cone { .. } => Some(Kind::Analytic),
+        _ => None,
+    }
 }
 
 /// The sum of the mesh's triangle areas.
@@ -235,10 +284,12 @@ fn vertex_gaps(g: &Graph, edge: Node, s: f64) -> Option<[(Node, f64); 2]> {
     Some([gap(1)?, gap(2)?])
 }
 
-/// A planar face's area as compared with OCCT's (module docs).
+/// A face's area as compared with OCCT's (module docs).
 struct Measured {
-    /// The mesh area plus the exact chord-to-curve areas.
+    /// The mesh area, plus on a plane the exact chord-to-curve areas.
     area: f64,
+    /// The relative slack: 1e-6, plus 1 − cos a on a cylinder or cone.
+    rel: f64,
     /// How far the exact area can be from `area`: B-spline chords, and
     /// vertices off their curves.
     bound: f64,
@@ -248,10 +299,19 @@ struct Measured {
     gap: f64,
 }
 
-/// `face`'s [`Measured`] area, from its mesh `m`; `None` when a loop can't
-/// be read.
-fn measure(g: &Graph, face: Node, m: &FaceMesh, p: &Polylines, s: f64, d: f64) -> Option<Measured> {
-    let n = m.normal;
+/// `face`'s [`Measured`] area, from its mesh `m` of kind `k`; `None` when a
+/// loop can't be read.
+fn measure(
+    g: &Graph,
+    face: Node,
+    k: Kind,
+    m: &FaceMesh,
+    p: &Polylines,
+    s: f64,
+    tol: Tolerance,
+) -> Option<Measured> {
+    let (d, a) = (tol.linear(), tol.angular());
+    let n = m.normal(0);
     let (mut exact, mut bound) = (0., 0.);
     // How far each vertex is from any of its curves: moving it onto them
     // moves every edge it ends.
@@ -286,6 +346,11 @@ fn measure(g: &Graph, face: Node, m: &FaceMesh, p: &Polylines, s: f64, d: f64) -
             for w in pts.windows(2) {
                 let (u, v) = (w[0], w[1]);
                 match curve {
+                    _ if k == Kind::Analytic => {
+                        if !g.is_a(basis, "LINE") {
+                            bound += d * norm(sub(v, u));
+                        }
+                    }
                     Some(Conic {
                         c,
                         x,
@@ -312,6 +377,11 @@ fn measure(g: &Graph, face: Node, m: &FaceMesh, p: &Polylines, s: f64, d: f64) -
     }
     Some(Measured {
         area: area(m) + exact,
+        rel: if k == Kind::Plane {
+            1e-6
+        } else {
+            1e-6 + (1. - a.cos())
+        },
         bound,
         normal: n,
         gap: gaps.values().fold(0., |a, &b| f64::max(a, b)),
@@ -319,16 +389,20 @@ fn measure(g: &Graph, face: Node, m: &FaceMesh, p: &Polylines, s: f64, d: f64) -
 }
 
 impl Measured {
-    /// Whether OCCT's `occt` area is this one's within 1e-6 relative plus
-    /// the bound.
+    /// Whether OCCT's `occt` area is this one's within its relative slack
+    /// plus the bound.
     fn fits(&self, occt: f64) -> bool {
-        (self.area - occt).abs() <= 1e-6 * occt + self.bound
+        (self.area - occt).abs() <= self.rel * occt + self.bound
     }
 
     /// Counts a match: exact when its bound is under a tenth of the gate's
-    /// 1e-6 (rounding in the file's vertices).
+    /// 1e-6 (rounding in the file's vertices); a cylinder's or cone's is
+    /// always within its bound, the worst relative difference recorded.
     fn tally(&self, occt: f64, all: &mut Tally) {
-        if self.bound > 1e-7 * occt {
+        if self.rel > 1e-6 {
+            all.bounded += 1;
+            all.worst = all.worst.max((self.area - occt).abs() / occt);
+        } else if self.bound > 1e-7 * occt {
             all.bounded += 1;
         } else {
             all.exact += 1;
@@ -352,11 +426,7 @@ fn face_points(part: &stepv::Part, placement: &[f64; 12]) -> Vec<Vec<[f64; 3]>> 
 
 /// Whether `face` is an `ADVANCED_FACE` on a `PLANE`.
 fn on_plane(g: &Graph, face: Node) -> bool {
-    g.is_a(face, "ADVANCED_FACE")
-        && g.args(face)
-            .ok()
-            .and_then(|a| at(a.get(2)))
-            .is_some_and(|s| g.is_a(s, "PLANE"))
+    kind(g, face) == Some(Kind::Plane)
 }
 
 /// Why the position join of `graph`'s faces to a prototype's fails, if it
@@ -372,9 +442,8 @@ fn join_fails(
         return Some(format!("{} faces, OCCT {}", graph.len(), proto.faces.len()));
     }
     for (k, (&f, of)) in graph.iter().zip(&proto.faces).enumerate() {
-        let occt_plane = matches!(of.surface, Surface::Plane { .. });
-        if on_plane(g, f) != occt_plane {
-            return Some(format!("face {k} #{}: planar on one side", g.id(f).0));
+        if kind(g, f) != occt_kind(of) {
+            return Some(format!("face {k} #{}: its kind on one side", g.id(f).0));
         }
         if let Bound::Box(bb) = b.node(f) {
             let size = (0..3).map(|k| bb.max[k] - bb.min[k]).fold(0., f64::max);
@@ -390,18 +459,23 @@ fn join_fails(
     None
 }
 
-/// One product's planar faces, meshed: each graph face on a plane with its
-/// [`Measured`] area, or routed (counted in `all`).
+/// One product's faces, meshed: each graph face on a plane, cylinder or
+/// cone with its [`Measured`] area, or routed (counted in `all`).
 struct Rust<'a> {
     g: &'a Graph,
     polylines: Polylines,
     ctx: Context,
-    d: f64,
+    tol: Tolerance,
 }
 
 impl Rust<'_> {
-    fn measure(&self, f: Node, here: &str, all: &mut Tally) -> Option<Measured> {
-        let mesh = match plane::mesh(self.g, f, &self.polylines, self.ctx, false) {
+    fn measure(&self, f: Node, k: Kind, here: &str, all: &mut Tally) -> Option<Measured> {
+        all.floored += usize::from(self.ctx.floored);
+        let mesh = match k {
+            Kind::Plane => plane::mesh(self.g, f, &self.polylines, self.ctx, false),
+            Kind::Analytic => analytic::mesh(self.g, f, &self.polylines, self.ctx, self.tol, false),
+        };
+        let mesh = match mesh {
             Ok(m) => m,
             Err(r) => {
                 *all.routed.entry(r.to_string()).or_default() += 1;
@@ -410,7 +484,7 @@ impl Rust<'_> {
         };
         let s = self.ctx.mm_per_unit;
         let id = self.g.id(f).0;
-        let Some(m) = measure(self.g, f, &mesh, &self.polylines, s, self.d) else {
+        let Some(m) = measure(self.g, f, k, &mesh, &self.polylines, s, self.tol) else {
             all.failing
                 .push(format!("{here} face #{id}: boundary unread"));
             return None;
@@ -428,16 +502,29 @@ impl Rust<'_> {
     /// position fails: each Rust area must fit an OCCT plane face's, each
     /// OCCT face used once, the tightest bounds matched first so a loose one
     /// can't take another face's partner.
-    fn by_value(&self, faces: &[Node], occt: &[&topology::Face], here: &str, all: &mut Tally) {
+    fn by_value(&self, faces: &[Node], occt: &[&topology::Face], here: &str, all: &mut [Tally; 2]) {
+        for k in [Kind::Plane, Kind::Analytic] {
+            self.by_value_of(k, faces, occt, here, &mut all[k as usize]);
+        }
+    }
+
+    fn by_value_of(
+        &self,
+        k: Kind,
+        faces: &[Node],
+        occt: &[&topology::Face],
+        here: &str,
+        all: &mut Tally,
+    ) {
         let mut left: Vec<f64> = occt
             .iter()
-            .filter(|f| matches!(f.surface, Surface::Plane { .. }))
+            .filter(|f| occt_kind(f) == Some(k))
             .map(|f| f.area)
             .collect();
         let mut mine: Vec<(Node, Measured)> = faces
             .iter()
-            .filter(|&&f| on_plane(self.g, f))
-            .filter_map(|&f| Some((f, self.measure(f, here, all)?)))
+            .filter(|&&f| kind(self.g, f) == Some(k))
+            .filter_map(|&f| Some((f, self.measure(f, k, here, all)?)))
             .collect();
         mine.sort_by(|a, b| a.1.bound.total_cmp(&b.1.bound));
         for (f, m) in mine {
@@ -451,7 +538,7 @@ impl Rust<'_> {
                     all.by_value += 1;
                 }
                 None => all.failing.push(format!(
-                    "{here} face #{}: area {} fits no OCCT plane face (unjoined)",
+                    "{here} face #{}: area {} fits no OCCT {k:?} face (unjoined)",
                     self.g.id(f).0,
                     m.area
                 )),
@@ -460,7 +547,7 @@ impl Rust<'_> {
     }
 }
 
-fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
+fn check(input: &Path, all: &mut [Tally; 2]) -> Result<(), String> {
     let g = Graph::open(input).map_err(|e| format!("graph: {e}"))?;
     let s = graph::structure(&g).map_err(|e| format!("structure: {e}"))?;
     let b = graph::bounds(&g, &s);
@@ -497,31 +584,28 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
         let parts = &kernel_parts[&p];
         let mine = colors.parts(&g, &s, p);
         if multi_file && mine.iter().all(|m| m.faces.is_empty()) {
-            all.external += 1;
+            all[0].external += 1;
             continue;
         }
-        all.products += 1;
+        all[0].products += 1;
+        all[0].faces += mine.iter().map(|m| m.faces.len()).sum::<usize>();
         let me = &s.products[p];
         let edges = edges_of(&g, &me.bodies);
-        let unc = me
-            .bodies
-            .first()
-            .and_then(|&r| graph::length_uncertainty(&g, r))
-            .map_or(0., |u| u * me.mm_per_unit);
+        let ctx = me.bodies.first().map_or_else(
+            || Context::new(me.mm_per_unit, 1., None),
+            |&r| Context::of(&g, r),
+        );
         let rust = Rust {
             g: &g,
             polylines: Polylines::build(&g, edges.iter().copied(), me.mm_per_unit, tol),
-            ctx: Context {
-                mm_per_unit: me.mm_per_unit,
-                uncertainty: unc,
-            },
-            d,
+            ctx,
+            tol,
         };
         let here = format!("{file} leaf {leaf}");
         let proto = |i: usize| &topo.prototypes[topo.parts[i].prototype];
         if mine.len() != parts.len() {
             // XCAF split the product unlike the graph: the leaf by value.
-            all.unjoined += 1;
+            all[0].unjoined += 1;
             let faces: Vec<Node> = mine
                 .iter()
                 .flat_map(|m| m.faces.iter().map(|f| f.face))
@@ -534,16 +618,17 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
             let faces: Vec<Node> = m.faces.iter().map(|f| f.face).collect();
             let points = face_points(&scene.parts[i], &topo.parts[i].transform);
             if join_fails(&g, &b, &faces, proto(i), &points).is_some() {
-                all.unjoined += 1;
+                all[0].unjoined += 1;
                 let occt: Vec<_> = proto(i).faces.iter().collect();
                 rust.by_value(&faces, &occt, &here, all);
                 continue;
             }
             for (&f, of) in faces.iter().zip(&proto(i).faces) {
-                let Surface::Plane { normal, .. } = of.surface else {
+                let Some(k) = occt_kind(of) else {
                     continue;
                 };
-                let Some(m) = rust.measure(f, &here, all) else {
+                let all = &mut all[k as usize];
+                let Some(m) = rust.measure(f, k, &here, all) else {
                     continue;
                 };
                 let id = g.id(f).0;
@@ -558,6 +643,9 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
                     continue;
                 }
                 m.tally(of.area, all);
+                let Surface::Plane { normal, .. } = of.surface else {
+                    continue;
+                };
                 // OCCT's normal is outward in the shell: Rust's ± it.
                 let c = dot(m.normal, normal);
                 if c.abs() < 1. - 1e-9 {
@@ -573,8 +661,8 @@ fn check(input: &Path, all: &mut Tally) -> Result<(), String> {
     Ok(())
 }
 
-fn run(files: &[PathBuf]) -> Tally {
-    let mut all = Tally::default();
+fn run(files: &[PathBuf]) -> [Tally; 2] {
+    let mut all = [Tally::default(), Tally::default()];
     for f in files {
         let stem = f.file_stem().unwrap_or_default();
         // The multi-file assemblies' top files: their parts live in other files.
@@ -582,44 +670,66 @@ fn run(files: &[PathBuf]) -> Tally {
             continue;
         }
         if let Err(e) = check(f, &mut all) {
-            all.not_compared.push(format!("{}: {e}", f.display()));
+            all[0].not_compared.push(format!("{}: {e}", f.display()));
         }
     }
+    let t = &all[0];
     eprintln!(
-        "mesh::plane: {} files, {} products ({} with external geometry skipped); planar faces: \
-         {} matched exactly (worst {:.2e} relative), {} within their bound; {} matched by value \
-         in {} unjoined parts; {} routed {:?}; {} with a vertex off its curve beyond the \
-         uncertainty, not compared (#207); {} failing; {} normals opposite to OCCT's; \
-         {} files not compared",
+        "mesh faces: {} files, {} products ({} with external geometry skipped), {} faces; {} \
+         matched by value in {} unjoined parts; {} files not compared",
         files.len(),
-        all.products,
-        all.external,
-        all.exact,
-        all.worst,
-        all.bounded,
-        all.by_value,
-        all.unjoined,
-        all.routed.values().sum::<usize>(),
-        all.routed,
-        all.inconsistent,
-        all.failing.len(),
-        all.opposite,
-        all.not_compared.len()
+        t.products,
+        t.external,
+        t.faces,
+        all[0].by_value + all[1].by_value,
+        t.unjoined,
+        t.not_compared.len()
     );
+    for (name, t) in ["planar", "cylinder and cone"].iter().zip(&all) {
+        eprintln!(
+            "mesh faces, {name}: {} matched exactly, {} within their bound (worst {:.2e} \
+             relative); {} routed {:?}; {} with a vertex off its curve beyond the uncertainty, \
+             not compared (#207); {} under a floored uncertainty (uncertainty:floored, #210); \
+             {} failing; {} normals opposite to OCCT's",
+            t.exact,
+            t.bounded,
+            t.worst,
+            t.routed.values().sum::<usize>(),
+            t.routed,
+            t.inconsistent,
+            t.floored,
+            t.failing.len(),
+            t.opposite,
+        );
+    }
     assert!(
-        all.not_compared.is_empty(),
+        all[0].not_compared.is_empty(),
         "{} files not compared:\n{}",
-        all.not_compared.len(),
-        all.not_compared.join("\n")
+        all[0].not_compared.len(),
+        all[0].not_compared.join("\n")
     );
+    let failing: Vec<&String> = all.iter().flat_map(|t| &t.failing).collect();
     assert!(
-        all.failing.is_empty(),
+        failing.is_empty(),
         "{} failing:\n{}",
-        all.failing.len(),
-        all.failing.join("\n")
+        failing.len(),
+        failing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
-    assert!(all.exact + all.bounded > 0, "no planar face compared");
+    assert!(all[0].exact + all[0].bounded > 0, "no planar face compared");
     all
+}
+
+/// A shaft's band: a cylinder of radius 2 from z = 0 to 10, bounded by two
+/// circles and no seam edge (ABC's form).
+fn shaft() -> PathBuf {
+    let mut f = F::new();
+    let faces = f.shaft([0.; 3], 2., 10., false);
+    let item = f.item(&faces, false);
+    part_file("shaft.step", 1e-7, &item, &f.out)
 }
 
 /// A 20 × 12 mm plate with 3 × 2 circular holes of radius 1.5: lines
@@ -669,7 +779,7 @@ fn perforated_plate() -> PathBuf {
 }
 
 #[test]
-fn tests_data_planar_faces_match_occts_areas() {
+fn tests_data_faces_match_occts_areas() {
     // `multifile/bracket.step` is left out: its parts' geometry is in the
     // other files, which the kernel reads and the graph doesn't (#92).
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
@@ -682,14 +792,20 @@ fn tests_data_planar_faces_match_occts_areas() {
     .map(|f| data.join(f))
     .to_vec();
     files.push(perforated_plate());
+    files.push(shaft());
     let all = run(&files);
-    assert!(all.exact >= 2, "the plate and tests/data's planes compare");
+    assert!(
+        all[0].exact >= 2,
+        "the plate and tests/data's planes compare"
+    );
+    assert!(all[1].bounded >= 1, "the shaft's band compares");
 }
 
 #[test]
-fn corpus_planar_faces_match_occts_areas() {
-    if let Some(files) = corpus_files("mesh_plane") {
-        run(&files);
+fn corpus_faces_match_occts_areas() {
+    if let Some(files) = corpus_files("mesh_faces") {
+        let all = run(&files);
+        assert!(all[1].bounded > 0, "no cylinder or cone compared");
     }
 }
 
@@ -716,7 +832,7 @@ fn abc_00000046_perforated_plate_meshes() {
     let Some(file) = std::env::var_os("STEPV_PLATE") else {
         let _ = writeln!(
             std::io::stderr(),
-            "mesh_plane plate: SKIPPED, nothing meshed: STEPV_PLATE is unset"
+            "mesh_faces plate: SKIPPED, nothing meshed: STEPV_PLATE is unset"
         );
         return;
     };
@@ -735,17 +851,13 @@ fn abc_00000046_perforated_plate_meshes() {
     };
     let tol = Tolerance::new(Deflection::PREVIEW, diag).unwrap();
     let me = &s.products[0];
-    let unc = graph::length_uncertainty(&g, me.bodies[0]).unwrap() * me.mm_per_unit;
     let read = t.elapsed();
     let t = Instant::now();
     let edges = edges_of(&g, &me.bodies);
     let p = Polylines::build(&g, edges.iter().copied(), me.mm_per_unit, tol);
     let polylines = t.elapsed();
     let t = Instant::now();
-    let ctx = Context {
-        mm_per_unit: me.mm_per_unit,
-        uncertainty: unc,
-    };
+    let ctx = Context::of(&g, me.bodies[0]);
     let (mut faces, mut holes, mut triangles) = (0, 0, 0);
     let mut routed = BTreeMap::new();
     for f in g.of_type("ADVANCED_FACE").filter(|&f| on_plane(&g, f)) {
@@ -760,7 +872,7 @@ fn abc_00000046_perforated_plate_meshes() {
     }
     let meshed = t.elapsed();
     eprintln!(
-        "mesh_plane plate: {} planar faces meshed (up to {holes} holes), {triangles} triangles, \
+        "mesh_faces plate: {} planar faces meshed (up to {holes} holes), {triangles} triangles, \
          routed {routed:?}; read + structure + boxes {:.2} s, polylines {:.2} s, faces {:.3} s; \
          peak RSS {:.0} MB (OCCT: 7.7 s, 4.2 GB)",
         faces,
@@ -771,4 +883,82 @@ fn abc_00000046_perforated_plate_meshes() {
     );
     assert!(routed.is_empty(), "{routed:?}");
     assert!(holes >= 2499, "the plate's faces have their holes");
+}
+
+#[test]
+fn a_files_faces_mesh_in_rust_timed() {
+    // `STEPV_TIMING` names a file (Ultimaker's 9066.STEP): every product's
+    // planar, cylinder and cone faces meshed in Rust, the share of all its
+    // faces meshed, and the time. Unset, the test skips loudly.
+    let Some(file) = std::env::var_os("STEPV_TIMING") else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "mesh_faces timing: SKIPPED, nothing meshed: STEPV_TIMING is unset"
+        );
+        return;
+    };
+    let file = PathBuf::from(file);
+    assert!(
+        file.is_file(),
+        "STEPV_TIMING={} is not a file",
+        file.display()
+    );
+    let t = Instant::now();
+    let g = Graph::open(&file).unwrap();
+    let s = graph::structure(&g).unwrap();
+    let diag = match graph::bounds(&g, &s).model() {
+        Bound::Box(b) => b.diagonal(),
+        Bound::Unknown(r) => panic!("no model box: {r}"),
+    };
+    let tol = Tolerance::new(Deflection::PREVIEW, diag).unwrap();
+    let read = t.elapsed();
+    let t = Instant::now();
+    let (mut all, mut meshed, mut triangles) = ([0usize; 2], [0usize; 2], 0);
+    let mut routed: BTreeMap<String, usize> = BTreeMap::new();
+    let mut faces = 0;
+    let colors = graph::colors(&g);
+    for (i, me) in s
+        .products
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.bodies.is_empty())
+    {
+        let edges = edges_of(&g, &me.bodies);
+        let p = Polylines::build(&g, edges.iter().copied(), me.mm_per_unit, tol);
+        let ctx = Context::of(&g, me.bodies[0]);
+        let mine: Vec<Node> = colors
+            .parts(&g, &s, i)
+            .iter()
+            .flat_map(|m| m.faces.iter().map(|f| f.face))
+            .collect();
+        faces += mine.len();
+        for f in mine {
+            let Some(k) = kind(&g, f) else { continue };
+            all[k as usize] += 1;
+            let m = match k {
+                Kind::Plane => plane::mesh(&g, f, &p, ctx, false),
+                Kind::Analytic => analytic::mesh(&g, f, &p, ctx, tol, false),
+            };
+            match m {
+                Ok(m) => {
+                    meshed[k as usize] += 1;
+                    triangles += m.triangles.len();
+                }
+                Err(r) => *routed.entry(r.to_string()).or_default() += 1,
+            }
+        }
+    }
+    let meshing = t.elapsed();
+    eprintln!(
+        "mesh_faces timing: {faces} faces; planar {}/{} and cylinder or cone {}/{} meshed in Rust \
+         ({:.1}% of all faces), {triangles} triangles, routed {routed:?}; read + structure + \
+         boxes {:.2} s, edges + faces {:.2} s",
+        meshed[0],
+        all[0],
+        meshed[1],
+        all[1],
+        100. * (meshed[0] + meshed[1]) as f64 / faces.max(1) as f64,
+        read.as_secs_f64(),
+        meshing.as_secs_f64()
+    );
 }

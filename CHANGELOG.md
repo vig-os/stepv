@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Rust mesher, M3a: cylinder and cone faces** ([#145](https://github.com/vig-os/stepv/issues/145), ADR-0001 §2.6):
+  - `stepv::mesh::analytic::mesh` meshes an `ADVANCED_FACE` on a `CYLINDRICAL_SURFACE` or
+    `CONICAL_SURFACE`: closed-form (u, v) inversion after the on-surface check, u unwrapped along each
+    loop, seam edges as the two sides of the cut, the cone's apex as a pole line, exact per-vertex
+    normals; every triangle checked against d and a, refined at its centroid where it isn't (no grid
+    rows along the straight rulings, which would fold at the apex)
+  - Bands with no seam edge (two circles, or a circle and a `VERTEX_LOOP` apex: the corpus norm) are
+    cut by a virtual seam that adds no point on any edge, so neighbouring faces stay watertight; a seam
+    across a hole routes `loop:seam-crosses`
+  - `stepv::mesh::face` holds what planar and curved faces share: `Context`, `FaceMesh` (now with
+    per-vertex normals), `Route`, the boundary walk, the CDT, the flood and the orientation check
+  - The golden is now `tests/mesh_faces.rs`: cylinder and cone faces match OCCT's areas within the
+    deflection's bound, planar faces as before; spheres and tori are M3b
+    ([#212](https://github.com/vig-os/stepv/issues/212))
+
 - **The Rust mesher, M2: planar faces with holes** ([#144](https://github.com/vig-os/stepv/issues/144), ADR-0001 §2.6):
   - `stepv::mesh::plane::mesh` meshes an `ADVANCED_FACE` on a `PLANE`, its outer loop and any number of
     holes, with `spade`'s constrained Delaunay triangulation (2.15.1, MIT OR Apache-2.0): the vertices
@@ -369,6 +384,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#13](https://github.com/vig-os/stepv/issues/13))
 
 ### Changed
+
+- **The length uncertainty is floored at 1e-7 mm** ([#210](https://github.com/vig-os/stepv/issues/210),
+  owner decision): the meshers use `max(declared, 1e-7 mm)`, OCCT's confusion tolerance, applied once
+  in `mesh::Context::of`; every face meshed under a raised context is recorded as `uncertainty:floored`
+- A `CONICAL_SURFACE`'s semi-angle is read in the file's plane angle unit (degrees in 69 corpus files)
 
 - **Breaking: `occt::run_streaming` takes a `cancel` flag** ([#85](https://github.com/vig-os/stepv/issues/85)):
   a new parameter, `cancel: Option<&AtomicBool>`, before `on_event`; setting the flag kills the

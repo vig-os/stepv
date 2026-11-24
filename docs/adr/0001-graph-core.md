@@ -639,7 +639,7 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - **Normals:** z, flipped by `same_sense` and by the caller's `reversed` (an `ORIENTED_FACE` or
     `ORIENTED_CLOSED_SHELL` `.F.`); triangles wind counter-clockwise about it. An edge `mesh::edges`
     routed routes the face (`edge routed: <reason>`).
-  - **The golden** (`tests/mesh_plane.rs`) compares each planar face's mesh area with the kernel's
+  - **The golden** (`tests/mesh_faces.rs`, `mesh_plane.rs` until M3a) compares each planar face's mesh area with the kernel's
     `--topology` face area, joined as G7 joins faces (transfer order, checked by count, surface type
     and box; a product's kernel parts are those of every leaf it is, one per prototype). The mesh is
     bounded by chords and OCCT's area by curves, so the exact circle and ellipse segment areas are
@@ -653,11 +653,25 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
     vertex off beyond the uncertainty; 0 failing, and every Rust normal parallel to OCCT's.
   - **ABC (local, 298 files):** 18,173 exact (worst 3.2e-9), 1,971 within their bound, 0 failing;
     but every ABC file declares an uncertainty of 1e-17 mm, so 5,703 faces route `curve:off-surface`
-    and 4,788 have a vertex off its curve beyond it (#210, a design question for the owner).
+    and 4,788 have a vertex off its curve beyond it (#210; the owner's floor, below, decides it).
   - **ABC `00000046` (`--release`, one thread):** its 6 planar faces, two of them with 2,499 holes
     each (the file has 2,499 cylinders; "1,250 holes" in §6 and `plan.md` undercounts them), mesh
     into 99,972 triangles in 0.11 s (graph and polylines 0.04 s more), at 45 MB peak RSS, against
     OCCT's 7.7 s and 4.2 GB.
+- **M3a's realised cylinder and cone faces** (#145), in `src/mesh/analytic.rs` on `src/mesh/face.rs`,
+  which planar faces now share. The rules are under "Faces in scope" below. The golden is
+  `tests/mesh_faces.rs`: a cylinder's or cone's mesh area within `A·(1 − cos a) + d·L` of OCCT's (L the
+  curved edges' length), plus the vertex gaps as for planes.
+  - **nist-pmi and occt-import-js (CI):** 4,761 cylinder and cone faces within their bound, 53 routed
+    (`curve:off-surface` 18, `loop:degenerate` 13, and others), 0 failing; planar unchanged (2,545 exact).
+  - **ABC (local, 298 of 300 files; `00000046` and `00000048` left out as in M2):** 31,584 of 36,905
+    cylinder and cone faces match (85.6%), 0 failing. None route `loop:seam-unresolved`, which ~16.5k
+    would without the virtual seam. 4,979 route `curve:off-surface`, beyond the floor.
+  - **The floor's effect on ABC (#210):** planar `curve:off-surface` fell from 5,703 to 1,269, and faces
+    with a vertex off its curve from 4,788 to 339. 24,848 planar faces match exactly and 4,159 within
+    their bound (M2: 18,173 and 1,971), 0 failing.
+  - **Ultimaker (`--release`, one thread):** 16,784 of 17,062 planar faces and 11,659 of 13,083 cylinder
+    and cone faces mesh in Rust (81.6% of its 34,840 faces): 574,206 triangles, edges and faces in 1.45 s.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The
@@ -802,6 +816,59 @@ Otherwise the face is routed (`curve:off-surface`).
 - **Periodic surfaces:** u is unwrapped continuously along each loop. A seam edge (the same
   `EDGE_CURVE` twice in one loop, with opposite senses) becomes the two sides of the cut.
 - **Sphere poles** are degenerate points, handled explicitly.
+- **The uncertainty floor (owner decision #210, 2026-11-24).** The meshers use
+  `max(declared length uncertainty, 1e-7 mm)` (`mesh::face::FLOOR_MM`). 1e-7 mm is OCCT's confusion
+  tolerance (`Precision::Confusion()`), so Rust and the golden oracle agree on what lies on a surface.
+  ABC's files declare 1e-17 mm, which neither f64 coordinates nor their own geometry meet. The floor is
+  applied once, where the mesh `Context` is built from the graph (`Context::of`), and an absent or
+  non-finite declaration is floored too. Every face meshed under a raised context is recorded as
+  `uncertainty:floored`. The ledger itself is M4a's. Rejected: a floor scaled to f64, whose factor
+  would have to be found empirically; and keeping the declared value, which caps ABC's coverage now
+  and leaves those faces with no mesher once OCCT leaves the runtime (#194).
+- **The virtual seam (owner decision, 2026-11-24, M3a).** Most exporters write a full band with no
+  seam edge: two circles, or one circle and a `VERTEX_LOOP` at a cone's apex. In ABC that is ~16.5k
+  cylinder and cone faces, against none with a seam edge. Such a loop comes back to its start a turn
+  away in u. The face is cut open by a constraint polyline in (u, v):
+  - it runs from A, a point of one wrapping loop, to B, the point of the other whose unwrapped u is
+    nearest (|u_B − u_A| ≤ π), or to the apex (a `VERTEX_LOOP`'s, or the cone's own when one wrapping
+    loop has no partner);
+  - its interior points are on the surface at the grid step, interior to the face and on no edge;
+  - it is used at u and a turn on, so the domain is simply connected: the first loop from A to A + 2π,
+    the seam to B + 2π, the second loop back to B, the seam back to A. Its two copies have one set of
+    3-D points, so the mesh is watertight once they are identified;
+  - a seam that would cross or touch a loop (a hole across it) routes `loop:seam-crosses`; any other
+    set of wrapping loops routes `loop:seam-unresolved`.
+
+  **Why:** it adds no point on any edge, so watertightness with the neighbouring faces is kept.
+  **Rejected:** cutting the loops at an isoline, which inserts points on shared edges and breaks it.
+- **The cone's apex** is a pole: on its line in (u, v), one 3-D point is a run of vertices, one every
+  half circle step in u, each with its own ruling's normal. The pole line's own triangles are
+  degenerate and dropped.
+- **Developable surfaces keep the chord bound.** A flat triangle on a cylinder or cone deviates from
+  the surface by at most `ρ_max·(1 − cos(Δu/2))`, a function of its u span alone. A boundary chord on a
+  ruling spans no u and sags nothing; one on a circle or curve spans the u its own sag already bounds by
+  d. So a triangle on a boundary chord sags no more than a chord over its span. Every triangle is
+  checked against that bound and a, and the face is routed (`rs-fail:deflection`) otherwise.
+- **M3a's Steiner points on developable surfaces.** The curved direction u is resolved at half the
+  circle step: the pole lines' vertices and a virtual seam's interior points. The straight direction v
+  takes no grid row. The bound needs none, and grid points beside a ruling edge into the apex make
+  folds: triangles (apex, two points of one ruling), collinear in 3-D, which the empty-circle test in
+  (u, v) accepts. On nist-pmi a full grid made 447 such folds, and on Ultimaker 32.7 M triangles in
+  197 s. Instead, where a triangle breaks the bound, its (u, v) centroid is added, which lies strictly
+  inside a triangle inside the face and so on no constraint. Refinement runs up to 16 rounds, and a face
+  still beyond the bound is routed. A fold at the apex (a 3-D area under 1e-9 of its edges' product)
+  routes `rs-fail:degenerate triangle` as a guard (#213). Spheres and tori (M3b) curve in both
+  directions and keep the grid.
+- **Doubly curved surfaces (sphere, torus; M3b, #212): boundary triangles up to about 4/3·d.** M1
+  flattens an edge until its chord sags d, and a flat triangle on that chord dips deeper than the chord
+  unless its third vertex lies in the chord's diametral disk. On a sphere of radius R, a triangle whose
+  sides each sag at most d (side s with `R − √(R² − s²/4) ≤ d`) lies deepest at its circumcentre when
+  it is acute, `R − √(R² − ρ_c²)`. Its largest angle is at least 60°, so `ρ_c = s/(2·sin C) ≤ s/√3`,
+  `ρ_c² ≤ (4/3)·(s/2)²`, and the depth is at most `R − √(R² − (4/3)·(2Rd − d²)) = (4/3)·d·(1 + O(d/R))`.
+  An obtuse triangle is deepest on its longest side, at most d. So boundary triangles on doubly curved
+  surfaces are held to that bound, and interior triangles, whose sides are grid steps, stay at d or
+  below. Rejected: edges at d/2 (a cost on every edge of every face) and Steiner points next to the
+  boundary.
 - **Triangulation:** a constrained Delaunay triangulation in (u, v), plus interior Steiner points on
   the curved directions at the deflection's step. Triangles outside the outer loop or inside a hole are
   removed by a flood from the constraints.
@@ -1212,7 +1279,7 @@ run memory-bounded, one heavy job at a time.
 | **M1a** Analytic edge polylines | `mesh::edges`: LINE/CIRCLE/ELLIPSE (direct or via `SURFACE_CURVE`/`SEAM_CURVE`), the clamped circle count and the ellipse bound of §2.6, one polyline per `EDGE_CURVE`, shared and oriented | Unit tests: chordal error ≤ d and turning angle ≤ a on arcs with radii from 1e-3 to 1e3 mm (no NaN, d > r included) and on ellipses with B/A down to 0.01; two faces sharing an edge get identical points in opposite order | `nix develop -c cargo test mesh::edges` |
 | **M1b** B-spline edge polylines (MVP, required) | De Boor evaluation and knot-insertion subdivision, rational weights > 0, complex-form curves, flattened to the same contract | As M1a, plus corpus curves against OCCT's edge polylines from `--edges`: within d | `nix develop -c cargo test mesh::edges` |
 | **M2** Planar faces with holes | Plane inversion, `spade` CDT with the outer loop and holes, flood removal, exact normals, routing on `try_add_constraint` failure | Area equals the topology's face area within 1e-6 relative on planar corpus faces; the 1,250-hole plate (ABC `00000046`) meshes, with its time and memory reported against OCCT's 7.7 s and 4.2 GB | `nix develop -c cargo test mesh::plane` |
-| **M3** Cylinder, cone, sphere, torus | Closed-form (u, v) inversion after the on-surface check, u unwrapped on periodic surfaces, seams, poles, Steiner grid at the deflection step | Fixture solids (full and partial cylinders, cones to the apex, spheres with poles, tori, a cylinder–cylinder intersection with B-spline edges) mesh watertight (every interior edge used by exactly two triangles); area within the deflection's bound of the topology's area | `nix develop -c cargo test mesh::analytic` |
+| **M3** Cylinder, cone, sphere, torus (split: **M3a** cylinder and cone, seams, poles and the #210 floor, #145; **M3b** sphere and torus, #212) | Closed-form (u, v) inversion after the on-surface check, u unwrapped on periodic surfaces, seams, poles, Steiner grid at the deflection step | Fixture solids (full and partial cylinders, cones to the apex, spheres with poles, tori, a cylinder–cylinder intersection with B-spline edges) mesh watertight (every interior edge used by exactly two triangles); area within the deflection's bound of the topology's area | `nix develop -c cargo test mesh::analytic` |
 | **M4a** Classify + ledger + rayon meshing | `classify`, `mesh_product`, the ledger with reason signatures, rayon over products, the ledger in `--info`; `just fastpath-corpus` runs both gates | **The surface gate** (every triangle within d of the exact surface) and **the OCCT gate** (sampled symmetric Hausdorff ≤ 2·d per product, distances recorded): 0 failures over the corpus; `Part::is_well_formed` on every Rust part | `nix develop -c cargo test --test fastpath` and `nix develop -c just fastpath-corpus` |
 | **M4b** The combined view | The viewer and the CLI combining Rust products with OCCT's routed ones (OCCT still runs on the whole file), the viewer's ledger status line, the cache key's `mesh::VERSION`, an entry only for a complete composed scene | Headless viewer test: Rust products replace their placeholders before `Done`, OCCT's routed ones at `Done`, and nothing is drawn twice; changing `mesh::VERSION` misses the cache; a killed OCCT run caches nothing | `nix develop -c cargo test --test view` and `nix develop -c cargo test --test cache` |
 | **M5** The kernel transfers only routed products | `stepv-occt --products <ids>` via `TransferEntity`, face and edge STEP entity ids in the output, the Rust side passing only routed products | **CI gate:** geometry and colours of routed products equal a full XCAF run on `tests/data`, `nist-pmi` and the G7 fixtures; the full corpus is recorded in the PR; **the timing report on Ultimaker:** first Rust product, first full view, the Rust share of products and triangles, against 42 s OCCT-only | `nix develop -c cargo test --test kernel_products` and `nix develop -c just fastpath-bench real-assembly` |

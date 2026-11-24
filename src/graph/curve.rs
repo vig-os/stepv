@@ -5,6 +5,7 @@
 //! `VERTEX_POINT`, in mm.
 
 use super::structure::{fields, frame, real, refers};
+pub(crate) use super::structure::{mm_per_unit, rad_per_unit};
 use super::{Graph, MAX_DEPTH, Node, Reason, TypeName, Value};
 
 /// A circle or an ellipse in mm: `c + a·cos t·x + b·sin t·y`, with x and y
@@ -342,4 +343,68 @@ pub(crate) fn plane(g: &Graph, p: Node, s: f64) -> Result<[[f64; 3]; 4], Reason>
     }
     let col = |k: usize| [f[k], f[4 + k], f[8 + k]];
     Ok([col(3), col(0), col(1), col(2)])
+}
+
+/// A developable elementary surface's shape (ISO 10303-42 §4.4), in its
+/// frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Elementary {
+    /// `CYLINDRICAL_SURFACE`: radius r.
+    Cylinder,
+    /// `CONICAL_SURFACE`: radius r at the frame's origin, this semi-angle in
+    /// radians, in (0, π/2).
+    Cone(f64),
+}
+
+/// A `CYLINDRICAL_SURFACE` or `CONICAL_SURFACE` at `s` mm and `rad`
+/// radians per unit: its origin and unit axes x, y, z, its radius r (> 0, or
+/// ≥ 0 on a cone), and its shape, all finite. Any other surface is routed
+/// by its type (`surface:SPHERICAL_SURFACE`, M3b).
+pub(crate) fn elementary(
+    g: &Graph,
+    n: Node,
+    s: f64,
+    rad: f64,
+) -> Result<([[f64; 3]; 4], f64, Elementary), Reason> {
+    let cone = g.is_a(n, "CONICAL_SURFACE");
+    if !cone && !g.is_a(n, "CYLINDRICAL_SURFACE") {
+        return Err(if g.is_a(n, "SPHERICAL_SURFACE") {
+            Reason("surface:SPHERICAL_SURFACE")
+        } else if g.is_a(n, "TOROIDAL_SURFACE") {
+            Reason("surface:TOROIDAL_SURFACE")
+        } else {
+            Reason("surface:not analytic")
+        });
+    }
+    let bad = Reason("malformed surface");
+    let a = g.args(n).map_err(|_| bad)?;
+    let f = refers(&a, 1).and_then(|p| frame(g, p, s).ok()).ok_or(bad)?;
+    let r = num(a.get(2)).map(|r| r * s).ok_or(bad)?;
+    let shape = if cone {
+        let t = num(a.get(3)).ok_or(bad)? * rad;
+        if !(t > 0. && t < std::f64::consts::FRAC_PI_2) {
+            return Err(Reason("surface:degenerate cone"));
+        }
+        Elementary::Cone(t)
+    } else {
+        Elementary::Cylinder
+    };
+    let ok = f.iter().all(|v| v.is_finite()) && r.is_finite();
+    // A cone may have radius 0 at its origin (its apex); a cylinder can't.
+    if !ok || r < 0. || (r == 0. && !cone) {
+        return Err(Reason("surface:degenerate radius"));
+    }
+    let col = |k: usize| [f[k], f[4 + k], f[8 + k]];
+    Ok(([col(3), col(0), col(1), col(2)], r, shape))
+}
+
+/// A `FACE_BOUND`'s or `FACE_OUTER_BOUND`'s `VERTEX_LOOP` vertex, or `None`
+/// when its loop is not a vertex loop.
+pub(crate) fn vertex_loop(g: &Graph, b: Node) -> Option<Node> {
+    let a = ["FACE_BOUND", "FACE_OUTER_BOUND"]
+        .iter()
+        .find(|t| g.is_a(b, t))
+        .and_then(|t| fields(g, b, t).ok())?;
+    let lp = refers(&a, 1).filter(|&l| g.is_a(l, "VERTEX_LOOP"))?;
+    refers(&fields(g, lp, "VERTEX_LOOP").ok()?, 1)
 }
