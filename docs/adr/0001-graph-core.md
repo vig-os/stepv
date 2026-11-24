@@ -615,6 +615,49 @@ pub fn query(g: &Graph, s: &Structure, b: &Bounds, filter: &str, limit: Limit)
   - **Ultimaker (`--release`, one thread):** 96,476 of 96,561 edges now get a polyline (M1a: 80,500),
     465,369 points in about 580 ms (M1a: 270 ms for the analytic ones). The 85 left are `zero
     tangent`: near-cusps where the tangent still turns at spans of about 10⁻⁹ mm.
+- **M2's realised planar faces** (#144), in `src/mesh/plane.rs` (`mesh::plane::mesh`, one
+  `ADVANCED_FACE` at a time; the shell walk and the ledger are M4a's):
+  - **Boundary.** Each bound's `EDGE_LOOP` is its oriented edges' shared polylines, joined at
+    bit-identical ends (`loop:open` otherwise) and reversed for `orientation = .F.`. The mesh's
+    vertices are exactly those points; a plane adds none, so no point lies on a constraint but its
+    ends. Each vertex keeps the `EdgePoint` the walk first met it by.
+  - **The on-plane check** is `|(p − o)·z| ≤ uncertainty + 8ε·(|p| + |o|)`: the second term is f64's
+    rounding of the distance, under which "within the uncertainty" can't be decided. ABC `00000046`
+    writes 1e-17 mm, and its side planes' normals carry a −1.8e-16 component, so a vertex exactly on
+    the plane computes 9e-17 off it.
+  - **CDT.** Every point is inserted before any constraint, so a later point can't land on one.
+    `try_add_constraint` returning nothing is `rs-fail:cdt-crossing`, more than one edge (it passes a
+    vertex) `rs-fail:cdt-touching`, and a constraint that already exists `rs-fail:loops-overlap`. A
+    loop through one point twice is `loop:self-touching`, fewer than three points `loop:degenerate`,
+    two different 3-D points at one (u, v) `rs-fail:coincident`. Two loops may share a vertex: a hole
+    touching the outer loop at a vertex meshes, and at a point inside a segment it is routed.
+  - **The flood needs no outer loop.** It starts across the convex hull from the outer face, and every
+    constraint it crosses toggles inside and outside, so a face with only `FACE_BOUND`s meshes like
+    one with a `FACE_OUTER_BOUND`. ISO 10303-42 puts the face left of each oriented bound, seen from
+    its topological normal (the plane's z, or −z without `same_sense`): every segment's face on that
+    side must be inside, else `rs-fail:orientation`. Both are combinatorial, so the check is exact.
+  - **Normals:** z, flipped by `same_sense` and by the caller's `reversed` (an `ORIENTED_FACE` or
+    `ORIENTED_CLOSED_SHELL` `.F.`); triangles wind counter-clockwise about it. An edge `mesh::edges`
+    routed routes the face (`edge routed: <reason>`).
+  - **The golden** (`tests/mesh_plane.rs`) compares each planar face's mesh area with the kernel's
+    `--topology` face area, joined as G7 joins faces (transfer order, checked by count, surface type
+    and box; a product's kernel parts are those of every leaf it is, one per prototype). The mesh is
+    bounded by chords and OCCT's area by curves, so the exact circle and ellipse segment areas are
+    added per chord; a B-spline chord adds at most d·|chord|, and a vertex off its line or conic by g
+    within the file's uncertainty moves every edge it ends, by at most g·(L + 2g). A vertex off
+    beyond the uncertainty leaves the face undefined: counted, not compared; Rust should route it
+    (#207). Where the join fails, each Rust area must fit an unused OCCT plane face's, the tightest
+    bounds first. On `tests/data`, nist-pmi and occt-import-js (88 files), in CI: 2,543 faces within
+    1e-6 relative with no bound (worst 5.3e-8), 243 within their bound, 350 of all of them by value
+    in 9 unjoined parts; 6 routed (`loop:self-touching` 3, `rs-fail:coincident` 3; #208), 2 with a
+    vertex off beyond the uncertainty; 0 failing, and every Rust normal parallel to OCCT's.
+  - **ABC (local, 298 files):** 18,173 exact (worst 3.2e-9), 1,971 within their bound, 0 failing;
+    but every ABC file declares an uncertainty of 1e-17 mm, so 5,703 faces route `curve:off-surface`
+    and 4,788 have a vertex off its curve beyond it (#210, a design question for the owner).
+  - **ABC `00000046` (`--release`, one thread):** its 6 planar faces, two of them with 2,499 holes
+    each (the file has 2,499 cylinders; "1,250 holes" in §6 and `plan.md` undercounts them), mesh
+    into 99,972 triangles in 0.11 s (graph and polylines 0.04 s more), at 45 MB peak RSS, against
+    OCCT's 7.7 s and 4.2 GB.
 - **G6b's realised replacement** (#139):
   - No placeholder outlives `Done`. `Placeholders::replace(delivered)` drops each leaf the kernel
     meshed, then `Placeholders::done` drops the rest and counts them: "N without geometry". The

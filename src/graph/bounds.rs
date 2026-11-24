@@ -779,7 +779,7 @@ fn weights(v: Option<&Value<'_>>, out: &mut Vec<f64>) {
 }
 
 mod fit;
-pub use fit::{Fit, Fits, fits};
+pub use fit::{Fit, Fits, fits, uncertainty as length_uncertainty};
 
 #[cfg(test)]
 mod tests;

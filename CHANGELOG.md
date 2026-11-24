@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The Rust mesher, M2: planar faces with holes** ([#144](https://github.com/vig-os/stepv/issues/144), ADR-0001 §2.6):
+  - `stepv::mesh::plane::mesh` meshes an `ADVANCED_FACE` on a `PLANE`, its outer loop and any number of
+    holes, with `spade`'s constrained Delaunay triangulation (2.15.1, MIT OR Apache-2.0): the vertices
+    are exactly the shared edge polylines' points, so neighbouring faces meet watertight
+  - A flood from the outside, toggled by the constraints, keeps the face (no outer loop needed); every
+    loop is checked against the face's topological normal; normals are exact
+  - Crossing or touching constraints, open, degenerate or self-touching loops, points off the plane and
+    routed edges route the face with a reason; nothing is split, moved or added
+  - Each planar face's area equals OCCT's within 1e-6 relative (plus the exact chord-to-curve areas)
+    on `tests/data`, nist-pmi and occt-import-js, checked in CI; ABC `00000046`'s plate (two faces
+    with 2,499 holes each) meshes in 0.11 s and 45 MB (OCCT: 7.7 s, 4.2 GB)
 - **The Rust mesher, M1b: B-spline edge polylines** ([#143](https://github.com/vig-os/stepv/issues/143), ADR-0001 §2.6):
   - `stepv::mesh::Polylines` also flattens `B_SPLINE_CURVE_WITH_KNOTS` edges (rational or not, simple
     or complex, directly or through a `SURFACE_CURVE`/`SEAM_CURVE`): de Boor blossoms and de Casteljau
